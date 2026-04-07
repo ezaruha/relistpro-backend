@@ -297,6 +297,59 @@ app.post('/api/vinted/items/:itemId/activate', auth, async (req, res) => {
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
+// ═══ PHOTO RE-UPLOAD — download from CDN then re-upload before old item is deleted ═══
+async function reuploadPhotos(session, photos) {
+  const domain = session.domain || 'www.vinted.co.uk';
+  const results = [];
+  for (const photo of photos) {
+    try {
+      const photoUrl = photo.full_size_url || photo.url || photo.high_resolution?.url;
+      if (!photoUrl) { results.push({ id: photo.id, orientation: photo.orientation || 0 }); continue; }
+
+      // Download from CDN (public URLs, no auth needed)
+      const imgResp = await fetch(photoUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+      });
+      if (!imgResp.ok) { results.push({ id: photo.id, orientation: photo.orientation || 0 }); continue; }
+      const imgBuffer = await imgResp.arrayBuffer();
+
+      // Re-upload to Vinted (do NOT set Content-Type — let fetch set multipart boundary)
+      const uuid = crypto.randomBytes(16).toString('hex');
+      const form = new FormData();
+      form.append('photo[type]', 'item');
+      form.append('photo[temp_uuid]', uuid);
+      form.append('photo[file]', new Blob([imgBuffer], { type: 'image/jpeg' }), 'photo.jpg');
+
+      const uploadResp = await fetch(`https://${domain}/api/v2/photos`, {
+        method: 'POST',
+        headers: {
+          'Cookie': session.cookies,
+          'X-CSRF-Token': session.csrf,
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        },
+        body: form
+      });
+
+      if (uploadResp.ok) {
+        const data = await uploadResp.json();
+        const newId = data.photo?.id || data.id;
+        if (newId) {
+          results.push({ id: newId, orientation: photo.orientation || 0 });
+          console.log(`[RP] Photo ${photo.id} → ${newId}`);
+          await new Promise(r => setTimeout(r, 300));
+          continue;
+        }
+      }
+      console.log(`[RP] Photo reupload failed for ${photo.id}: ${uploadResp.status}`);
+    } catch (e) {
+      console.log(`[RP] Photo reupload error for ${photo.id}:`, e.message);
+    }
+    // Fallback: keep original ID (may not work after deletion, but better than nothing)
+    results.push({ id: photo.id, orientation: photo.orientation || 0 });
+  }
+  return results;
+}
+
 // ═══ DRAFT PAYLOAD BUILDER (mirrors DOTB's qd() / _b() functions) ═══
 function buildDraftPayload(item) {
   // price can be {amount: "10.00", currency_code: "GBP"} or a plain number
@@ -421,8 +474,13 @@ app.post('/api/vinted/items/:itemId/repost', auth, async (req, res) => {
     const item = (await getResp.json()).item;
     if (!item) return res.status(404).json({ error: 'Item not found in response' });
 
-    // 2. Create new draft FIRST (so original is never lost if something fails)
+    // 2. Re-upload photos BEFORE touching original (CDN URLs still valid while item exists)
+    console.log(`[RP] Reuploading ${(item.photos||[]).length} photos for ${itemId}...`);
+    const freshPhotos = await reuploadPhotos(session, item.photos || []);
+
+    // 3. Create new draft with fresh photo IDs
     const draft = buildDraftPayload(item);
+    draft.assigned_photos = freshPhotos;
     const uuid = draft.temp_uuid;
     const createResp = await vintedFetch(session, '/api/v2/item_upload/drafts', {
       method: 'POST',
@@ -436,12 +494,12 @@ app.post('/api/vinted/items/:itemId/repost', auth, async (req, res) => {
     const newId = String(newDraft?.id || '');
     if (!newId) return res.status(500).json({ error: 'No draft id returned' });
 
-    // 3. Hide original, short delay, then delete (DOTB pattern)
+    // 4. Hide original, short delay, then delete (DOTB pattern)
     await vintedFetch(session, `/api/v2/items/${itemId}/is_hidden`, { method: 'PUT', body: { is_hidden: true } });
     await new Promise(r => setTimeout(r, 400 + Math.random() * 400));
     await vintedFetch(session, `/api/v2/items/${itemId}/delete`, { method: 'POST' });
 
-    // 4. Short delay then publish the new draft
+    // 5. Short delay then publish the new draft
     await new Promise(r => setTimeout(r, 500 + Math.random() * 500));
     const completionDraft = { ...draft, id: parseInt(newId) };
     const completeResp = await vintedFetch(session, `/api/v2/item_upload/drafts/${newId}/completion`, {
