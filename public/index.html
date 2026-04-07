@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RelistPro Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0a0a0a;--card:#141414;--card2:#1c1c1c;--border:#252525;
+  --text:#e2e8f0;--sub:#94a3b8;--accent:#6366f1;--accent2:#818cf8;
+  --green:#22c55e;--amber:#f59e0b;--red:#ef4444;--blue:#3b82f6;
+  --radius:10px;--shadow:0 4px 24px rgba(0,0,0,.5);
+}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh;overflow-x:hidden}
+a{color:var(--accent);text-decoration:none}
+button{cursor:pointer;border:none;font-family:inherit;font-size:14px;transition:.15s}
+
+/* ── Login ── */
+#loginScreen{display:flex;align-items:center;justify-content:center;min-height:100vh;background:radial-gradient(ellipse at 50% 0%,#1e1b4b 0%,var(--bg) 60%)}
+.login-box{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:40px;width:360px;box-shadow:var(--shadow)}
+.login-box h1{font-size:28px;font-weight:700;margin-bottom:4px;background:linear-gradient(135deg,#fff,var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.login-box p{color:var(--sub);font-size:14px;margin-bottom:28px}
+.tab-switcher{display:flex;background:var(--card2);border-radius:8px;padding:3px;margin-bottom:24px;gap:3px}
+.tab-switcher button{flex:1;padding:7px;border-radius:6px;background:transparent;color:var(--sub);font-size:13px}
+.tab-switcher button.active{background:var(--accent);color:#fff}
+.field{margin-bottom:14px}
+.field label{display:block;font-size:12px;font-weight:500;color:var(--sub);margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em}
+.field input{width:100%;background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;color:var(--text);font-size:14px;outline:none;transition:.15s}
+.field input:focus{border-color:var(--accent)}
+.btn-primary{width:100%;background:var(--accent);color:#fff;border-radius:8px;padding:11px;font-weight:600;font-size:14px;margin-top:6px}
+.btn-primary:hover{background:var(--accent2)}
+.err{color:var(--red);font-size:13px;margin-top:10px;display:none}
+
+/* ── App Shell ── */
+#app{display:none;height:100vh;display:none;flex-direction:column}
+#app.visible{display:flex}
+header{background:var(--card);border-bottom:1px solid var(--border);padding:0 24px;display:flex;align-items:center;height:56px;gap:16px;position:sticky;top:0;z-index:100}
+.logo{font-size:18px;font-weight:700;background:linear-gradient(135deg,#fff,var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-right:8px;white-space:nowrap}
+nav{display:flex;gap:2px;flex:1}
+nav button{padding:6px 14px;border-radius:7px;background:transparent;color:var(--sub);font-size:14px}
+nav button.active,nav button:hover{background:rgba(99,102,241,.12);color:var(--text)}
+nav button.active{color:var(--accent)}
+.hdr-right{display:flex;align-items:center;gap:10px;margin-left:auto}
+.plan-badge{font-size:11px;font-weight:700;padding:3px 9px;border-radius:20px;text-transform:uppercase;letter-spacing:.05em}
+.plan-badge.free{background:rgba(148,163,184,.1);color:var(--sub)}
+.plan-badge.pro{background:rgba(99,102,241,.15);color:var(--accent2)}
+.plan-badge.business{background:rgba(245,158,11,.15);color:var(--amber)}
+.hdr-user{font-size:13px;color:var(--sub)}
+.btn-sm{padding:5px 12px;border-radius:6px;font-size:12px;font-weight:600;background:var(--card2);border:1px solid var(--border);color:var(--text)}
+.btn-sm:hover{border-color:var(--accent);color:var(--accent)}
+main{flex:1;overflow-y:auto;padding:24px;max-width:1200px;width:100%;margin:0 auto}
+
+/* ── Cards ── */
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:24px}
+.stat-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
+.stat-card .label{font-size:11px;font-weight:600;color:var(--sub);text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px}
+.stat-card .value{font-size:26px;font-weight:700;color:var(--text)}
+.stat-card .sub{font-size:12px;color:var(--sub);margin-top:4px}
+.stat-card.green .value{color:var(--green)}
+.stat-card.accent .value{color:var(--accent2)}
+
+/* ── Section ── */
+.section{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:20px;overflow:hidden}
+.section-hdr{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.section-hdr h2{font-size:15px;font-weight:600}
+.section-hdr .count{background:var(--card2);border:1px solid var(--border);border-radius:20px;padding:2px 8px;font-size:11px;color:var(--sub)}
+.section-hdr .ml{margin-left:auto}
+
+/* ── Table ── */
+.tbl{width:100%;border-collapse:collapse}
+.tbl th{text-align:left;padding:10px 16px;font-size:11px;font-weight:600;color:var(--sub);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--border)}
+.tbl td{padding:10px 16px;font-size:13px;border-bottom:1px solid rgba(37,37,37,.5);vertical-align:middle}
+.tbl tr:last-child td{border-bottom:none}
+.tbl tr:hover td{background:rgba(255,255,255,.02)}
+.tbl img{width:40px;height:40px;object-fit:cover;border-radius:6px;background:var(--card2)}
+.item-title{font-weight:500;max-width:240px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600;text-transform:capitalize}
+.badge.active{background:rgba(34,197,94,.1);color:var(--green)}
+.badge.draft{background:rgba(245,158,11,.1);color:var(--amber)}
+.badge.sold{background:rgba(99,102,241,.1);color:var(--accent2)}
+.badge.hidden{background:rgba(148,163,184,.1);color:var(--sub)}
+.badge.reserved{background:rgba(59,130,246,.1);color:var(--blue)}
+
+/* ── Buttons ── */
+.btn-repost{background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.2);color:var(--accent2);border-radius:6px;padding:4px 10px;font-size:12px;font-weight:500}
+.btn-repost:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
+.btn-repost:disabled{opacity:.4;cursor:not-allowed}
+
+/* ── Filters ── */
+.filter-bar{padding:14px 16px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.filter-bar input[type=text]{background:var(--card2);border:1px solid var(--border);border-radius:7px;padding:7px 12px;color:var(--text);font-size:13px;width:220px;outline:none}
+.filter-bar input:focus{border-color:var(--accent)}
+.filter-btn{padding:5px 12px;border-radius:6px;background:var(--card2);border:1px solid var(--border);color:var(--sub);font-size:12px}
+.filter-btn.active{background:rgba(99,102,241,.1);border-color:rgba(99,102,241,.3);color:var(--accent2)}
+
+/* ── Chart ── */
+.chart-wrap{padding:20px;position:relative;height:280px}
+.period-tabs{display:flex;gap:4px;padding:16px 20px 0;border-bottom:1px solid var(--border)}
+.period-tabs button{padding:6px 14px;border-radius:7px 7px 0 0;background:transparent;border:1px solid transparent;color:var(--sub);font-size:13px;border-bottom:none;margin-bottom:-1px}
+.period-tabs button.active{background:var(--card);border-color:var(--border);border-bottom-color:var(--card);color:var(--text)}
+
+/* ── Messages ── */
+.msg-item{padding:14px 20px;border-bottom:1px solid rgba(37,37,37,.5);display:flex;gap:12px;align-items:flex-start}
+.msg-item:last-child{border-bottom:none}
+.msg-item:hover{background:rgba(255,255,255,.02)}
+.msg-avatar{width:36px;height:36px;border-radius:50%;background:var(--card2);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:600;color:var(--sub);flex-shrink:0}
+.msg-body{flex:1;min-width:0}
+.msg-top{display:flex;align-items:center;gap:8px;margin-bottom:3px}
+.msg-user{font-size:13px;font-weight:600}
+.msg-time{font-size:11px;color:var(--sub);margin-left:auto}
+.msg-text{font-size:13px;color:var(--sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.msg-item-title{font-size:11px;color:var(--sub);margin-top:2px}
+.auto-badge{font-size:10px;background:rgba(34,197,94,.1);color:var(--green);padding:1px 6px;border-radius:4px}
+
+/* ── Plans ── */
+.plans-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;padding:20px}
+.plan-card{background:var(--card2);border:2px solid var(--border);border-radius:12px;padding:24px;transition:.2s}
+.plan-card.current{border-color:var(--accent)}
+.plan-card.popular{border-color:var(--accent);position:relative}
+.popular-tag{position:absolute;top:-12px;left:50%;transform:translateX(-50%);background:var(--accent);color:#fff;font-size:11px;font-weight:700;padding:3px 12px;border-radius:20px;text-transform:uppercase}
+.plan-card h3{font-size:18px;font-weight:700;margin-bottom:4px}
+.plan-card .price{font-size:32px;font-weight:800;color:var(--text);margin:12px 0 16px}
+.plan-card .price span{font-size:14px;font-weight:400;color:var(--sub)}
+.plan-features{list-style:none;margin-bottom:20px}
+.plan-features li{font-size:13px;color:var(--sub);padding:5px 0;display:flex;gap:8px;align-items:flex-start}
+.plan-features li::before{content:'✓';color:var(--green);font-weight:700;flex-shrink:0}
+.btn-upgrade{width:100%;padding:10px;border-radius:8px;font-weight:600;font-size:14px;background:var(--accent);color:#fff}
+.btn-upgrade:hover{background:var(--accent2)}
+.btn-upgrade.current-plan{background:rgba(99,102,241,.1);color:var(--accent2);cursor:default}
+
+/* ── Empty / loading ── */
+.empty{padding:48px 20px;text-align:center;color:var(--sub)}
+.empty-icon{font-size:40px;margin-bottom:12px;opacity:.3}
+.empty p{font-size:14px}
+.loading{display:flex;align-items:center;justify-content:center;padding:48px;color:var(--sub);gap:10px;font-size:14px}
+.spinner{width:20px;height:20px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ── Toast ── */
+#toast{position:fixed;bottom:24px;right:24px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px 18px;font-size:13px;box-shadow:var(--shadow);transition:.3s;opacity:0;transform:translateY(10px);z-index:999;pointer-events:none;max-width:300px}
+#toast.show{opacity:1;transform:translateY(0)}
+#toast.success{border-color:rgba(34,197,94,.3);color:var(--green)}
+#toast.error{border-color:rgba(239,68,68,.3);color:var(--red)}
+
+/* ── Responsive ── */
+@media(max-width:640px){
+  header{padding:0 12px}
+  nav button{padding:6px 8px;font-size:12px}
+  main{padding:12px}
+  .stat-grid{grid-template-columns:1fr 1fr}
+}
+</style>
+</head>
+<body>
+
+<!-- LOGIN SCREEN -->
+<div id="loginScreen">
+  <div class="login-box">
+    <h1>RelistPro</h1>
+    <p>Manage your Vinted wardrobe</p>
+    <div class="tab-switcher">
+      <button class="active" onclick="showAuthTab('login')">Sign in</button>
+      <button onclick="showAuthTab('register')">Create account</button>
+    </div>
+    <div id="loginForm">
+      <div class="field"><label>Username</label><input type="text" id="lUser" placeholder="your username" autocomplete="username"></div>
+      <div class="field"><label>Password</label><input type="password" id="lPass" placeholder="••••••••" autocomplete="current-password"></div>
+      <button class="btn-primary" onclick="doLogin()">Sign in</button>
+    </div>
+    <div id="registerForm" style="display:none">
+      <div class="field"><label>Username</label><input type="text" id="rUser" placeholder="choose a username" autocomplete="username"></div>
+      <div class="field"><label>Email <span style="font-size:10px;color:var(--sub)">(optional)</span></label><input type="email" id="rEmail" placeholder="you@example.com" autocomplete="email"></div>
+      <div class="field"><label>Password</label><input type="password" id="rPass" placeholder="••••••••" autocomplete="new-password"></div>
+      <button class="btn-primary" onclick="doRegister()">Create account</button>
+    </div>
+    <div class="err" id="authErr"></div>
+  </div>
+</div>
+
+<!-- APP -->
+<div id="app">
+  <header>
+    <span class="logo">RelistPro</span>
+    <nav>
+      <button class="active" onclick="tab('overview')">Overview</button>
+      <button onclick="tab('wardrobe')">Wardrobe</button>
+      <button onclick="tab('analytics')">Analytics</button>
+      <button onclick="tab('messages')">Messages</button>
+      <button onclick="tab('subscriptions')">Subscription</button>
+    </nav>
+    <div class="hdr-right">
+      <span class="plan-badge free" id="planBadge">Free</span>
+      <span class="hdr-user" id="hdrUser"></span>
+      <button class="btn-sm" onclick="doLogout()">Sign out</button>
+    </div>
+  </header>
+  <main id="main"></main>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const API = '';  // same origin
+let token = localStorage.getItem('rp_token') || '';
+let D = null; // dashboard data cache
+let currentTab = 'overview';
+let anPeriod = '30d';
+let charts = {};
+
+// ══ AUTH ══
+function showAuthTab(t) {
+  document.querySelectorAll('.tab-switcher button').forEach((b,i) => b.classList.toggle('active', (i===0&&t==='login')||(i===1&&t==='register')));
+  document.getElementById('loginForm').style.display = t==='login'?'':'none';
+  document.getElementById('registerForm').style.display = t==='register'?'':'none';
+  document.getElementById('authErr').style.display='none';
+}
+
+async function doLogin() {
+  const u = document.getElementById('lUser').value.trim();
+  const p = document.getElementById('lPass').value;
+  if (!u||!p) return showErr('Fill in all fields');
+  const r = await api('/api/auth/login', 'POST', {username:u, password:p});
+  if (!r.ok) return showErr(r.error||'Login failed');
+  token = r.token;
+  localStorage.setItem('rp_token', token);
+  startApp();
+}
+
+async function doRegister() {
+  const u = document.getElementById('rUser').value.trim();
+  const e = document.getElementById('rEmail').value.trim();
+  const p = document.getElementById('rPass').value;
+  if (!u||!p) return showErr('Username and password required');
+  if (p.length < 6) return showErr('Password must be at least 6 characters');
+  const r = await api('/api/auth/register', 'POST', {username:u, email:e||undefined, password:p});
+  if (!r.ok) return showErr(r.error||'Registration failed');
+  token = r.token;
+  localStorage.setItem('rp_token', token);
+  startApp();
+}
+
+function doLogout() {
+  token=''; localStorage.removeItem('rp_token'); D=null;
+  document.getElementById('app').classList.remove('visible');
+  document.getElementById('loginScreen').style.display='flex';
+}
+
+function showErr(msg) {
+  const e = document.getElementById('authErr');
+  e.textContent = msg; e.style.display='block';
+}
+
+// ══ API ══
+async function api(path, method='GET', body=null) {
+  try {
+    const opts = { method, headers:{ 'Content-Type':'application/json', ...(token ? {'Authorization':'Bearer '+token} : {}) } };
+    if (body) opts.body = JSON.stringify(body);
+    const r = await fetch(API+path, opts);
+    return await r.json();
+  } catch(e) { return {ok:false, error:e.message}; }
+}
+
+// ══ APP ══
+async function startApp() {
+  document.getElementById('loginScreen').style.display='none';
+  const app = document.getElementById('app');
+  app.classList.add('visible');
+  app.querySelector('main').innerHTML = '<div class="loading"><div class="spinner"></div>Loading your dashboard…</div>';
+
+  // Load profile
+  const prof = await api('/api/user/profile');
+  if (prof.ok) {
+    document.getElementById('hdrUser').textContent = prof.username;
+    const pb = document.getElementById('planBadge');
+    pb.textContent = (prof.planInfo?.name || prof.plan || 'Free');
+    pb.className = 'plan-badge ' + (prof.plan||'free');
+  }
+
+  // Load dashboard data
+  const d = await api('/api/dashboard');
+  if (d.ok) {
+    D = d;
+  } else {
+    D = { items:{}, sold:[], snapshots:{}, messages:[], schedules:[], totalRevenue:0, account:{} };
+  }
+
+  tab('overview');
+}
+
+function tab(name) {
+  currentTab = name;
+  document.querySelectorAll('nav button').forEach((b,i) => {
+    const names=['overview','wardrobe','analytics','messages','subscriptions'];
+    b.classList.toggle('active', names[i]===name);
+  });
+  Object.values(charts).forEach(c => { try{c.destroy();}catch(e){} });
+  charts = {};
+  const m = document.getElementById('main');
+  if (name==='overview') renderOverview(m);
+  else if (name==='wardrobe') renderWardrobe(m);
+  else if (name==='analytics') renderAnalytics(m);
+  else if (name==='messages') renderMessages(m);
+  else if (name==='subscriptions') renderSubscriptions(m);
+}
+
+// ══ OVERVIEW ══
+function renderOverview(m) {
+  if (!D) { m.innerHTML='<div class="loading"><div class="spinner"></div></div>'; return; }
+  const items = Object.values(D.items||{});
+  const active = items.filter(i=>i.status==='active');
+  const drafts = items.filter(i=>i.status==='draft');
+  const sold = D.sold||[];
+  const totalViews = active.reduce((s,i)=>s+(i.views||0),0);
+  const totalFavs = active.reduce((s,i)=>s+(i.favourites||0),0);
+  const rev = D.totalRevenue||0;
+
+  // Recent activity
+  const recentSold = [...sold].sort((a,b)=>new Date(b.soldAt||0)-new Date(a.soldAt||0)).slice(0,5);
+  const recentMsgs = (D.messages||[]).slice(0,5);
+
+  m.innerHTML = `
+    <div class="stat-grid">
+      <div class="stat-card"><div class="label">Active Listings</div><div class="value">${active.length}</div><div class="sub">${drafts.length} draft${drafts.length!==1?'s':''}</div></div>
+      <div class="stat-card green"><div class="label">Total Revenue</div><div class="value">£${rev.toFixed(2)}</div><div class="sub">${sold.length} item${sold.length!==1?'s':''} sold</div></div>
+      <div class="stat-card"><div class="label">Total Views</div><div class="value">${fmtNum(totalViews)}</div><div class="sub">across active listings</div></div>
+      <div class="stat-card accent"><div class="label">Favourites</div><div class="value">${fmtNum(totalFavs)}</div><div class="sub">across active listings</div></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div class="section">
+        <div class="section-hdr"><h2>Recent Sales</h2><span class="count">${sold.length}</span></div>
+        ${recentSold.length ? recentSold.map(s=>`
+          <div class="msg-item">
+            <div class="msg-avatar" style="border-radius:6px;overflow:hidden">${s.image?`<img src="${s.image}" style="width:100%;height:100%;object-fit:cover">`:''}</div>
+            <div class="msg-body">
+              <div class="msg-top"><span class="msg-user">${esc(s.title||'Item')}</span><span class="msg-time">£${(s.price||0).toFixed(2)}</span></div>
+              <div class="msg-text">${s.soldAt?new Date(s.soldAt).toLocaleDateString():''}</div>
+            </div>
+          </div>`).join('') : '<div class="empty"><div class="empty-icon">🛍</div><p>No sales yet</p></div>'}
+      </div>
+      <div class="section">
+        <div class="section-hdr"><h2>Recent Messages</h2><span class="count">${(D.messages||[]).length}</span></div>
+        ${recentMsgs.length ? recentMsgs.map(renderMsgRow).join('') : '<div class="empty"><div class="empty-icon">💬</div><p>No messages yet</p></div>'}
+      </div>
+    </div>
+    ${!D.account?.connected ? `<div class="section" style="margin-top:16px"><div class="empty">
+      <div class="empty-icon">🔌</div>
+      <p style="margin-bottom:8px">No Vinted account connected</p>
+      <p style="font-size:12px">Install the Chrome extension and sync from Vinted to see your items here</p>
+    </div></div>` : ''}
+  `;
+}
+
+// ══ WARDROBE ══
+let wFilter = 'active', wSearch = '';
+function renderWardrobe(m) {
+  if (!D) { m.innerHTML='<div class="loading"><div class="spinner"></div></div>'; return; }
+  const all = Object.values(D.items||{});
+  const statuses = ['active','draft','hidden','reserved','sold'];
+  const counts = {};
+  statuses.forEach(s => counts[s] = all.filter(i=>i.status===s).length);
+  const filtered = all.filter(i => {
+    if (wFilter !== 'all' && i.status !== wFilter) return false;
+    if (wSearch && !((i.title||'').toLowerCase().includes(wSearch.toLowerCase()))) return false;
+    return true;
+  }).sort((a,b) => {
+    if (a.status==='draft' && b.status!=='draft') return -1;
+    if (b.status==='draft' && a.status!=='draft') return 1;
+    return new Date(b.firstSeen||0)-new Date(a.firstSeen||0);
+  });
+
+  m.innerHTML = `
+    <div class="section">
+      <div class="section-hdr">
+        <h2>Wardrobe</h2>
+        <span class="count">${filtered.length} / ${all.length}</span>
+        <button class="btn-sm ml" onclick="refreshWardrobe()">↻ Refresh</button>
+      </div>
+      <div class="filter-bar">
+        <input type="text" placeholder="Search items…" value="${esc(wSearch)}" oninput="wSearch=this.value;renderWardrobe(document.getElementById('main'))" id="wSearchInput">
+        <button class="filter-btn ${wFilter==='all'?'active':''}" onclick="wFilter='all';renderWardrobe(document.getElementById('main'))">All (${all.length})</button>
+        ${statuses.map(s=>`<button class="filter-btn ${wFilter===s?'active':''}" onclick="wFilter='${s}';renderWardrobe(document.getElementById('main'))">${cap(s)} (${counts[s]})</button>`).join('')}
+      </div>
+      <table class="tbl">
+        <thead><tr><th></th><th>Title</th><th>Price</th><th>Views</th><th>Favs</th><th>Status</th><th>Reposts</th><th></th></tr></thead>
+        <tbody>
+          ${filtered.length ? filtered.map(item=>`
+            <tr>
+              <td>${item.image?`<img src="${item.image}" alt="">`:'<div style="width:40px;height:40px;background:var(--card2);border-radius:6px"></div>'}</td>
+              <td><div class="item-title" title="${esc(item.title||'')}">${esc(item.title||'—')}</div></td>
+              <td>£${(item.price||0).toFixed(2)}</td>
+              <td>${fmtNum(item.views||0)}</td>
+              <td>${fmtNum(item.favourites||0)}</td>
+              <td><span class="badge ${item.status}">${cap(item.status||'active')}</span></td>
+              <td>${item.repostCount||0}</td>
+              <td>${item.status==='active'||item.status==='draft'?`<button class="btn-repost" onclick="repostItem('${item.id}',this)">Repost</button>`:'—'}</td>
+            </tr>`).join('') : `<tr><td colspan="8"><div class="empty"><div class="empty-icon">👗</div><p>No items match this filter</p></div></td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+async function repostItem(id, btn) {
+  btn.disabled=true; btn.textContent='Reposting…';
+  const r = await api(`/api/vinted/items/${id}/repost`, 'POST', {});
+  if (r.ok) {
+    toast('Item reposted successfully', 'success');
+    // Update local cache
+    if (D.items[id]) { D.items[id].repostCount=(D.items[id].repostCount||0)+1; D.items[id].lastRepost=new Date().toISOString(); }
+    btn.textContent='✓ Done';
+    setTimeout(()=>renderWardrobe(document.getElementById('main')), 1500);
+  } else {
+    toast(r.error||'Repost failed — is a Vinted session active?', 'error');
+    btn.disabled=false; btn.textContent='Repost';
+  }
+}
+
+async function refreshWardrobe() {
+  toast('Refreshing data…');
+  const d = await api('/api/dashboard');
+  if (d.ok) { D=d; renderWardrobe(document.getElementById('main')); }
+}
+
+// ══ ANALYTICS ══
+function renderAnalytics(m) {
+  if (!D) { m.innerHTML='<div class="loading"><div class="spinner"></div></div>'; return; }
+  const periods = [['7d','7 days'],['30d','30 days'],['90d','90 days'],['1y','1 year']];
+  m.innerHTML = `
+    <div class="section" style="margin-bottom:20px">
+      <div class="period-tabs">
+        ${periods.map(([k,l])=>`<button class="${anPeriod===k?'active':''}" onclick="anPeriod='${k}';renderAnalytics(document.getElementById('main'))">${l}</button>`).join('')}
+      </div>
+      <div class="section-hdr" style="border-top:1px solid var(--border)"><h2>Views & Favourites</h2></div>
+      <div class="chart-wrap"><canvas id="chartViews"></canvas></div>
+    </div>
+    <div class="stat-grid" style="margin-bottom:20px" id="anStats"></div>
+    <div class="section">
+      <div class="section-hdr"><h2>Revenue</h2></div>
+      <div class="chart-wrap"><canvas id="chartRevenue"></canvas></div>
+    </div>
+  `;
+
+  const snaps = D.snapshots||{};
+  const sold = D.sold||[];
+  const days = anPeriod==='7d'?7:anPeriod==='30d'?30:anPeriod==='90d'?90:365;
+  const labels=[], viewData=[], favData=[];
+  const now = new Date();
+  for (let i=days-1;i>=0;i--) {
+    const d = new Date(now); d.setDate(d.getDate()-i);
+    const k = d.toISOString().slice(0,10);
+    labels.push(days<=30?k.slice(5):k.slice(0,7));
+    viewData.push(snaps[k]?.totalViews||0);
+    favData.push(snaps[k]?.totalFavs||0);
+  }
+
+  // Revenue by month
+  const revMap = {};
+  sold.forEach(s => {
+    if (!s.soldAt) return;
+    const d = new Date(s.soldAt);
+    const cutoff = new Date(); cutoff.setDate(cutoff.getDate()-days);
+    if (d < cutoff) return;
+    const k = d.toISOString().slice(0,7);
+    revMap[k] = (revMap[k]||0) + (s.price||0);
+  });
+  const revLabels = Object.keys(revMap).sort();
+  const revData = revLabels.map(k=>revMap[k]);
+
+  // Stats
+  const totalViews = viewData.reduce((a,b)=>a+b,0);
+  const totalFavs = favData.reduce((a,b)=>a+b,0);
+  const totalRev = revData.reduce((a,b)=>a+b,0);
+  const periodSold = sold.filter(s => { if(!s.soldAt) return false; const cutoff=new Date(); cutoff.setDate(cutoff.getDate()-days); return new Date(s.soldAt)>=cutoff; });
+  document.getElementById('anStats').innerHTML = `
+    <div class="stat-card"><div class="label">Views (period)</div><div class="value">${fmtNum(totalViews)}</div></div>
+    <div class="stat-card accent"><div class="label">Favourites (period)</div><div class="value">${fmtNum(totalFavs)}</div></div>
+    <div class="stat-card green"><div class="label">Revenue (period)</div><div class="value">£${totalRev.toFixed(2)}</div></div>
+    <div class="stat-card"><div class="label">Items Sold (period)</div><div class="value">${periodSold.length}</div></div>
+  `;
+
+  const chartOpts = { responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:'#94a3b8',boxWidth:12}}}, scales:{ x:{ticks:{color:'#64748b',maxTicksLimit:10}, grid:{color:'rgba(255,255,255,.04)'}}, y:{ticks:{color:'#64748b'}, grid:{color:'rgba(255,255,255,.04)'}, beginAtZero:true} } };
+  charts.views = new Chart(document.getElementById('chartViews'), {
+    type:'line',
+    data:{labels, datasets:[
+      {label:'Views',data:viewData,borderColor:'#6366f1',backgroundColor:'rgba(99,102,241,.1)',tension:.4,fill:true,pointRadius:2},
+      {label:'Favourites',data:favData,borderColor:'#22c55e',backgroundColor:'rgba(34,197,94,.07)',tension:.4,fill:true,pointRadius:2}
+    ]},
+    options:{...chartOpts}
+  });
+  if (revLabels.length) {
+    charts.rev = new Chart(document.getElementById('chartRevenue'), {
+      type:'bar',
+      data:{labels:revLabels, datasets:[{label:'Revenue (£)',data:revData,backgroundColor:'rgba(99,102,241,.6)',borderColor:'#6366f1',borderWidth:1,borderRadius:4}]},
+      options:{...chartOpts}
+    });
+  } else {
+    document.querySelector('.section:last-child .chart-wrap').innerHTML='<div class="empty"><div class="empty-icon">📊</div><p>No sales in this period</p></div>';
+  }
+}
+
+// ══ MESSAGES ══
+function renderMessages(m) {
+  if (!D) { m.innerHTML='<div class="loading"><div class="spinner"></div></div>'; return; }
+  const msgs = D.messages||[];
+  const types = ['all','like','purchase','offer','question'];
+  let mFilter = 'all';
+  function render() {
+    const filtered = msgs.filter(msg => mFilter==='all' || msg.type===mFilter);
+    m.innerHTML = `
+      <div class="section">
+        <div class="section-hdr"><h2>Inbox</h2><span class="count">${msgs.length}</span></div>
+        <div class="filter-bar">
+          ${types.map(t=>`<button class="filter-btn ${mFilter===t?'active':''}" onclick="mFilter='${t}';render()">${cap(t)} ${t==='all'?'('+msgs.length+')':'('+msgs.filter(m=>m.type===t).length+')'}</button>`).join('')}
+        </div>
+        ${filtered.length ? filtered.map(renderMsgRow).join('') : '<div class="empty"><div class="empty-icon">📭</div><p>No messages</p></div>'}
+      </div>
+    `;
+  }
+  // mFilter is scoped so render() needs access — just render once with all
+  const filtered = msgs;
+  m.innerHTML = `
+    <div class="section">
+      <div class="section-hdr"><h2>Inbox</h2><span class="count">${msgs.length}</span></div>
+      <div class="filter-bar" id="msgFilters">
+        ${types.map(t=>`<button class="filter-btn ${t==='all'?'active':''}" data-mf="${t}">${cap(t)} (${t==='all'?msgs.length:msgs.filter(msg=>msg.type===t).length})</button>`).join('')}
+      </div>
+      <div id="msgList">${msgs.length ? msgs.map(renderMsgRow).join('') : '<div class="empty"><div class="empty-icon">📭</div><p>No messages yet — sync from the extension to see your inbox</p></div>'}</div>
+    </div>
+  `;
+  document.getElementById('msgFilters').addEventListener('click', e => {
+    const btn = e.target.closest('[data-mf]');
+    if (!btn) return;
+    const f = btn.dataset.mf;
+    document.querySelectorAll('[data-mf]').forEach(b=>b.classList.toggle('active',b===btn));
+    const fMsgs = f==='all' ? msgs : msgs.filter(msg=>msg.type===f);
+    document.getElementById('msgList').innerHTML = fMsgs.length ? fMsgs.map(renderMsgRow).join('') : '<div class="empty"><div class="empty-icon">📭</div><p>No messages</p></div>';
+  });
+}
+
+function renderMsgRow(msg) {
+  const typeColors = {like:'color:var(--amber)',purchase:'color:var(--green)',offer:'color:var(--blue)',question:'color:var(--sub)'};
+  const typeIcons = {like:'♥',purchase:'🛍',offer:'💰',question:'💬'};
+  return `
+    <div class="msg-item">
+      <div class="msg-avatar">${typeIcons[msg.type]||'💬'}</div>
+      <div class="msg-body">
+        <div class="msg-top">
+          <span class="msg-user">${esc(msg.user||'User')}</span>
+          <span class="badge ${msg.type||'question'}" style="font-size:10px">${cap(msg.type||'?')}</span>
+          ${msg.autoReplied?'<span class="auto-badge">auto-replied</span>':''}
+          <span class="msg-time">${msg.time?new Date(msg.time).toLocaleDateString():''}</span>
+        </div>
+        <div class="msg-text">${esc(msg.text||'')}</div>
+        ${msg.itemTitle?`<div class="msg-item-title">Re: ${esc(msg.itemTitle)}</div>`:''}
+      </div>
+    </div>
+  `;
+}
+
+// ══ SUBSCRIPTIONS ══
+async function renderSubscriptions(m) {
+  m.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+  const [plansR, curR] = await Promise.all([api('/api/subscriptions/plans'), api('/api/subscriptions/current')]);
+  const plans = plansR.plans || {};
+  const current = curR.plan || 'free';
+  const featureSets = {
+    free: ['Up to 50 items tracked','1 repost schedule','Basic analytics','Manual repost only'],
+    pro: ['Unlimited items tracked','10 repost schedules','Auto-reply to messages','Full analytics (12 months)','Repost directly from web'],
+    business: ['Everything in Pro','Unlimited schedules','Full 24-month analytics','Priority support','Multi-account (coming soon)']
+  };
+  m.innerHTML = `
+    <div class="section" style="margin-bottom:20px">
+      <div class="section-hdr"><h2>Your Plan</h2></div>
+      <div style="padding:20px">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+          <span class="plan-badge ${current}" style="font-size:13px;padding:5px 14px">${(plans[current]?.name||current)}</span>
+          ${curR.expires?`<span style="font-size:13px;color:var(--sub)">Renews ${new Date(curR.expires).toLocaleDateString()}</span>`:''}
+        </div>
+        <p style="font-size:13px;color:var(--sub)">${current==='free'?'Upgrade to Pro for unlimited listings and automation features.':'Thanks for being a subscriber!'}</p>
+      </div>
+    </div>
+    <div class="plans-grid">
+      ${Object.entries(plans).map(([key,plan])=>`
+        <div class="plan-card ${current===key?'current':''} ${key==='pro'&&current!=='pro'&&current!=='business'?'popular':''}">
+          ${key==='pro'&&current!=='pro'&&current!=='business'?'<div class="popular-tag">Most Popular</div>':''}
+          ${current===key?'<div style="font-size:11px;color:var(--accent2);font-weight:600;margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">Current Plan</div>':''}
+          <h3>${plan.name}</h3>
+          <div class="price">${plan.price===0?'Free':`£${plan.price}<span>/month</span>`}</div>
+          <ul class="plan-features">
+            ${(featureSets[key]||[]).map(f=>`<li>${f}</li>`).join('')}
+          </ul>
+          ${current===key
+            ? `<button class="btn-upgrade current-plan">Current plan</button>`
+            : key==='free'
+              ? `<button class="btn-upgrade" style="background:var(--card2);color:var(--sub);cursor:default">Downgrade</button>`
+              : `<button class="btn-upgrade" onclick="upgrade('${key}')">Upgrade to ${plan.name}</button>`}
+        </div>`).join('')}
+    </div>
+    <div style="margin-top:20px;padding:16px 20px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius)">
+      <p style="font-size:13px;color:var(--sub)">Questions about billing? Contact us at <a href="mailto:support@relistpro.com">support@relistpro.com</a></p>
+    </div>
+  `;
+}
+
+async function upgrade(plan) {
+  const r = await api('/api/subscriptions/checkout', 'POST', { plan, successUrl:location.href+'?upgraded=1', cancelUrl:location.href });
+  if (r.url) {
+    location.href = r.url;
+  } else if (r.manual) {
+    toast(r.message || 'Contact support to upgrade', 'success');
+    alert(`To upgrade to ${plan}, please contact: support@relistpro.com\nPrice: £${r.price}/month`);
+  } else {
+    toast(r.error || 'Upgrade failed', 'error');
+  }
+}
+
+// ══ UTILS ══
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function cap(s) { return s ? s[0].toUpperCase()+s.slice(1) : ''; }
+function fmtNum(n) { return n>=1000?(n/1000).toFixed(1)+'k':String(n); }
+let toastTimer;
+function toast(msg, type='') {
+  const el = document.getElementById('toast');
+  el.textContent=msg; el.className='show '+(type||'');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(()=>el.className='',3000);
+}
+
+// ══ BOOT ══
+window.addEventListener('load', () => {
+  if (token) startApp();
+  else document.getElementById('loginScreen').style.display='flex';
+  // Handle post-upgrade redirect
+  if (location.search.includes('upgraded=1')) { history.replaceState(null,'',location.pathname); setTimeout(()=>toast('Plan upgraded successfully!','success'),1000); }
+  // Enter on login form
+  document.getElementById('lPass').addEventListener('keydown', e => { if(e.key==='Enter') doLogin(); });
+  document.getElementById('rPass').addEventListener('keydown', e => { if(e.key==='Enter') doRegister(); });
+});
+</script>
+</body>
+</html>
