@@ -321,6 +321,69 @@ function recoverPendingActivations() {
   }
 }
 
+// Fetch inbox (conversations)
+app.get('/api/vinted/inbox', auth, async (req, res) => {
+  const session = sessions[req.user.id];
+  if (!session) return res.status(401).json({ error: 'No session' });
+  try {
+    const page = req.query.page || 1;
+    const resp = await vintedFetch(session, `/api/v2/inbox?page=${page}&per_page=20`);
+    const data = await resp.json();
+    res.json({ ok: true, conversations: data.conversations || data.items || [], pagination: data.pagination });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// Send a reply in a conversation
+app.post('/api/vinted/conversations/:id/reply', auth, async (req, res) => {
+  const session = sessions[req.user.id];
+  if (!session) return res.status(401).json({ error: 'No session' });
+  const { body } = req.body;
+  if (!body) return res.status(400).json({ error: 'body required' });
+  try {
+    const resp = await vintedFetch(session, `/api/v2/conversations/${req.params.id}/messages`, { method: 'POST', body: { body } });
+    const data = await resp.json();
+    res.json({ ok: resp.ok, message: data.message || data });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// Repost an item — delete original then recreate as draft
+app.post('/api/vinted/items/:itemId/repost', auth, async (req, res) => {
+  const session = sessions[req.user.id];
+  if (!session) return res.status(401).json({ error: 'No session' });
+  try {
+    // 1. Fetch item details
+    const getResp = await vintedFetch(session, `/api/v2/items/${req.params.itemId}`);
+    if (!getResp.ok) return res.status(404).json({ error: `Item fetch failed: ${getResp.status}` });
+    const itemData = await getResp.json();
+    const item = itemData.item || itemData;
+
+    // 2. Build recreate payload from existing item
+    const payload = { is_draft: true };
+    for (const f of ['title','description','price','category_id','brand_id','size_id','status_id','color_ids','is_unisex','item_attributes','package_size_id']) {
+      if (item[f] !== undefined) payload[f] = item[f];
+    }
+    if (item.photos?.length) payload.photos = item.photos.map(p => ({ id: p.id }));
+    else if (item.photo?.id) payload.photos = [{ id: item.photo.id }];
+
+    // 3. Delete original
+    await vintedFetch(session, `/api/v2/items/${req.params.itemId}`, { method: 'DELETE' });
+
+    // 4. Create as draft
+    const createResp = await vintedFetch(session, '/api/v2/items', { method: 'POST', body: payload });
+    const newData = await createResp.json();
+    const newId = newData.item?.id || newData.id;
+
+    if (newId) {
+      const delayMs = (15 + Math.random() * 5) * 60 * 1000;
+      pendingActivations.push({ itemId: String(newId), userId: req.user.id, activateAt: Date.now() + delayMs });
+      saveData();
+      scheduleActivation(req.user.id, String(newId), delayMs);
+      console.log(`[RP] Reposted ${req.params.itemId} → ${newId}, activating in ${Math.round(delayMs/60000)}m`);
+    }
+    res.json({ ok: true, oldId: req.params.itemId, newId, draft: true });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
 // ═══ START ═══
 loadData();
 recoverPendingActivations();
