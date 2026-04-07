@@ -81,9 +81,11 @@ function normalizeItem(raw) {
   let status = 'active';
   if (raw.is_draft) {
     status = 'draft';
+  } else if (raw.is_hidden && !raw.can_edit) {
+    status = 'hidden'; // delayed publication
   } else if (raw.is_hidden) {
     status = 'hidden';
-  } else if (raw.is_closed) {
+  } else if (raw.item_closing_action === 'sold' || raw.is_closed) {
     status = 'sold';
   } else if (raw.is_reserved) {
     status = 'reserved';
@@ -213,7 +215,7 @@ app.get('/api/vinted/dressing/:memberId', auth, async (req, res) => {
     while (page <= 50) {
       const resp = await vintedFetch(
         session,
-        `/api/v2/users/${memberId}/items?page=${page}&per_page=96&order=newest_first`
+        `/api/v2/wardrobe/${memberId}/items?page=${page}&per_page=96&order=newest_first`
       );
       if (!resp.ok) { console.log(`[RP] Vinted ${resp.status} on page ${page}`); break; }
       const data = await resp.json();
@@ -240,34 +242,38 @@ app.get('/api/vinted/dressing/:memberId', auth, async (req, res) => {
   }
 });
 
-// Delete an item
+// Delete an item (Vinted uses POST .../delete, not DELETE)
 app.delete('/api/vinted/items/:itemId', auth, async (req, res) => {
   const session = sessions[req.user.id];
   if (!session) return res.status(401).json({ error: 'No session' });
   try {
-    const resp = await vintedFetch(session, `/api/v2/items/${req.params.itemId}`, { method: 'DELETE' });
+    const resp = await vintedFetch(session, `/api/v2/items/${req.params.itemId}/delete`, { method: 'POST' });
     res.json({ ok: resp.ok, status: resp.status });
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
-// Create item as draft, schedule activation
+// Create item as draft via Vinted's item_upload flow, schedule activation
 app.post('/api/vinted/items/create', auth, async (req, res) => {
   const session = sessions[req.user.id];
   if (!session) return res.status(401).json({ error: 'No session' });
   try {
-    const payload = { ...req.body, is_draft: true };
-    const resp = await vintedFetch(session, '/api/v2/items', { method: 'POST', body: payload });
+    const uuid = crypto.randomBytes(16).toString('hex');
+    const draftPayload = {
+      draft: { ...req.body, temp_uuid: uuid },
+      feedback_id: null, parcel: null, upload_session_id: uuid
+    };
+    const resp = await vintedFetch(session, '/api/v2/item_upload/drafts', { method: 'POST', body: draftPayload });
     const data = await resp.json();
-    const newId = data.item?.id || data.id;
-    if (newId) {
+    const draft = data.draft || data;
+    const draftId = String(draft.id || '');
+    if (draftId) {
       const delayMs = (15 + Math.random() * 5) * 60 * 1000;
-      const activateAt = Date.now() + delayMs;
-      pendingActivations.push({ itemId: String(newId), userId: req.user.id, activateAt });
+      pendingActivations.push({ itemId: draftId, userId: req.user.id, activateAt: Date.now() + delayMs, draftData: draft, uploadSessionId: uuid });
       saveData();
-      scheduleActivation(req.user.id, String(newId), delayMs);
-      console.log(`[RP] Draft ${newId} created, activating in ${Math.round(delayMs / 60000)}m`);
+      scheduleActivation(req.user.id, draftId, delayMs);
+      console.log(`[RP] Draft ${draftId} created, activating in ${Math.round(delayMs / 60000)}m`);
     }
-    res.json({ ok: true, itemId: newId, draft: true });
+    res.json({ ok: true, itemId: draftId, draft: true });
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
@@ -276,7 +282,16 @@ app.post('/api/vinted/items/:itemId/activate', auth, async (req, res) => {
   const session = sessions[req.user.id];
   if (!session) return res.status(401).json({ error: 'No session' });
   try {
-    const resp = await vintedFetch(session, `/api/v2/items/${req.params.itemId}`, { method: 'PUT', body: { is_draft: false } });
+    const pa = pendingActivations.find(p => p.itemId === req.params.itemId);
+    let resp;
+    if (pa?.draftData) {
+      resp = await vintedFetch(session, `/api/v2/item_upload/drafts/${req.params.itemId}/completion`, {
+        method: 'POST',
+        body: { draft: pa.draftData, feedback_id: null, parcel: null, push_up: false, upload_session_id: pa.uploadSessionId || pa.draftData.temp_uuid }
+      });
+    } else {
+      resp = await vintedFetch(session, `/api/v2/items/${req.params.itemId}`, { method: 'PUT', body: { is_draft: false } });
+    }
     removePendingActivation(String(req.params.itemId));
     res.json({ ok: resp.ok });
   } catch (e) { res.status(502).json({ error: e.message }); }
@@ -291,7 +306,18 @@ function scheduleActivation(userId, itemId, delayMs) {
       return;
     }
     try {
-      const resp = await vintedFetch(session, `/api/v2/items/${itemId}`, { method: 'PUT', body: { is_draft: false } });
+      const pa = pendingActivations.find(p => p.itemId === itemId);
+      let resp;
+      if (pa?.draftData) {
+        // New draft flow: complete the draft to publish
+        resp = await vintedFetch(session, `/api/v2/item_upload/drafts/${itemId}/completion`, {
+          method: 'POST',
+          body: { draft: pa.draftData, feedback_id: null, parcel: null, push_up: false, upload_session_id: pa.uploadSessionId || pa.draftData.temp_uuid }
+        });
+      } else {
+        // Legacy flow: mark is_draft=false
+        resp = await vintedFetch(session, `/api/v2/items/${itemId}`, { method: 'PUT', body: { is_draft: false } });
+      }
       if (resp.ok) {
         console.log(`[RP] Draft ${itemId} activated`);
         removePendingActivation(itemId);
@@ -340,7 +366,7 @@ app.post('/api/vinted/conversations/:id/reply', auth, async (req, res) => {
   const { body } = req.body;
   if (!body) return res.status(400).json({ error: 'body required' });
   try {
-    const resp = await vintedFetch(session, `/api/v2/conversations/${req.params.id}/messages`, { method: 'POST', body: { body } });
+    const resp = await vintedFetch(session, `/api/v2/conversations/${req.params.id}/replies`, { method: 'POST', body: { body } });
     const data = await resp.json();
     res.json({ ok: resp.ok, message: data.message || data });
   } catch (e) { res.status(502).json({ error: e.message }); }
@@ -351,33 +377,40 @@ app.post('/api/vinted/items/:itemId/repost', auth, async (req, res) => {
   const session = sessions[req.user.id];
   if (!session) return res.status(401).json({ error: 'No session' });
   try {
-    // 1. Fetch item details
-    const getResp = await vintedFetch(session, `/api/v2/items/${req.params.itemId}`);
-    if (!getResp.ok) return res.status(404).json({ error: `Item fetch failed: ${getResp.status}` });
-    const itemData = await getResp.json();
-    const item = itemData.item || itemData;
-
-    // 2. Build recreate payload from existing item
-    const payload = { is_draft: true };
-    for (const f of ['title','description','price','category_id','brand_id','size_id','status_id','color_ids','is_unisex','item_attributes','package_size_id']) {
-      if (item[f] !== undefined) payload[f] = item[f];
+    // 1. Fetch item in upload format (correct field structure for recreation)
+    let item;
+    const uploadResp = await vintedFetch(session, `/api/v2/item_upload/items/${req.params.itemId}`);
+    if (uploadResp.ok) {
+      const d = await uploadResp.json();
+      item = d.item || d;
+    } else {
+      const fallbackResp = await vintedFetch(session, `/api/v2/items/${req.params.itemId}`);
+      if (!fallbackResp.ok) return res.status(404).json({ error: `Item fetch failed: ${fallbackResp.status}` });
+      const d = await fallbackResp.json();
+      item = d.item || d;
     }
-    if (item.photos?.length) payload.photos = item.photos.map(p => ({ id: p.id }));
-    else if (item.photo?.id) payload.photos = [{ id: item.photo.id }];
 
-    // 3. Delete original
-    await vintedFetch(session, `/api/v2/items/${req.params.itemId}`, { method: 'DELETE' });
+    // 2. Delete original via POST (Vinted's correct delete method)
+    await vintedFetch(session, `/api/v2/items/${req.params.itemId}/delete`, { method: 'POST' });
 
-    // 4. Create as draft
-    const createResp = await vintedFetch(session, '/api/v2/items', { method: 'POST', body: payload });
+    // 3. Recreate as draft using item_upload/drafts flow
+    const uuid = crypto.randomBytes(16).toString('hex');
+    const { id: _id, status: _status, created_at: _ca, updated_at: _ua, url: _url,
+            stats: _st, path: _pth, is_closed: _ic, promoted: _pr, ...draftFields } = item;
+    const draftPayload = {
+      draft: { ...draftFields, temp_uuid: uuid },
+      feedback_id: null, parcel: null, upload_session_id: uuid
+    };
+    const createResp = await vintedFetch(session, '/api/v2/item_upload/drafts', { method: 'POST', body: draftPayload });
     const newData = await createResp.json();
-    const newId = newData.item?.id || newData.id;
+    const draft = newData.draft || newData;
+    const newId = String(draft.id || '');
 
     if (newId) {
       const delayMs = (15 + Math.random() * 5) * 60 * 1000;
-      pendingActivations.push({ itemId: String(newId), userId: req.user.id, activateAt: Date.now() + delayMs });
+      pendingActivations.push({ itemId: newId, userId: req.user.id, activateAt: Date.now() + delayMs, draftData: draft, uploadSessionId: uuid });
       saveData();
-      scheduleActivation(req.user.id, String(newId), delayMs);
+      scheduleActivation(req.user.id, newId, delayMs);
       console.log(`[RP] Reposted ${req.params.itemId} → ${newId}, activating in ${Math.round(delayMs/60000)}m`);
     }
     res.json({ ok: true, oldId: req.params.itemId, newId, draft: true });
