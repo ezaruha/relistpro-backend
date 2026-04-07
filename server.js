@@ -503,21 +503,30 @@ app.post('/api/vinted/items/:itemId/repost', auth, async (req, res) => {
     const newId = String(newDraft?.id || '');
     if (!newId) return res.status(500).json({ error: 'No draft id returned' });
 
-    // 4. Hide original, short delay, then delete (DOTB pattern)
+    // 4. Hide original, short delay, then delete (DOTB Zte() pattern)
     await vintedFetch(session, `/api/v2/items/${itemId}/is_hidden`, { method: 'PUT', body: { is_hidden: true } });
     await new Promise(r => setTimeout(r, 400 + Math.random() * 400));
     await vintedFetch(session, `/api/v2/items/${itemId}/delete`, { method: 'POST' });
 
-    // 5. Short delay then publish the new draft
-    await new Promise(r => setTimeout(r, 500 + Math.random() * 500));
-    const completionDraft = { ...draft, id: parseInt(newId) };
+    // 5. Wait then REFRESH the draft — DOTB calls df(newId) = GET /item_upload/items/:id
+    //    to get the server-side state before completion (photos may be processed by Vinted)
+    await new Promise(r => setTimeout(r, 800 + Math.random() * 400));
+    const refreshResp = await vintedFetch(session, `/api/v2/item_upload/items/${newId}`);
+    const refreshedItem = refreshResp.ok ? (await refreshResp.json()).item : null;
+
+    // 6. Publish — use refreshed item to rebuild payload (DOTB lne(I) = kA(I.id, qd(I)))
+    await new Promise(r => setTimeout(r, 1500 + Math.random() * 1000));
+    const completionDraft = refreshedItem ? buildDraftPayload(refreshedItem) : { ...draft, id: parseInt(newId) };
+    completionDraft.id = parseInt(newId);
+    const completionUuid = completionDraft.temp_uuid || uuid;
     const completeResp = await vintedFetch(session, `/api/v2/item_upload/drafts/${newId}/completion`, {
       method: 'POST',
-      body: { draft: completionDraft, feedback_id: null, parcel: null, push_up: false, upload_session_id: uuid }
+      body: { draft: completionDraft, feedback_id: null, parcel: null, push_up: false, upload_session_id: completionUuid }
     });
 
-    console.log(`[RP] Reposted ${itemId} → ${newId} (publish status: ${completeResp.status})`);
-    res.json({ ok: completeResp.ok, oldId: itemId, newId, published: completeResp.ok });
+    const completeBody = await completeResp.json().catch(() => ({}));
+    console.log(`[RP] Reposted ${itemId} → ${newId} (publish status: ${completeResp.status})`, refreshedItem ? '(used refreshed draft)' : '(used original draft)');
+    res.json({ ok: completeResp.ok, oldId: itemId, newId, published: completeResp.ok, details: completeBody });
   } catch (e) {
     console.error('[RP] Repost error:', e.message);
     res.status(502).json({ error: e.message });
