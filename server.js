@@ -297,6 +297,43 @@ app.post('/api/vinted/items/:itemId/activate', auth, async (req, res) => {
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
+// ═══ DRAFT PAYLOAD BUILDER (mirrors DOTB's qd() / _b() functions) ═══
+function buildDraftPayload(item) {
+  // price can be {amount: "10.00", currency_code: "GBP"} or a plain number
+  const priceVal = typeof item.price === 'object' && item.price?.amount
+    ? parseFloat(item.price.amount)
+    : parseFloat(item.price) || 0;
+  const currency = typeof item.price === 'object'
+    ? (item.price.currency_code || 'GBP')
+    : (item.currency || 'GBP');
+  return {
+    id: null,
+    currency,
+    temp_uuid: crypto.randomBytes(16).toString('hex'),
+    title: item.title || '',
+    description: item.description || '',
+    brand_id: item.brand_id || null,
+    brand: item.brand || null,
+    size_id: item.size_id || null,
+    catalog_id: item.catalog_id || item.category_id || null,
+    isbn: item.isbn || null,
+    is_unisex: item.is_unisex === true ? true : item.is_unisex === false ? false : null,
+    status_id: item.status_id || null,
+    video_game_rating_id: item.video_game_rating_id || null,
+    price: priceVal,
+    package_size_id: item.package_size_id || null,
+    shipment_prices: { domestic: null, international: null },
+    // DOTB: color_ids comes from color1_id + color2_id, NOT a color_ids array
+    color_ids: [item.color1_id, item.color2_id].filter(Boolean),
+    // DOTB: assigned_photos maps existing photo ids with orientation
+    assigned_photos: (item.photos || []).map(p => ({ id: p.id, orientation: p.orientation || 0 })),
+    measurement_length: item.measurement_length || null,
+    measurement_width: item.measurement_width || null,
+    item_attributes: item.item_attributes || [],
+    manufacturer: item.manufacturer || null
+  };
+}
+
 // ═══ BACKGROUND WORKER — activate pending drafts ═══
 function scheduleActivation(userId, itemId, delayMs) {
   setTimeout(async () => {
@@ -372,49 +409,52 @@ app.post('/api/vinted/conversations/:id/reply', auth, async (req, res) => {
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
-// Repost an item — delete original then recreate as draft
+// Repost an item — create new draft FIRST, then delete original, then publish
 app.post('/api/vinted/items/:itemId/repost', auth, async (req, res) => {
   const session = sessions[req.user.id];
   if (!session) return res.status(401).json({ error: 'No session' });
+  const { itemId } = req.params;
   try {
-    // 1. Fetch item in upload format (correct field structure for recreation)
-    let item;
-    const uploadResp = await vintedFetch(session, `/api/v2/item_upload/items/${req.params.itemId}`);
-    if (uploadResp.ok) {
-      const d = await uploadResp.json();
-      item = d.item || d;
-    } else {
-      const fallbackResp = await vintedFetch(session, `/api/v2/items/${req.params.itemId}`);
-      if (!fallbackResp.ok) return res.status(404).json({ error: `Item fetch failed: ${fallbackResp.status}` });
-      const d = await fallbackResp.json();
-      item = d.item || d;
+    // 1. Fetch item in upload format (has price.amount, color1_id, catalog_id etc.)
+    const getResp = await vintedFetch(session, `/api/v2/item_upload/items/${itemId}`);
+    if (!getResp.ok) return res.status(getResp.status).json({ error: `Item fetch failed: ${getResp.status}` });
+    const item = (await getResp.json()).item;
+    if (!item) return res.status(404).json({ error: 'Item not found in response' });
+
+    // 2. Create new draft FIRST (so original is never lost if something fails)
+    const draft = buildDraftPayload(item);
+    const uuid = draft.temp_uuid;
+    const createResp = await vintedFetch(session, '/api/v2/item_upload/drafts', {
+      method: 'POST',
+      body: { draft, feedback_id: null, parcel: null, upload_session_id: uuid }
+    });
+    if (!createResp.ok) {
+      const err = await createResp.json().catch(() => ({}));
+      return res.status(createResp.status).json({ error: 'Draft creation failed', details: err });
     }
+    const newDraft = (await createResp.json()).draft;
+    const newId = String(newDraft?.id || '');
+    if (!newId) return res.status(500).json({ error: 'No draft id returned' });
 
-    // 2. Delete original via POST (Vinted's correct delete method)
-    await vintedFetch(session, `/api/v2/items/${req.params.itemId}/delete`, { method: 'POST' });
+    // 3. Hide original, short delay, then delete (DOTB pattern)
+    await vintedFetch(session, `/api/v2/items/${itemId}/is_hidden`, { method: 'PUT', body: { is_hidden: true } });
+    await new Promise(r => setTimeout(r, 400 + Math.random() * 400));
+    await vintedFetch(session, `/api/v2/items/${itemId}/delete`, { method: 'POST' });
 
-    // 3. Recreate as draft using item_upload/drafts flow
-    const uuid = crypto.randomBytes(16).toString('hex');
-    const { id: _id, status: _status, created_at: _ca, updated_at: _ua, url: _url,
-            stats: _st, path: _pth, is_closed: _ic, promoted: _pr, ...draftFields } = item;
-    const draftPayload = {
-      draft: { ...draftFields, temp_uuid: uuid },
-      feedback_id: null, parcel: null, upload_session_id: uuid
-    };
-    const createResp = await vintedFetch(session, '/api/v2/item_upload/drafts', { method: 'POST', body: draftPayload });
-    const newData = await createResp.json();
-    const draft = newData.draft || newData;
-    const newId = String(draft.id || '');
+    // 4. Short delay then publish the new draft
+    await new Promise(r => setTimeout(r, 500 + Math.random() * 500));
+    const completionDraft = { ...draft, id: parseInt(newId) };
+    const completeResp = await vintedFetch(session, `/api/v2/item_upload/drafts/${newId}/completion`, {
+      method: 'POST',
+      body: { draft: completionDraft, feedback_id: null, parcel: null, push_up: false, upload_session_id: uuid }
+    });
 
-    if (newId) {
-      const delayMs = (15 + Math.random() * 5) * 60 * 1000;
-      pendingActivations.push({ itemId: newId, userId: req.user.id, activateAt: Date.now() + delayMs, draftData: draft, uploadSessionId: uuid });
-      saveData();
-      scheduleActivation(req.user.id, newId, delayMs);
-      console.log(`[RP] Reposted ${req.params.itemId} → ${newId}, activating in ${Math.round(delayMs/60000)}m`);
-    }
-    res.json({ ok: true, oldId: req.params.itemId, newId, draft: true });
-  } catch (e) { res.status(502).json({ error: e.message }); }
+    console.log(`[RP] Reposted ${itemId} → ${newId} (publish status: ${completeResp.status})`);
+    res.json({ ok: completeResp.ok, oldId: itemId, newId, published: completeResp.ok });
+  } catch (e) {
+    console.error('[RP] Repost error:', e.message);
+    res.status(502).json({ error: e.message });
+  }
 });
 
 // ═══ START ═══
