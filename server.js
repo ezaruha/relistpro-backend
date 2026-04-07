@@ -467,6 +467,8 @@ app.post('/api/vinted/items/:itemId/repost', auth, async (req, res) => {
   const session = sessions[req.user.id];
   if (!session) return res.status(401).json({ error: 'No session' });
   const { itemId } = req.params;
+  // freshPhotos: browser-uploaded photo IDs sent by content.js (preferred path)
+  const { freshPhotos: browserPhotos } = req.body || {};
   try {
     // 1. Fetch item in upload format (has price.amount, color1_id, catalog_id etc.)
     const getResp = await vintedFetch(session, `/api/v2/item_upload/items/${itemId}`);
@@ -474,9 +476,16 @@ app.post('/api/vinted/items/:itemId/repost', auth, async (req, res) => {
     const item = (await getResp.json()).item;
     if (!item) return res.status(404).json({ error: 'Item not found in response' });
 
-    // 2. Re-upload photos BEFORE touching original (CDN URLs still valid while item exists)
-    console.log(`[RP] Reuploading ${(item.photos||[]).length} photos for ${itemId}...`);
-    const freshPhotos = await reuploadPhotos(session, item.photos || []);
+    // 2. Use browser-uploaded photos (uploaded via content.js with real session) if provided,
+    //    otherwise fall back to server-side re-upload (may fail if CDN blocks Railway IP)
+    let freshPhotos;
+    if (browserPhotos && browserPhotos.length > 0) {
+      freshPhotos = browserPhotos;
+      console.log(`[RP] Using ${freshPhotos.length} browser-uploaded photos for ${itemId}`);
+    } else {
+      console.log(`[RP] No browser photos provided — attempting server-side re-upload for ${itemId}...`);
+      freshPhotos = await reuploadPhotos(session, item.photos || []);
+    }
 
     // 3. Create new draft with fresh photo IDs
     const draft = buildDraftPayload(item);
