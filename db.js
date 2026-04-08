@@ -130,6 +130,19 @@ async function initSchema() {
         user_id UUID PRIMARY KEY REFERENCES rp_users(id) ON DELETE CASCADE,
         data JSONB NOT NULL DEFAULT '{}'
       );
+
+      CREATE TABLE IF NOT EXISTS rp_actions (
+        id BIGSERIAL PRIMARY KEY,
+        user_id UUID NOT NULL REFERENCES rp_users(id) ON DELETE CASCADE,
+        type TEXT NOT NULL,
+        item_id TEXT,
+        new_item_id TEXT,
+        item_title TEXT,
+        status TEXT NOT NULL DEFAULT 'success',
+        details JSONB DEFAULT '{}',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_rp_actions_user_time ON rp_actions(user_id, created_at DESC);
     `);
     console.log('[DB] Schema ready');
   } catch (e) {

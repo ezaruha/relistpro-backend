@@ -358,12 +358,13 @@ app.get('/api/dashboard', auth, async (req, res) => {
   const plan = req.user.plan || 'free';
   const planInfo = PLANS[plan] || PLANS.free;
   try {
-    const [itemsR, soldR, snapshotsR, messagesR, schedulesR, settingsR, sessionR] = await Promise.all([
+    const [itemsR, soldR, snapshotsR, messagesR, schedulesR, actionsR, settingsR, sessionR] = await Promise.all([
       db.query('SELECT * FROM rp_items WHERE user_id=$1 ORDER BY first_seen DESC', [userId]),
       db.query('SELECT * FROM rp_sold_items WHERE user_id=$1 ORDER BY sold_at DESC NULLS LAST', [userId]),
       db.query('SELECT * FROM rp_snapshots WHERE user_id=$1 ORDER BY snap_date DESC LIMIT 365', [userId]),
       db.query('SELECT * FROM rp_messages WHERE user_id=$1 ORDER BY time DESC LIMIT 200', [userId]),
       db.query('SELECT * FROM rp_schedules WHERE user_id=$1', [userId]),
+      db.query('SELECT id,type,item_id,new_item_id,item_title,status,details,created_at FROM rp_actions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 200', [userId]),
       store.getSettings(userId),
       store.getSession(userId)
     ]);
@@ -395,8 +396,13 @@ app.get('/api/dashboard', auth, async (req, res) => {
       id:row.id, name:row.name, active:row.active, freq:row.freq, hour:row.hour_of_day,
       start:row.start_hour, end:row.end_hour, items:row.item_ids, nextRun:row.next_run, lastRun:row.last_run
     }));
+    const actions = actionsR.rows.map(row => ({
+      id:row.id, type:row.type, itemId:row.item_id, newItemId:row.new_item_id,
+      itemTitle:row.item_title, status:row.status, details:row.details||{},
+      createdAt:row.created_at
+    }));
     const totalRevenue = sold.reduce((s,i) => s+(i.price||0), 0);
-    res.json({ ok:true, items, sold, snapshots, messages, schedules, settings:settingsR,
+    res.json({ ok:true, items, sold, snapshots, messages, schedules, actions, settings:settingsR,
       totalRevenue, plan, planInfo,
       account: { memberId:sessionR?.memberId, domain:sessionR?.domain, connected:!!sessionR }
     });
@@ -717,16 +723,57 @@ app.post('/api/vinted/items/:itemId/repost', auth, async (req, res) => {
   }
 });
 
-// ═══ REPOST LOG (quota tracking — called by extension after browser-side repost) ═══
+// ═══ REPOST LOG (called by extension after browser-side repost — updates DB immediately) ═══
+// ═══ ACTIVITY LOG ═══
+app.post('/api/actions', auth, async (req, res) => {
+  if (!db.hasDb()) return res.json({ ok:false });
+  const { type, itemId, newItemId, itemTitle, status, details } = req.body || {};
+  if (!type) return res.status(400).json({ error:'type required' });
+  try {
+    const r = await db.query(
+      `INSERT INTO rp_actions(user_id,type,item_id,new_item_id,item_title,status,details)
+       VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id,created_at`,
+      [req.user.id, type, itemId||null, newItemId||null, itemTitle||null, status||'success', JSON.stringify(details||{})]
+    );
+    res.json({ ok:true, id:r.rows[0].id, createdAt:r.rows[0].created_at });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
+app.get('/api/actions', auth, async (req, res) => {
+  if (!db.hasDb()) return res.json({ ok:true, actions:[] });
+  const limit = Math.min(parseInt(req.query.limit||'200',10), 1000);
+  try {
+    const r = await db.query(
+      `SELECT id,type,item_id,new_item_id,item_title,status,details,created_at
+       FROM rp_actions WHERE user_id=$1 ORDER BY created_at DESC LIMIT $2`,
+      [req.user.id, limit]
+    );
+    const actions = r.rows.map(row => ({
+      id:row.id, type:row.type, itemId:row.item_id, newItemId:row.new_item_id,
+      itemTitle:row.item_title, status:row.status, details:row.details||{},
+      createdAt:row.created_at
+    }));
+    res.json({ ok:true, actions });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
 app.post('/api/vinted/items/:itemId/repost-log', auth, async (req, res) => {
-  const { newId } = req.body || {};
+  const { newId, edits } = req.body || {};
   try {
     if (db.hasDb()) {
       const now = new Date().toISOString();
       if (newId && newId !== req.params.itemId) {
+        // Fetch current raw_data to merge repostEdits into it
+        const existing = await db.query('SELECT raw_data FROM rp_items WHERE item_id=$1 AND user_id=$2', [req.params.itemId, req.user.id]);
+        let raw = {};
+        try { raw = JSON.parse(existing.rows[0]?.raw_data || '{}'); } catch {}
+        const prevEdits = raw.repostEdits || [];
+        const newRepostEdits = edits && edits.length ? [edits, ...prevEdits.slice(0,4)] : prevEdits;
+        const updatedRaw = JSON.stringify(Object.assign({}, raw, { lastRepost: now, repostEdits: newRepostEdits, repostCount: (raw.repostCount||0)+1 }));
         await db.query(
-          'UPDATE rp_items SET item_id=$1,last_repost=$2,repost_count=repost_count+1,status=\'active\' WHERE item_id=$3 AND user_id=$4',
-          [newId, now, req.params.itemId, req.user.id]
+          `UPDATE rp_items SET item_id=$1,last_repost=$2,repost_count=repost_count+1,status='active',raw_data=$5
+           WHERE item_id=$3 AND user_id=$4`,
+          [newId, now, req.params.itemId, req.user.id, updatedRaw]
         );
       } else {
         await db.query(
@@ -734,6 +781,15 @@ app.post('/api/vinted/items/:itemId/repost-log', auth, async (req, res) => {
           [now, req.params.itemId, req.user.id]
         );
       }
+      // Always log to activity feed
+      try {
+        const titleR = await db.query('SELECT title FROM rp_items WHERE item_id=$1 AND user_id=$2', [newId||req.params.itemId, req.user.id]);
+        await db.query(
+          `INSERT INTO rp_actions(user_id,type,item_id,new_item_id,item_title,status,details)
+           VALUES($1,'repost',$2,$3,$4,'success',$5)`,
+          [req.user.id, req.params.itemId, newId||null, titleR.rows[0]?.title||null, JSON.stringify({edits:edits||[]})]
+        );
+      } catch {}
     }
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
