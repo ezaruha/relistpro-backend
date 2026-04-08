@@ -717,6 +717,28 @@ app.post('/api/vinted/items/:itemId/repost', auth, async (req, res) => {
   }
 });
 
+// ═══ REPOST LOG (quota tracking — called by extension after browser-side repost) ═══
+app.post('/api/vinted/items/:itemId/repost-log', auth, async (req, res) => {
+  const { newId } = req.body || {};
+  try {
+    if (db.hasDb()) {
+      const now = new Date().toISOString();
+      if (newId && newId !== req.params.itemId) {
+        await db.query(
+          'UPDATE rp_items SET item_id=$1,last_repost=$2,repost_count=repost_count+1,status=\'active\' WHERE item_id=$3 AND user_id=$4',
+          [newId, now, req.params.itemId, req.user.id]
+        );
+      } else {
+        await db.query(
+          'UPDATE rp_items SET repost_count=repost_count+1,last_repost=$1 WHERE item_id=$2 AND user_id=$3',
+          [now, req.params.itemId, req.user.id]
+        );
+      }
+    }
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ═══ MOBILE LISTER ═══
 
 app.post('/api/vinted/photos/upload', auth, async (req, res) => {
