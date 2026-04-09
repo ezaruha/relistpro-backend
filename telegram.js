@@ -492,11 +492,16 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
     if (stepName === 'category') {
       c.step = 'wiz_category';
-      if (L.category_hint && !L.catalog_id) {
-        const searchTerm = L.category_hint.split('/').pop();
-        return searchCategories(chatId, searchTerm);
+      try {
+        if (L.category_hint && !L.catalog_id) {
+          const searchTerm = L.category_hint.split('/').pop();
+          return await searchCategories(chatId, searchTerm);
+        }
+        return await showCategoryPicker(chatId, null);
+      } catch (e) {
+        console.error('[TG] Category step error:', e.message);
+        return bot.sendMessage(chatId, '📂 Step 4/9 — Category\n\nType a category name to search (e.g. "t-shirt", "hoodie", "trainers"):');
       }
-      return showCategoryPicker(chatId, null);
     }
 
     if (stepName === 'size') {
@@ -682,6 +687,38 @@ COLOR:
   }
 
   // ──────────────────────────────────────────
+  // AI EDIT — applies user's edit instruction to a field
+  // ──────────────────────────────────────────
+
+  async function aiEdit(field, currentValue, instruction) {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) throw new Error('ANTHROPIC_API_KEY not configured');
+
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 500,
+        system: `You are editing a Vinted listing field. The user wants to modify the ${field}. Apply their instruction and return ONLY the updated ${field} value — no quotes, no explanation, no extra text. Keep it suitable for a Vinted listing.`,
+        messages: [{
+          role: 'user',
+          content: `Current ${field}: ${currentValue}\n\nUser wants: ${instruction}\n\nReturn only the updated ${field}:`
+        }]
+      })
+    });
+
+    const data = await resp.json();
+    const result = data.content?.[0]?.text?.trim();
+    if (!result) throw new Error('AI returned empty');
+    return result;
+  }
+
+  // ──────────────────────────────────────────
   // SUMMARY DISPLAY
   // ──────────────────────────────────────────
 
@@ -751,10 +788,11 @@ COLOR:
 
   bot.on('callback_query', async (query) => {
     const chatId = query.message.chat.id;
-    const c = getChat(chatId);
     const data = query.data;
 
+    try {
     bot.answerCallbackQuery(query.id);
+    const c = getChat(chatId);
 
     // ── Switch account ──
     if (data.startsWith('sw:')) {
@@ -805,18 +843,18 @@ COLOR:
       return wizardNext(chatId);
     }
 
-    // ── Wizard edit (send current suggestion as copyable text, stay on step) ──
+    // ── Wizard edit (AI-assisted: ask user what to change, AI applies it) ──
     if (data === 'wiz:edit:title') {
-      bot.sendMessage(chatId, `Current suggestion:\n\n${c.listing.title}\n\nType your new title:`);
-      return; // step stays wiz_title, text handler will pick up
+      c.step = 'wiz_edit_title';
+      return bot.sendMessage(chatId, `Current title:\n"${c.listing.title}"\n\nWhat would you like to change? Describe in your own words (e.g. "make it shorter", "add Nike brand", "remove the size"):`);
     }
     if (data === 'wiz:edit:desc') {
-      bot.sendMessage(chatId, `Current suggestion:\n\n${c.listing.description}\n\nType your new description:`);
-      return;
+      c.step = 'wiz_edit_desc';
+      return bot.sendMessage(chatId, `Current description:\n"${c.listing.description}"\n\nWhat would you like to change? (e.g. "make it more casual", "add that it's never worn", "mention it's stretchy material"):`);
     }
     if (data === 'wiz:edit:price') {
-      bot.sendMessage(chatId, `Current suggestion: £${c.listing.price}\n\nType your new price (number only):`);
-      return;
+      c.step = 'wiz_edit_price';
+      return bot.sendMessage(chatId, `Current price: £${c.listing.price}\n\nWhat would you like to change? (e.g. "lower it", "make it £15", "price it higher"):`);
     }
 
     // ── Edit text fields (from final review) ──
@@ -876,15 +914,18 @@ COLOR:
 
     // ── Pick category ──
     if (data === 'pick:cat') {
-      return showCategoryPicker(chatId, null);
+      try { return await showCategoryPicker(chatId, null); }
+      catch (e) { console.error('[TG] cat picker error:', e.message); return bot.sendMessage(chatId, 'Error loading categories. Type a category name to search:'); }
     }
     if (data.startsWith('cat:')) {
       const id = parseInt(data.split(':')[1]);
-      return selectCategory(chatId, id);
+      try { return await selectCategory(chatId, id); }
+      catch (e) { console.error('[TG] cat select error:', e.message); return bot.sendMessage(chatId, 'Error selecting category. Try again or type a name to search:'); }
     }
     if (data.startsWith('nav:')) {
       const id = parseInt(data.split(':')[1]);
-      return showCategoryPicker(chatId, id);
+      try { return await showCategoryPicker(chatId, id); }
+      catch (e) { console.error('[TG] cat nav error:', e.message); return bot.sendMessage(chatId, 'Error loading subcategories. Type a category name to search:'); }
     }
 
     // ── Pick size ──
@@ -919,6 +960,10 @@ COLOR:
     // ── POST ──
     if (data === 'post') {
       return createListing(chatId);
+    }
+    } catch (e) {
+      console.error('[TG] Callback error:', e.message, e.stack);
+      try { bot.sendMessage(chatId, 'Something went wrong. Try again or /cancel.'); } catch {}
     }
   });
 
@@ -969,6 +1014,53 @@ COLOR:
       if (isNaN(price) || price <= 0) return bot.sendMessage(chatId, 'Enter a valid price (e.g. 25 or 14.50):');
       c.listing.price = Math.round(price * 100) / 100;
       return wizardNext(chatId);
+    }
+
+    // ── AI-assisted edits (user describes what to change) ──
+    if (c.step === 'wiz_edit_title') {
+      bot.sendMessage(chatId, '✏️ Updating title...');
+      try {
+        const result = await aiEdit('title', c.listing.title, msg.text);
+        c.listing.title = result.slice(0, 60);
+      } catch (e) {
+        console.error('[TG] AI edit error:', e.message);
+        c.listing.title = msg.text.slice(0, 60); // fallback: use their text directly
+      }
+      c.step = 'wiz_title';
+      return askWizardStep(chatId);
+    }
+
+    if (c.step === 'wiz_edit_desc') {
+      bot.sendMessage(chatId, '✏️ Updating description...');
+      try {
+        const result = await aiEdit('description', c.listing.description, msg.text);
+        c.listing.description = result;
+      } catch (e) {
+        console.error('[TG] AI edit error:', e.message);
+        c.listing.description = msg.text;
+      }
+      c.step = 'wiz_description';
+      return askWizardStep(chatId);
+    }
+
+    if (c.step === 'wiz_edit_price') {
+      // Check if user just typed a number directly
+      const directPrice = parseFloat(msg.text.replace(/[^0-9.]/g, ''));
+      if (!isNaN(directPrice) && directPrice > 0 && /^\s*[£$€]?\s*\d/.test(msg.text)) {
+        c.listing.price = Math.round(directPrice * 100) / 100;
+        c.step = 'wiz_price';
+        return askWizardStep(chatId);
+      }
+      bot.sendMessage(chatId, '✏️ Adjusting price...');
+      try {
+        const result = await aiEdit('price', `£${c.listing.price}`, msg.text);
+        const newPrice = parseFloat(result.replace(/[^0-9.]/g, ''));
+        if (!isNaN(newPrice) && newPrice > 0) c.listing.price = Math.round(newPrice * 100) / 100;
+      } catch (e) {
+        console.error('[TG] AI edit error:', e.message);
+      }
+      c.step = 'wiz_price';
+      return askWizardStep(chatId);
     }
 
     if (c.step === 'wiz_brand') {
@@ -1164,6 +1256,7 @@ COLOR:
     if (!matches.length) {
       try {
         const acct = activeAccount(c);
+        if (!acct) throw new Error('No active account');
         const session = await store.getSession(acct.userId);
         if (session) {
           const resp = await vintedFetch(session, `/api/v2/catalog/initializers?keyword=${encodeURIComponent(query)}`);
