@@ -626,12 +626,18 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     const photo = msg.photo[msg.photo.length - 1];
     try {
       const fileLink = await bot.getFileLink(photo.file_id);
-      const resp = await fetch(fileLink);
+      console.log(`[TG] Downloading photo: ${fileLink}`);
+      const resp = await fetch(fileLink, {
+        headers: { 'User-Agent': 'RelistPro/1.0' }
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const buffer = Buffer.from(await resp.arrayBuffer());
+      if (!buffer.length) throw new Error('Empty file');
       c.photos.push({ base64: buffer.toString('base64'), fileId: photo.file_id });
+      console.log(`[TG] Photo downloaded: ${buffer.length} bytes`);
     } catch (e) {
       console.error('[TG] Photo download error:', e.message);
-      return bot.sendMessage(chatId, 'Failed to download photo. Try again.');
+      return bot.sendMessage(chatId, `Can't download the photo (${e.message}). Try sending it again.`);
     }
 
     if (msg.caption) c.caption = msg.caption;
@@ -1710,38 +1716,22 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
 
       for (let i = 0; i < c.photos.length; i++) {
         const buffer = Buffer.from(c.photos[i].base64, 'base64');
-        const uuid = crypto.randomBytes(16).toString('hex');
+        const uuid = crypto.randomUUID();
 
-        // Build multipart form manually for reliable Node.js uploads
-        const boundary = '----VintedUpload' + crypto.randomBytes(8).toString('hex');
-        const preamble =
-          `--${boundary}\r\n` +
-          `Content-Disposition: form-data; name="photo[type]"\r\n\r\n` +
-          `item\r\n` +
-          `--${boundary}\r\n` +
-          `Content-Disposition: form-data; name="photo[temp_uuid]"\r\n\r\n` +
-          `${uuid}\r\n` +
-          `--${boundary}\r\n` +
-          `Content-Disposition: form-data; name="photo[file]"; filename="photo_${i + 1}.jpg"\r\n` +
-          `Content-Type: image/jpeg\r\n\r\n`;
-
-        const head = Buffer.from(preamble, 'utf-8');
-        const tail = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf-8');
-        const body = Buffer.concat([head, buffer, tail]);
+        // Use native FormData + Blob (matches DOTB's approach exactly)
+        const form = new FormData();
+        form.append('photo[type]', 'item');
+        form.append('photo[file]', new Blob([buffer], { type: 'image/jpeg' }), 'photo.jpg');
+        form.append('photo[temp_uuid]', uuid);
 
         const uploadResp = await fetch(`https://${domain}/api/v2/photos`, {
           method: 'POST',
           headers: {
             'Cookie': session.cookies,
             'X-CSRF-Token': session.csrf,
-            'Content-Type': `multipart/form-data; boundary=${boundary}`,
-            'Accept': 'application/json, text/javascript, */*; q=0.01',
-            'Referer': `https://${domain}/`,
-            'Origin': `https://${domain}`,
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'X-Requested-With': 'XMLHttpRequest'
           },
-          body: body
+          body: form
         });
 
         if (!uploadResp.ok) {
