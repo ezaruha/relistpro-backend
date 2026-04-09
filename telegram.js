@@ -1139,6 +1139,7 @@ COLOR:
         const resp = await vintedFetch(session, ep);
         if (resp.ok) {
           const data = await resp.json();
+          console.log(`[TG] ${ep} response keys:`, Object.keys(data));
           catalogs = data.catalogs || data.categories || data.catalog_tree || data.data || [];
           if (Array.isArray(catalogs) && catalogs.length) {
             console.log(`[TG] Got ${catalogs.length} categories from ${ep}`);
@@ -1249,7 +1250,7 @@ COLOR:
     const c = getChat(chatId);
     let matches = [];
 
-    // Try local catalog cache
+    // Try local catalog cache first
     const catalogs = await fetchCatalogs(chatId);
     if (catalogs) {
       const flat = flattenCatalogs(catalogs);
@@ -1257,23 +1258,50 @@ COLOR:
       matches = flat.filter(x => x.path.toLowerCase().includes(q)).slice(0, 8);
     }
 
-    // If no local matches, try Vinted catalog search API
+    // If no local matches, try Vinted keyword search APIs
     if (!matches.length) {
       try {
         const acct = activeAccount(c);
         if (!acct) return [];
         const session = await store.getSession(acct.userId);
-        if (session) {
-          const resp = await vintedFetch(session, `/api/v2/catalog/initializers?keyword=${encodeURIComponent(keyword)}`);
-          if (resp.ok) {
+        if (!session) return [];
+
+        // Try multiple search endpoints
+        const searchEndpoints = [
+          `/api/v2/catalog/initializers?keyword=${encodeURIComponent(keyword)}`,
+          `/api/v2/catalogs?keyword=${encodeURIComponent(keyword)}`,
+          `/api/v2/search/catalog?text=${encodeURIComponent(keyword)}`,
+        ];
+
+        for (const ep of searchEndpoints) {
+          try {
+            const resp = await vintedFetch(session, ep);
+            if (!resp.ok) { console.log(`[TG] ${ep} → ${resp.status}`); continue; }
             const data = await resp.json();
-            const cats = data.dtos || data.catalogs || [];
-            matches = cats.slice(0, 8).map(x => ({
-              id: x.id || x.catalog_id,
-              title: x.title || x.name,
-              path: x.full_title || x.title || x.name,
-              hasChildren: false
-            }));
+            console.log(`[TG] ${ep} response keys:`, Object.keys(data));
+
+            // Extract catalogs array from various response shapes
+            let cats = null;
+            if (Array.isArray(data)) cats = data;
+            else if (Array.isArray(data.catalogs)) cats = data.catalogs;
+            else if (Array.isArray(data.dtos)) cats = data.dtos;
+            else if (Array.isArray(data.categories)) cats = data.categories;
+            else if (Array.isArray(data.catalog_initializers)) cats = data.catalog_initializers;
+            else if (data.catalogs && typeof data.catalogs === 'object') cats = Object.values(data.catalogs);
+            else if (data.dtos && typeof data.dtos === 'object') cats = Object.values(data.dtos);
+
+            if (cats && cats.length) {
+              matches = cats.slice(0, 8).map(x => ({
+                id: x.id || x.catalog_id,
+                title: x.title || x.name || '',
+                path: x.full_title || x.title || x.name || '',
+                hasChildren: false
+              })).filter(x => x.id);
+              console.log(`[TG] Keyword "${keyword}" found ${matches.length} via ${ep}`);
+              break;
+            }
+          } catch (e2) {
+            console.error(`[TG] Search endpoint ${ep} error:`, e2.message);
           }
         }
       } catch (e) {
@@ -1377,11 +1405,14 @@ COLOR:
 
   async function showSizePicker(chatId) {
     const c = getChat(chatId);
-    const session = await store.getSession(activeAccount(c).userId);
-    if (!session) return bot.sendMessage(chatId, 'No Vinted session.');
+    try {
+    const acct = activeAccount(c);
+    if (!acct) throw new Error('No account');
+    const session = await store.getSession(acct.userId);
+    if (!session) throw new Error('No session');
 
     const resp = await vintedFetch(session, `/api/v2/catalog_sizes?catalog_ids[]=${c.listing.catalog_id}`);
-    if (!resp.ok) return bot.sendMessage(chatId, 'Failed to load sizes.');
+    if (!resp.ok) throw new Error(`sizes API returned ${resp.status}`);
 
     const data = await resp.json();
     const groups = data.catalog_sizes || data.sizes || [];
@@ -1414,6 +1445,14 @@ COLOR:
 
     const header = c.step.startsWith('wiz_') ? '📏 Step 5/9 — Size\n\nSelect size:' : 'Select size:';
     bot.sendMessage(chatId, header, { reply_markup: { inline_keyboard: rows } });
+    } catch (e) {
+      console.error('[TG] Size picker error:', e.message);
+      // Skip size step
+      c.listing.size_id = null;
+      c.listing.size_name = 'N/A';
+      if (c.step.startsWith('wiz_')) return wizardNext(chatId);
+      bot.sendMessage(chatId, 'Could not load sizes. Skipping.');
+    }
   }
 
   async function selectSize(chatId, sizeId) {
@@ -1436,31 +1475,75 @@ COLOR:
 
   async function showPackageSizePicker(chatId) {
     const c = getChat(chatId);
-    const session = await store.getSession(activeAccount(c).userId);
-    if (!session) return bot.sendMessage(chatId, 'No Vinted session.');
+    const inWiz = c.step.startsWith('wiz_');
+    const header = inWiz ? '📮 Step 9/9 — Parcel Size\n\n' : '';
 
-    const resp = await vintedFetch(session, '/api/v2/package_sizes');
-    if (!resp.ok) return bot.sendMessage(chatId, 'Failed to load parcel sizes.');
+    try {
+      const acct = activeAccount(c);
+      if (!acct) throw new Error('No active account');
+      const session = await store.getSession(acct.userId);
+      if (!session) throw new Error('No session');
 
-    const data = await resp.json();
-    const sizes = data.package_sizes || [];
+      // Try multiple package size endpoints
+      let sizes = [];
+      const pkgEndpoints = ['/api/v2/package_sizes', '/api/v2/package-sizes'];
+      for (const ep of pkgEndpoints) {
+        const resp = await vintedFetch(session, ep);
+        console.log(`[TG] ${ep} → ${resp.status}`);
+        if (resp.ok) {
+          const data = await resp.json();
+          console.log(`[TG] Package sizes response keys:`, Object.keys(data));
+          sizes = Array.isArray(data.package_sizes) ? data.package_sizes
+                : Array.isArray(data) ? data : [];
+          if (sizes.length) break;
+        }
+      }
 
-    if (!sizes.length) return bot.sendMessage(chatId, 'No parcel sizes available.');
+      if (!sizes.length) {
+        // Offer common UK package sizes as fallback
+        const fallbackSizes = [
+          { id: 1, title: 'Small', desc: 'Letter / small parcel' },
+          { id: 2, title: 'Medium', desc: 'Standard parcel' },
+          { id: 3, title: 'Large', desc: 'Large parcel' },
+          { id: 5, title: 'Extra Large', desc: 'Very large item' },
+        ];
+        const rows = fallbackSizes.map(s => [{
+          text: `${s.title} — ${s.desc}`, callback_data: `pkg:${s.id}`
+        }]);
+        rows.push([{ text: '⏭️ Skip', callback_data: 'pkg:0' }]);
+        return bot.sendMessage(chatId, header + 'Could not load parcel sizes from Vinted. Select an approximate size:', {
+          reply_markup: { inline_keyboard: rows }
+        });
+      }
 
-    const rows = sizes.map(s => [{
-      text: `${s.title}${s.description ? ' — ' + s.description.slice(0, 30) : ''}`,
-      callback_data: `pkg:${s.id}`
-    }]);
+      const rows = sizes.map(s => [{
+        text: `${s.title || s.name}${s.description ? ' — ' + s.description.slice(0, 30) : ''}`,
+        callback_data: `pkg:${s.id}`
+      }]);
+      rows.push([{ text: '⏭️ Skip', callback_data: 'pkg:0' }]);
 
-    const c2 = getChat(chatId);
-    const header2 = c2.step.startsWith('wiz_') ? '📮 Step 9/9 — Parcel Size\n\nSelect parcel size:' : 'Select parcel size:';
-    bot.sendMessage(chatId, header2, { reply_markup: { inline_keyboard: rows } });
+      bot.sendMessage(chatId, header + 'Select parcel size:', { reply_markup: { inline_keyboard: rows } });
+    } catch (e) {
+      console.error('[TG] Package size error:', e.message);
+      // Skip parcel size if we can't load it
+      if (inWiz) {
+        c.listing.package_size_id = 2; // default medium
+        c.listing.package_size_name = 'Medium (default)';
+        return wizardNext(chatId);
+      }
+      bot.sendMessage(chatId, 'Could not load parcel sizes. Continuing with default.');
+    }
   }
 
   async function selectPackageSize(chatId, pkgId) {
     const c = getChat(chatId);
-    c.listing.package_size_id = pkgId;
-    c.listing.package_size_name = `ID: ${pkgId}`;
+    if (pkgId === 0) {
+      c.listing.package_size_id = null;
+      c.listing.package_size_name = 'N/A';
+    } else {
+      c.listing.package_size_id = pkgId;
+      c.listing.package_size_name = `ID: ${pkgId}`;
+    }
     if (c.step.startsWith('wiz_')) return wizardNext(chatId);
     c.step = 'review';
     return showSummary(chatId);
