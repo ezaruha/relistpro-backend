@@ -125,6 +125,70 @@ function ensureMulti(c) {
 // ═══ MAIN INIT ═══
 module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app, db }) {
 
+  // ── Refresh Vinted session server-side (get fresh CSRF + cookies) ──
+  async function refreshVintedSession(session, userId) {
+    const domain = session.domain || 'www.vinted.co.uk';
+    try {
+      // 1) Try the auth refresh endpoint (like DOTB does in-browser)
+      const refreshResp = await fetch(`https://${domain}/web/api/auth/refresh`, {
+        method: 'POST',
+        headers: {
+          'Cookie': session.cookies,
+          'X-CSRF-Token': session.csrf,
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'application/json',
+        },
+        redirect: 'manual', // capture Set-Cookie before redirect
+      });
+
+      // Grab new cookies from the response
+      const setCookies = refreshResp.headers.getSetCookie?.() || [];
+      if (setCookies.length) {
+        // Parse existing cookies into a map
+        const cookieMap = {};
+        session.cookies.split(';').forEach(c => {
+          const [k, ...v] = c.trim().split('=');
+          if (k) cookieMap[k.trim()] = v.join('=');
+        });
+        // Update with new cookies from response
+        for (const sc of setCookies) {
+          const [pair] = sc.split(';');
+          const [k, ...v] = pair.split('=');
+          if (k) cookieMap[k.trim()] = v.join('=');
+        }
+        session.cookies = Object.entries(cookieMap).map(([k,v]) => `${k}=${v}`).join('; ');
+
+        // Try to extract new CSRF from a page fetch
+        try {
+          const pageResp = await fetch(`https://${domain}/`, {
+            headers: { 'Cookie': session.cookies, 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+          });
+          const html = await pageResp.text();
+          const csrfMatch = html.match(/"CSRF_TOKEN\\?":\\?"([^"\\]+)\\?"/);
+          if (csrfMatch) {
+            session.csrf = csrfMatch[1];
+            console.log('[TG] Refreshed CSRF token from page');
+          }
+          // Also grab cookies from this response
+          const pageCookies = pageResp.headers.getSetCookie?.() || [];
+          for (const sc of pageCookies) {
+            const [pair] = sc.split(';');
+            const [k, ...v] = pair.split('=');
+            if (k) cookieMap[k.trim()] = v.join('=');
+          }
+          session.cookies = Object.entries(cookieMap).map(([k,v]) => `${k}=${v}`).join('; ');
+        } catch {}
+
+        // Save updated session
+        await store.setSession(userId, session);
+        console.log(`[TG] Session refreshed for user ${userId}`);
+      }
+    } catch (e) {
+      console.log('[TG] Session refresh failed:', e.message);
+    }
+    return session;
+  }
+
   // ── Persist chat accounts to DB so logins survive restarts ──
   // ── Save full chat state to DB (accounts + active listing + photos) ──
   async function saveChatState(chatId) {
@@ -401,12 +465,16 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       let vintedName = null;
       if (session.memberId) {
         try {
-          const profileResp = await vintedFetch(session, `/api/v2/users/${session.memberId}`);
+          // Try refreshing session first to ensure fresh cookies
+          const freshSession = await refreshVintedSession(session, user.id);
+          const profileResp = await vintedFetch(freshSession, `/api/v2/users/${session.memberId}`);
           if (profileResp.ok) {
             const profileData = await profileResp.json();
             vintedName = profileData.user?.login || profileData.user?.username || null;
           }
-        } catch {}
+        } catch (e) {
+          console.log('[TG] Profile fetch failed:', e.message);
+        }
       }
 
       // Check if already linked
@@ -414,11 +482,12 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       if (existing >= 0) {
         c.accounts[existing].token = user.token;
         c.accounts[existing].userId = user.id;
-        c.accounts[existing].vintedName = vintedName;
+        c.accounts[existing].vintedName = vintedName || c.accounts[existing].vintedName;
         c.accounts[existing].vintedDomain = session.domain;
+        c.accounts[existing].memberId = session.memberId;
         c.activeIdx = existing;
       } else {
-        c.accounts.push({ userId: user.id, token: user.token, username: user.username, vintedName, vintedDomain: session.domain });
+        c.accounts.push({ userId: user.id, token: user.token, username: user.username, vintedName, vintedDomain: session.domain, memberId: session.memberId });
         c.activeIdx = c.accounts.length - 1;
       }
       c.step = 'idle';
@@ -1618,10 +1687,21 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
     } catch (e) {
       console.error('[TG] Session fetch error:', e.message);
     }
+
+    // Try to refresh the Vinted session before uploading
+    if (session) {
+      try {
+        session = await refreshVintedSession(session, acct.userId);
+      } catch (e) {
+        console.log('[TG] Session refresh skipped:', e.message);
+      }
+    }
     if (!session) {
       c.step = 'review';
       return bot.sendMessage(chatId, 'Vinted session expired. Sync from Chrome extension, then come back and tap POST again.');
     }
+
+    console.log(`[TG] Posting for ${acct.username}, domain=${session.domain}, csrf=${session.csrf?.slice(0,12)}..., cookies=${session.cookies?.length} chars`);
 
     try {
       // ── Step 1: Upload photos ──
