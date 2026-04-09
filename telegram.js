@@ -807,6 +807,11 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
     const c = getChat(chatId);
     const L = c.listing;
 
+    if (!L) {
+      c.step = 'idle';
+      return bot.sendMessage(chatId, 'No listing in progress. Send photos to start a new one.');
+    }
+
     const catDisplay = L.category_name || (L.catalog_id ? `ID: ${L.catalog_id}` : 'Not set');
     const sizeDisplay = L.size_name || (L.size_id ? `ID: ${L.size_id}` : 'Not set');
     const colorDisplay = L.color || 'Not set';
@@ -1505,7 +1510,12 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
     c.step = 'posting';
     const statusMsg = await bot.sendMessage(chatId, `Uploading ${c.photos.length} photo(s) to Vinted...`);
 
-    const session = await store.getSession(acct.userId);
+    let session;
+    try {
+      session = await store.getSession(acct.userId);
+    } catch (e) {
+      console.error('[TG] Session fetch error:', e.message);
+    }
     if (!session) {
       c.step = 'review';
       return bot.sendMessage(chatId, 'Vinted session expired. Sync from Chrome extension, then come back and tap POST again.');
@@ -1688,7 +1698,8 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
 
       // If we have a draftId, it means draft was created — tell user it's saved
       if (c._lastDraftId) {
-        const dUrl = `https://${session?.domain || 'www.vinted.co.uk'}/items/${c._lastDraftId}/edit`;
+        const dom = session?.domain || acct?.vintedDomain || 'www.vinted.co.uk';
+        const dUrl = `https://${dom}/items/${c._lastDraftId}/edit`;
         c.step = 'idle';
         c.photos = [];
         c.listing = null;
@@ -1701,16 +1712,22 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
         );
       }
 
-      // No draft created yet — safe to retry
-      c.step = 'review';
-      bot.sendMessage(chatId,
-        `Failed: ${e.message}\n\n` +
-        `What to do:\n` +
-        `• Tap 🚀 POST TO VINTED to retry\n` +
-        `• Edit any field using the buttons\n` +
-        `• /cancel to start over`
-      );
-      showSummary(chatId);
+      // No draft created yet — safe to retry if listing still exists
+      if (c.listing) {
+        c.step = 'review';
+        bot.sendMessage(chatId,
+          `Failed: ${e.message}\n\n` +
+          `What to do:\n` +
+          `• Tap 🚀 POST TO VINTED to retry\n` +
+          `• Edit any field using the buttons\n` +
+          `• /cancel to start over`
+        );
+        return showSummary(chatId);
+      }
+
+      // Listing state lost — start fresh
+      c.step = 'idle';
+      bot.sendMessage(chatId, `Failed: ${e.message}\n\nSend new photos to start a fresh listing.`);
     }
   }
 
