@@ -24,6 +24,64 @@ const CONDITIONS = [
   { id: 4, label: 'Satisfactory', emoji: '🔧' },
 ];
 
+// ── Vinted UK package sizes (hardcoded — API often fails) ──
+const PACKAGE_SIZES = [
+  { id: 1, title: 'Small', desc: 'Up to 2kg, fits in a large letter' },
+  { id: 2, title: 'Medium', desc: 'Up to 5kg, shoebox size' },
+  { id: 3, title: 'Large', desc: 'Up to 10kg, medium box' },
+  { id: 5, title: 'Extra large', desc: 'Over 10kg, large box' },
+];
+
+// ── Vinted UK categories (hardcoded with real IDs — API often fails) ──
+const CATEGORIES = [
+  // Women
+  { id: 1904, title: 'Women > Tops & T-shirts', keywords: ['top','t-shirt','tshirt','blouse','shirt','tank','vest','cami','crop top'] },
+  { id: 1907, title: 'Women > Dresses', keywords: ['dress','midi','maxi','mini dress','gown','sundress'] },
+  { id: 1913, title: 'Women > Jumpers & Cardigans', keywords: ['jumper','sweater','cardigan','pullover','knitwear','knit'] },
+  { id: 1911, title: 'Women > Coats & Jackets', keywords: ['coat','jacket','blazer','bomber','parka','puffer','denim jacket','raincoat','trench'] },
+  { id: 1905, title: 'Women > Trousers', keywords: ['trousers','pants','chinos','leggings','joggers','cargo'] },
+  { id: 1903, title: 'Women > Jeans', keywords: ['jeans','denim','skinny jeans','mom jeans','wide leg jeans','straight jeans'] },
+  { id: 1909, title: 'Women > Skirts', keywords: ['skirt','mini skirt','midi skirt','maxi skirt','pleated'] },
+  { id: 1906, title: 'Women > Shorts', keywords: ['shorts','hot pants','denim shorts'] },
+  { id: 1918, title: 'Women > Hoodies & Sweatshirts', keywords: ['hoodie','sweatshirt','hoody'] },
+  { id: 16, title: 'Women > Shoes', keywords: ['shoes','heels','boots','sandals','trainers','sneakers','flats','loafers','pumps','platforms'] },
+  { id: 2066, title: 'Women > Bags', keywords: ['bag','handbag','purse','tote','crossbody','clutch','backpack','shoulder bag','rucksack'] },
+  { id: 1908, title: 'Women > Activewear', keywords: ['activewear','sportswear','gym','running','yoga','sports bra','leggings'] },
+  { id: 1927, title: 'Women > Swimwear', keywords: ['swimwear','bikini','swimsuit','bathing suit','swimming'] },
+  { id: 1929, title: 'Women > Lingerie', keywords: ['lingerie','bra','underwear','knickers','pyjamas','nightwear','sleepwear'] },
+  { id: 2048, title: 'Women > Accessories', keywords: ['accessory','scarf','hat','gloves','belt','jewellery','jewelry','watch','sunglasses','hair'] },
+  // Men
+  { id: 2050, title: 'Men > T-shirts', keywords: ['men t-shirt','men tshirt','mens top','mens tee'] },
+  { id: 2052, title: 'Men > Shirts', keywords: ['men shirt','mens shirt','dress shirt','casual shirt'] },
+  { id: 2056, title: 'Men > Jumpers & Cardigans', keywords: ['men jumper','mens sweater','men cardigan','men knitwear'] },
+  { id: 2055, title: 'Men > Coats & Jackets', keywords: ['men coat','mens jacket','men blazer','men puffer','men parka','men bomber'] },
+  { id: 2051, title: 'Men > Trousers', keywords: ['men trousers','mens pants','men chinos','men joggers','mens cargo'] },
+  { id: 2049, title: 'Men > Jeans', keywords: ['men jeans','mens jeans','mens denim'] },
+  { id: 2053, title: 'Men > Shorts', keywords: ['men shorts','mens shorts','swim shorts'] },
+  { id: 2058, title: 'Men > Hoodies & Sweatshirts', keywords: ['men hoodie','mens sweatshirt','men hoody','mens hoodie'] },
+  { id: 5, title: 'Men > Shoes', keywords: ['men shoes','mens trainers','mens sneakers','mens boots','mens sandals','mens loafers'] },
+  { id: 2059, title: 'Men > Bags', keywords: ['men bag','mens backpack','mens rucksack','gym bag','messenger bag'] },
+  { id: 2054, title: 'Men > Activewear', keywords: ['men sportswear','mens activewear','mens gym','men running','football shirt','jersey'] },
+  { id: 2070, title: 'Men > Accessories', keywords: ['men accessory','mens hat','mens belt','mens wallet','mens scarf','tie','cufflinks'] },
+  // Kids
+  { id: 381, title: 'Kids > Girls clothing', keywords: ['girls','girl dress','girls top','girls coat','girls school'] },
+  { id: 411, title: 'Kids > Boys clothing', keywords: ['boys','boy shirt','boys top','boys coat','boys school'] },
+  { id: 459, title: 'Kids > Baby clothing', keywords: ['baby','babygrow','onesie','romper','newborn','toddler','infant'] },
+  { id: 495, title: 'Kids > Shoes', keywords: ['kids shoes','children shoes','baby shoes','school shoes'] },
+  // Home & other
+  { id: 1791, title: 'Home > Home textile', keywords: ['blanket','pillow','cushion','towel','bedding','curtain','rug','duvet','throw'] },
+  { id: 1796, title: 'Home > Decoration', keywords: ['decoration','ornament','vase','candle','frame','mirror','wall art','home decor'] },
+  { id: 1786, title: 'Home > Tableware', keywords: ['plate','mug','cup','bowl','glass','kitchen','cookware','cutlery'] },
+  { id: 2368, title: 'Entertainment > Books', keywords: ['book','novel','textbook','reading','manga','comic'] },
+  { id: 2379, title: 'Entertainment > Video games', keywords: ['game','video game','console','playstation','xbox','nintendo','ps5','ps4'] },
+  { id: 2373, title: 'Entertainment > Music & Video', keywords: ['vinyl','record','cd','dvd','blu-ray','cassette'] },
+  { id: 2425, title: 'Pets > Pet accessories', keywords: ['pet','dog','cat','collar','lead','pet bed','pet toy'] },
+  { id: 1774, title: 'Kids > Strollers & car seats', keywords: ['stroller','pushchair','pram','car seat','buggy','travel system','baby carrier','highchair'] },
+  { id: 1775, title: 'Kids > Toys', keywords: ['toy','teddy','doll','lego','puzzle','board game','plush','action figure'] },
+  { id: 1778, title: 'Kids > Nursery', keywords: ['nursery','cot','crib','baby monitor','changing mat','baby bath','steriliser'] },
+  { id: 2380, title: 'Electronics', keywords: ['phone','tablet','laptop','headphones','speaker','camera','charger','smartwatch','iphone','samsung','airpods'] },
+];
+
 // ── Common colors ──
 const COLORS = [
   { id: 1, label: 'Black' }, { id: 3, label: 'White' }, { id: 2, label: 'Grey' },
@@ -136,7 +194,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       `Tap /login — I'll ask for your username and password step by step\n` +
       `\\(Use your RelistPro account — register via the Chrome extension first\\)\n\n` +
       `2️⃣ *Send photos*\n` +
-      `Take photos of your item and send them here \\(1\\-5 photos\\)\\.  You can add a caption like "Nike hoodie size M £25"\n\n` +
+      `Take photos of your item and send them here \\(up to 20 photos\\)\\.  You can add a caption like "Nike hoodie size M £25"\n\n` +
       `3️⃣ *AI generates your listing*\n` +
       `Title, description, price, brand, condition — all auto\\-generated\\. You review and edit anything you want\\.\n\n` +
       `4️⃣ *Pick category \\& post*\n` +
@@ -394,8 +452,8 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     );
 
     try {
-      // Send up to 3 photos for better detection
-      const photosForAI = c.photos.slice(0, 20).map(p => p.base64);
+      // Send up to 5 photos to AI (balances detection quality vs cost)
+      const photosForAI = c.photos.slice(0, 5).map(p => p.base64);
       const analysis = await analyzeWithAI(photosForAI, c.caption);
 
       // Map condition text to status_id
@@ -493,15 +551,12 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     if (stepName === 'category') {
       c.step = 'wiz_category';
       try {
-        if (L.category_hint && !L.catalog_id) {
-          // Try the most specific part first, then broaden
-          const parts = L.category_hint.split('/').filter(Boolean);
-          const searchTerm = parts[parts.length - 1] || parts[0] || L.title;
-          return await searchCategories(chatId, searchTerm);
-        }
-        // No hint — search by item title
-        if (L.title) return await searchCategories(chatId, L.title.split(' ').slice(0, 2).join(' '));
-        return await showCategoryPicker(chatId, null);
+        // Always search — uses hardcoded categories (no API needed)
+        const searchTerm = L.category_hint
+          ? L.category_hint.split('/').filter(Boolean).pop() || L.title
+          : (L.title || '').split(' ').slice(0, 2).join(' ');
+        if (searchTerm) return await searchCategories(chatId, searchTerm);
+        return bot.sendMessage(chatId, '📂 Step 4/9 — Category\n\nType a category name to search (e.g. "t-shirt", "hoodie", "trainers"):');
       } catch (e) {
         console.error('[TG] Category step error:', e.message);
         return bot.sendMessage(chatId, '📂 Step 4/9 — Category\n\nType a category name to search (e.g. "t-shirt", "hoodie", "trainers"):');
@@ -588,65 +643,20 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
     const captionCtx = caption ? `\n\nThe seller provided this info: "${caption}"  — use it to fill in details like brand, size, price, etc. Trust the seller's info over visual guesses.` : '';
 
-    // Send up to 3 photos for better analysis
-    const imageBlocks = photos.slice(0, 20).map(p => ({
+    const imageBlocks = photos.slice(0, 5).map(p => ({
       type: 'image',
       source: { type: 'base64', media_type: 'image/jpeg', data: typeof p === 'string' ? p : p.base64 || p }
     }));
 
-    const systemPrompt = `You are a top Vinted reseller with 10,000+ sales. You write listings that SELL FAST.
+    const systemPrompt = `Expert Vinted UK reseller. Create listings that sell fast.
 
-TITLE RULES:
-- Max 60 characters
-- Format: [Brand] [Item Type] [Key Detail] [Size if visible]
-- Use words buyers search for — NOT creative/poetic language
-- Include brand name FIRST if visible (check labels, tags, logos carefully)
-- Include size if visible on tag/label
-- Examples: "Nike Air Force 1 White UK 8", "Zara Oversized Blazer Black M", "Levi's 501 Jeans Blue W32 L32"
-
-DESCRIPTION RULES:
-- 4-6 lines, warm and professional
-- Line 1: Hook — what makes this item desirable (brand quality, style, versatility)
-- Line 2-3: Details — material/fabric, fit, notable features, measurements if guessable
-- Line 4: Condition — be specific ("worn twice", "no flaws", "minor pilling on cuffs")
-- Line 5: Practical info — "Fits true to size", "Great for summer", etc.
-- Last line: 5-8 relevant hashtags for Vinted search (#nike #airforce1 #trainers #sneakers #white)
-- Do NOT use generic filler ("amazing item!", "grab it quick!")
-- Do NOT start with "This is a..."
-
-PRICE RULES — THIS IS CRITICAL:
-- Price for USED items on Vinted UK, NOT retail
-- Research-style pricing based on brand + condition + demand:
-  - Fast fashion (Zara, H&M, Primark, Shein): £3-12
-  - Mid-range (Topshop, Mango, COS, & Other Stories): £8-20
-  - Premium high street (Ted Baker, Reiss, All Saints, Ralph Lauren): £15-40
-  - Sportswear (Nike, Adidas, Puma, New Balance): £10-35
-  - Designer (Gucci, Burberry, Prada): £40-200+
-  - Vintage/rare items: price higher
-- Condition affects price: "New with tags" = 60-70% retail, "Very good" = 30-50% retail, "Good" = 20-35% retail
-- NEVER suggest retail price. Buyers are on Vinted for deals.
-
-CONDITION RULES:
-- Look at the photos carefully for wear signs: pilling, fading, stains, creases, sole wear
-- "New with tags" — ONLY if you can see actual tags in the photo
-- "New without tags" — looks completely unworn, crisp fabric, no wear
-- "Very good" — minimal wear, no visible flaws
-- "Good" — some wear but presentable
-- "Satisfactory" — visible wear, stains, damage
-
-BRAND DETECTION:
-- Look for: labels on collar/neck, chest logos, sleeve tags, sole branding, button engravings, zipper pulls
-- Check ALL photos, not just the first one
-- If you can see a brand logo but can't read it clearly, make your best guess
-- Return null only if truly unidentifiable
-
-CATEGORY HINT:
-- Use the Vinted category path format: "women/clothing/tops/t-shirts" or "men/shoes/trainers"
-- Be as specific as possible — "women/clothing/dresses/midi-dresses" not just "women/clothing"
-
-COLOR:
-- Must be one of: Black, White, Grey, Blue, Red, Green, Yellow, Pink, Orange, Purple, Brown, Beige, Cream, Multicolour
-- If the item has a pattern (stripes, floral, etc.) pick the dominant base color, or Multicolour if mixed`;
+TITLE: Max 60 chars. Format: [Brand] [Item] [Detail] [Size]. Search-friendly words only. Brand first if visible.
+DESCRIPTION: 3-5 lines. Hook, details (material/fit), condition, hashtags. No filler. No "This is a...".
+PRICE: Vinted UK used prices, NOT retail. Fast fashion £3-12, mid-range £8-20, premium £15-40, sportswear £10-35, designer £40-200+. NWT=60-70% retail, very good=30-50%, good=20-35%.
+CONDITION: Check photos for wear. NWT=visible tags only, NwoT=unworn, Very good=minimal wear, Good=some wear, Satisfactory=visible damage.
+BRAND: Check labels, logos, tags in ALL photos. Guess if partial logo visible. null if unidentifiable.
+CATEGORY: Vinted path like "women/clothing/tops" or "kids/strollers". Be specific.
+COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,Beige,Cream,Multicolour.`;
 
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -656,8 +666,8 @@ COLOR:
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 1500,
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 800,
         system: systemPrompt,
         messages: [{
           role: 'user',
@@ -706,9 +716,9 @@ COLOR:
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 500,
-        system: `You are editing a Vinted listing field. The user wants to modify the ${field}. Apply their instruction and return ONLY the updated ${field} value — no quotes, no explanation, no extra text. Keep it suitable for a Vinted listing.`,
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 200,
+        system: `Edit a Vinted listing ${field}. Apply the user's instruction. Return ONLY the updated value, nothing else.`,
         messages: [{
           role: 'user',
           content: `Current ${field}: ${currentValue}\n\nUser wants: ${instruction}\n\nReturn only the updated ${field}:`
@@ -918,18 +928,16 @@ COLOR:
 
     // ── Pick category ──
     if (data === 'pick:cat') {
-      try { return await showCategoryPicker(chatId, null); }
-      catch (e) { console.error('[TG] cat picker error:', e.message); return bot.sendMessage(chatId, 'Error loading categories. Type a category name to search:'); }
+      c.step = c.step.startsWith('wiz_') ? 'wiz_category' : 'searching_cat';
+      return bot.sendMessage(chatId, 'Type a category name to search (e.g. "hoodie", "jeans", "stroller"):');
+    }
+    if (data === 'cat:search') {
+      if (!c.step.startsWith('wiz_')) c.step = 'searching_cat';
+      return bot.sendMessage(chatId, 'Type a category name to search (e.g. "t-shirt", "trainers", "dress"):');
     }
     if (data.startsWith('cat:')) {
       const id = parseInt(data.split(':')[1]);
-      try { return await selectCategory(chatId, id); }
-      catch (e) { console.error('[TG] cat select error:', e.message); return bot.sendMessage(chatId, 'Error selecting category. Try again or type a name to search:'); }
-    }
-    if (data.startsWith('nav:')) {
-      const id = parseInt(data.split(':')[1]);
-      try { return await showCategoryPicker(chatId, id); }
-      catch (e) { console.error('[TG] cat nav error:', e.message); return bot.sendMessage(chatId, 'Error loading subcategories. Type a category name to search:'); }
+      return selectCategory(chatId, id);
     }
 
     // ── Pick size ──
@@ -1113,202 +1121,35 @@ COLOR:
   });
 
   // ──────────────────────────────────────────
-  // CATEGORY PICKER
+  // CATEGORY SEARCH (hardcoded + AI fallback)
   // ──────────────────────────────────────────
 
-  async function fetchCatalogs(chatId) {
-    const c = getChat(chatId);
-    if (c.catalogCache && c.catalogCache.length) return c.catalogCache;
+  // Search categories by keyword — uses hardcoded list (always works) + API fallback
+  function searchCategoriesByKeyword(keyword) {
+    const q = keyword.toLowerCase().trim();
+    if (!q) return [];
 
-    try {
-      const acct = activeAccount(c);
-      if (!acct) { console.error('[TG] No active account for catalog fetch'); return null; }
-      const session = await store.getSession(acct.userId);
-      if (!session) { console.error('[TG] No session for catalog fetch'); return null; }
-
-      // Try multiple catalog endpoints — varies by Vinted domain
-      const endpoints = [
-        '/api/v2/catalog/tree',
-        '/api/v2/catalogs',
-        '/api/v2/catalog-tree',
-        '/api/v2/categories',
-      ];
-      let catalogs = null;
-      for (const ep of endpoints) {
-        console.log(`[TG] Trying ${session.domain}${ep}...`);
-        const resp = await vintedFetch(session, ep);
-        if (resp.ok) {
-          const data = await resp.json();
-          console.log(`[TG] ${ep} response keys:`, Object.keys(data));
-          catalogs = data.catalogs || data.categories || data.catalog_tree || data.data || [];
-          if (Array.isArray(catalogs) && catalogs.length) {
-            console.log(`[TG] Got ${catalogs.length} categories from ${ep}`);
-            break;
-          }
-          // If it's an object with nested catalogs, wrap it
-          if (catalogs && typeof catalogs === 'object' && !Array.isArray(catalogs)) {
-            const values = Object.values(catalogs);
-            if (values.length && values[0].title) {
-              catalogs = values;
-              console.log(`[TG] Got ${catalogs.length} categories (object) from ${ep}`);
-              break;
-            }
-          }
-          catalogs = null;
-        } else {
-          console.log(`[TG] ${ep} returned ${resp.status}`);
+    // Score each category by keyword match
+    const scored = [];
+    for (const cat of CATEGORIES) {
+      let score = 0;
+      // Check title match
+      if (cat.title.toLowerCase().includes(q)) score += 10;
+      // Check keyword matches
+      for (const kw of cat.keywords) {
+        if (kw.includes(q) || q.includes(kw)) score += 5;
+        // Partial word match
+        const words = q.split(/\s+/);
+        for (const w of words) {
+          if (w.length >= 3 && kw.includes(w)) score += 2;
         }
       }
-      if (!catalogs || !catalogs.length) {
-        console.error('[TG] All catalog endpoints failed');
-        return null;
-      }
-      c.catalogCache = catalogs;
-      return catalogs;
-    } catch (e) {
-      console.error('[TG] Catalog fetch error:', e.message);
-      return null;
-    }
-  }
-
-  function findCatalog(catalogs, id) {
-    for (const cat of catalogs) {
-      if (cat.id === id) return cat;
-      if (cat.catalogs?.length) {
-        const found = findCatalog(cat.catalogs, id);
-        if (found) return found;
-      }
-    }
-    return null;
-  }
-
-  function flattenCatalogs(catalogs, path = '', results = []) {
-    for (const cat of catalogs) {
-      const fullPath = path ? `${path} > ${cat.title}` : cat.title;
-      results.push({ id: cat.id, title: cat.title, path: fullPath, hasChildren: !!(cat.catalogs?.length) });
-      if (cat.catalogs?.length) flattenCatalogs(cat.catalogs, fullPath, results);
-    }
-    return results;
-  }
-
-  async function showCategoryPicker(chatId, parentId) {
-    const c = getChat(chatId);
-    const catalogs = await fetchCatalogs(chatId);
-    const inWiz = c.step.startsWith('wiz_');
-    const header = inWiz ? '📂 Step 4/9 — Category\n\n' : '';
-
-    if (!catalogs) {
-      // Catalogs failed — offer text search as fallback
-      if (inWiz) c.step = 'wiz_category';
-      return bot.sendMessage(chatId, header + 'Could not load category list. Type a category name to search (e.g. "t-shirt", "hoodie", "trainers"):');
+      if (score > 0) scored.push({ ...cat, score, path: cat.title, hasChildren: false });
     }
 
-    let items;
-    if (parentId) {
-      const parent = findCatalog(catalogs, parentId);
-      items = parent?.catalogs || [];
-    } else {
-      items = catalogs;
-    }
-
-    if (!items.length) {
-      if (parentId) return selectCategory(chatId, parentId);
-      return bot.sendMessage(chatId, 'No categories found. Type a category name to search:');
-    }
-
-    const rows = items.map(cat => [{
-      text: cat.title + (cat.catalogs?.length ? ' >' : ''),
-      callback_data: cat.catalogs?.length ? `nav:${cat.id}` : `cat:${cat.id}`
-    }]);
-
-    const extra = [];
-    if (parentId) {
-      extra.push({ text: '✅ Select this category', callback_data: `cat:${parentId}` });
-      extra.push({ text: '⬅️ Back to top', callback_data: 'pick:cat' });
-    }
-    extra.push({ text: '🔍 Search by name', callback_data: 'cat:search' });
-    rows.push(extra);
-
-    const label = parentId ? 'Pick a subcategory:' : 'Pick a category:';
-    bot.sendMessage(chatId, header + label, {
-      reply_markup: { inline_keyboard: rows }
-    });
-  }
-
-  bot.on('callback_query', async (query) => {
-    if (query.data === 'cat:search') {
-      bot.answerCallbackQuery(query.id);
-      const c = getChat(query.message.chat.id);
-      if (!c.step.startsWith('wiz_')) c.step = 'searching_cat';
-      // In wizard mode, wiz_category already handles text input
-      return bot.sendMessage(query.message.chat.id, 'Type a category name to search (e.g. "t-shirt", "trainers", "dress"):');
-    }
-  });
-
-  // Search catalogs with a single keyword — returns array of matches
-  async function searchCatalogsByKeyword(chatId, keyword) {
-    const c = getChat(chatId);
-    let matches = [];
-
-    // Try local catalog cache first
-    const catalogs = await fetchCatalogs(chatId);
-    if (catalogs) {
-      const flat = flattenCatalogs(catalogs);
-      const q = keyword.toLowerCase();
-      matches = flat.filter(x => x.path.toLowerCase().includes(q)).slice(0, 8);
-    }
-
-    // If no local matches, try Vinted keyword search APIs
-    if (!matches.length) {
-      try {
-        const acct = activeAccount(c);
-        if (!acct) return [];
-        const session = await store.getSession(acct.userId);
-        if (!session) return [];
-
-        // Try multiple search endpoints
-        const searchEndpoints = [
-          `/api/v2/catalog/initializers?keyword=${encodeURIComponent(keyword)}`,
-          `/api/v2/catalogs?keyword=${encodeURIComponent(keyword)}`,
-          `/api/v2/search/catalog?text=${encodeURIComponent(keyword)}`,
-        ];
-
-        for (const ep of searchEndpoints) {
-          try {
-            const resp = await vintedFetch(session, ep);
-            if (!resp.ok) { console.log(`[TG] ${ep} → ${resp.status}`); continue; }
-            const data = await resp.json();
-            console.log(`[TG] ${ep} response keys:`, Object.keys(data));
-
-            // Extract catalogs array from various response shapes
-            let cats = null;
-            if (Array.isArray(data)) cats = data;
-            else if (Array.isArray(data.catalogs)) cats = data.catalogs;
-            else if (Array.isArray(data.dtos)) cats = data.dtos;
-            else if (Array.isArray(data.categories)) cats = data.categories;
-            else if (Array.isArray(data.catalog_initializers)) cats = data.catalog_initializers;
-            else if (data.catalogs && typeof data.catalogs === 'object') cats = Object.values(data.catalogs);
-            else if (data.dtos && typeof data.dtos === 'object') cats = Object.values(data.dtos);
-
-            if (cats && cats.length) {
-              matches = cats.slice(0, 8).map(x => ({
-                id: x.id || x.catalog_id,
-                title: x.title || x.name || '',
-                path: x.full_title || x.title || x.name || '',
-                hasChildren: false
-              })).filter(x => x.id);
-              console.log(`[TG] Keyword "${keyword}" found ${matches.length} via ${ep}`);
-              break;
-            }
-          } catch (e2) {
-            console.error(`[TG] Search endpoint ${ep} error:`, e2.message);
-          }
-        }
-      } catch (e) {
-        console.error('[TG] Catalog keyword search error:', e.message);
-      }
-    }
-    return matches;
+    // Sort by score descending
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, 8);
   }
 
   // Use AI to suggest alternative category search terms
@@ -1324,9 +1165,9 @@ COLOR:
           'anthropic-version': '2023-06-01'
         },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 200,
-          system: `You help find Vinted marketplace categories. Given an item, suggest 3-5 simple category search terms that would match on Vinted. Think broadly — if the exact item type doesn't exist as a category, suggest the parent/related category it would fall under. For example: "stroller" → ["pushchair", "pram", "baby transport", "baby"]. "gaming chair" → ["chair", "office chair", "furniture", "gaming"]. Return ONLY a JSON array of strings, nothing else.`,
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 100,
+          system: `Given an item, return 3-5 simple search keywords for finding it on Vinted marketplace. Think of parent categories and synonyms. Example: "stroller" → ["pushchair","pram","buggy","baby"]. Return ONLY a JSON array of strings.`,
           messages: [{ role: 'user', content: `Item: ${itemDescription}` }]
         })
       });
@@ -1345,37 +1186,43 @@ COLOR:
     const inWiz = c.step.startsWith('wiz_');
     const header = inWiz ? '📂 Step 4/9 — Category\n\n' : '';
 
-    // 1. Try the exact search term first
-    let matches = await searchCatalogsByKeyword(chatId, query);
-    console.log(`[TG] Category search "${query}": ${matches.length} matches`);
+    // 1. Search hardcoded categories first (always works, no API needed)
+    let matches = searchCategoriesByKeyword(query);
+    console.log(`[TG] Category search "${query}": ${matches.length} local matches`);
 
-    // 2. If no matches and we have a category_hint, try each part
+    // 2. If no matches, try each part of category_hint
     if (!matches.length && c.listing?.category_hint) {
       const parts = c.listing.category_hint.split('/').filter(p => p && p !== query);
       for (const part of parts) {
-        matches = await searchCatalogsByKeyword(chatId, part);
-        if (matches.length) { console.log(`[TG] Found matches via hint part "${part}"`); break; }
+        matches = searchCategoriesByKeyword(part);
+        if (matches.length) { console.log(`[TG] Found via hint part "${part}"`); break; }
       }
     }
 
-    // 3. If still nothing, ask AI for alternative search terms
+    // 3. If still nothing, ask AI for alternative terms (cheap haiku call)
     if (!matches.length) {
       const itemDesc = c.listing ? `${c.listing.title || ''} ${query}`.trim() : query;
       const altTerms = await aiCategoryTerms(itemDesc);
-      console.log(`[TG] AI suggested category terms: ${altTerms.join(', ')}`);
+      console.log(`[TG] AI category terms: ${altTerms.join(', ')}`);
       for (const term of altTerms) {
-        matches = await searchCatalogsByKeyword(chatId, term);
-        if (matches.length) { console.log(`[TG] Found matches via AI term "${term}"`); break; }
+        matches = searchCategoriesByKeyword(term);
+        if (matches.length) { console.log(`[TG] Found via AI term "${term}"`); break; }
       }
     }
 
     if (!matches.length) {
-      return bot.sendMessage(chatId, header + `No categories found for "${query}". Try different words (e.g. "hoodie", "jeans", "sneakers") or /cancel.`);
+      // Last resort: show top-level categories to pick from
+      const topCats = CATEGORIES.filter((_, i) => i % 3 === 0).slice(0, 10);
+      const rows = topCats.map(m => [{ text: m.title, callback_data: `cat:${m.id}` }]);
+      rows.push([{ text: '🔍 Search different term', callback_data: 'cat:search' }]);
+      return bot.sendMessage(chatId, header + `No exact match for "${query}". Pick the closest category or search again:`, {
+        reply_markup: { inline_keyboard: rows }
+      });
     }
 
     const rows = matches.map(m => [{
-      text: m.path.length > 50 ? '...' + m.path.slice(-47) : m.path,
-      callback_data: m.hasChildren ? `nav:${m.id}` : `cat:${m.id}`
+      text: m.path || m.title,
+      callback_data: `cat:${m.id}`
     }]);
     rows.push([{ text: '🔍 Search different term', callback_data: 'cat:search' }]);
 
@@ -1385,13 +1232,11 @@ COLOR:
   }
 
   async function selectCategory(chatId, catId) {
-    const catalogs = await fetchCatalogs(chatId);
-    const flat = flattenCatalogs(catalogs || []);
-    const match = flat.find(x => x.id === catId);
-
     const c = getChat(chatId);
+    // Look up name from hardcoded list
+    const match = CATEGORIES.find(x => x.id === catId);
     c.listing.catalog_id = catId;
-    c.listing.category_name = match ? match.path : `ID: ${catId}`;
+    c.listing.category_name = match ? match.title : `ID: ${catId}`;
     c.listing.size_id = null;
     c.listing.size_name = '';
     if (c.step.startsWith('wiz_')) return wizardNext(chatId);
@@ -1473,76 +1318,29 @@ COLOR:
   // PACKAGE SIZE PICKER
   // ──────────────────────────────────────────
 
-  async function showPackageSizePicker(chatId) {
+  function showPackageSizePicker(chatId) {
     const c = getChat(chatId);
     const inWiz = c.step.startsWith('wiz_');
     const header = inWiz ? '📮 Step 9/9 — Parcel Size\n\n' : '';
 
-    try {
-      const acct = activeAccount(c);
-      if (!acct) throw new Error('No active account');
-      const session = await store.getSession(acct.userId);
-      if (!session) throw new Error('No session');
+    const rows = PACKAGE_SIZES.map(s => [{
+      text: `${s.title} — ${s.desc}`, callback_data: `pkg:${s.id}`
+    }]);
 
-      // Try multiple package size endpoints
-      let sizes = [];
-      const pkgEndpoints = ['/api/v2/package_sizes', '/api/v2/package-sizes'];
-      for (const ep of pkgEndpoints) {
-        const resp = await vintedFetch(session, ep);
-        console.log(`[TG] ${ep} → ${resp.status}`);
-        if (resp.ok) {
-          const data = await resp.json();
-          console.log(`[TG] Package sizes response keys:`, Object.keys(data));
-          sizes = Array.isArray(data.package_sizes) ? data.package_sizes
-                : Array.isArray(data) ? data : [];
-          if (sizes.length) break;
-        }
-      }
-
-      if (!sizes.length) {
-        // Offer common UK package sizes as fallback
-        const fallbackSizes = [
-          { id: 1, title: 'Small', desc: 'Letter / small parcel' },
-          { id: 2, title: 'Medium', desc: 'Standard parcel' },
-          { id: 3, title: 'Large', desc: 'Large parcel' },
-          { id: 5, title: 'Extra Large', desc: 'Very large item' },
-        ];
-        const rows = fallbackSizes.map(s => [{
-          text: `${s.title} — ${s.desc}`, callback_data: `pkg:${s.id}`
-        }]);
-        rows.push([{ text: '⏭️ Skip', callback_data: 'pkg:0' }]);
-        return bot.sendMessage(chatId, header + 'Could not load parcel sizes from Vinted. Select an approximate size:', {
-          reply_markup: { inline_keyboard: rows }
-        });
-      }
-
-      const rows = sizes.map(s => [{
-        text: `${s.title || s.name}${s.description ? ' — ' + s.description.slice(0, 30) : ''}`,
-        callback_data: `pkg:${s.id}`
-      }]);
-      rows.push([{ text: '⏭️ Skip', callback_data: 'pkg:0' }]);
-
-      bot.sendMessage(chatId, header + 'Select parcel size:', { reply_markup: { inline_keyboard: rows } });
-    } catch (e) {
-      console.error('[TG] Package size error:', e.message);
-      // Skip parcel size if we can't load it
-      if (inWiz) {
-        c.listing.package_size_id = 2; // default medium
-        c.listing.package_size_name = 'Medium (default)';
-        return wizardNext(chatId);
-      }
-      bot.sendMessage(chatId, 'Could not load parcel sizes. Continuing with default.');
-    }
+    bot.sendMessage(chatId, header + 'Select parcel size:', {
+      reply_markup: { inline_keyboard: rows }
+    });
   }
 
-  async function selectPackageSize(chatId, pkgId) {
+  function selectPackageSize(chatId, pkgId) {
     const c = getChat(chatId);
     if (pkgId === 0) {
       c.listing.package_size_id = null;
       c.listing.package_size_name = 'N/A';
     } else {
+      const pkg = PACKAGE_SIZES.find(p => p.id === pkgId);
       c.listing.package_size_id = pkgId;
-      c.listing.package_size_name = `ID: ${pkgId}`;
+      c.listing.package_size_name = pkg ? pkg.title : `ID: ${pkgId}`;
     }
     if (c.step.startsWith('wiz_')) return wizardNext(chatId);
     c.step = 'review';
@@ -1574,7 +1372,6 @@ COLOR:
     }]);
     rows.push([{ text: '🚫 No brand', callback_data: 'brand:0:' }]);
 
-    c.step = 'review';
     bot.sendMessage(chatId, 'Select brand:', { reply_markup: { inline_keyboard: rows } });
   }
 
