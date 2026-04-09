@@ -104,7 +104,10 @@ const loadedFromDb = new Set();
 
 // Get the active account for a chat (sugar)
 function activeAccount(c) {
-  if (c.activeIdx < 0 || c.activeIdx >= c.accounts.length) return null;
+  if (!c.accounts || !c.accounts.length) return null;
+  if (c.activeIdx < 0 || c.activeIdx >= c.accounts.length) {
+    c.activeIdx = 0; // auto-fix bad index
+  }
   return c.accounts[c.activeIdx];
 }
 
@@ -295,7 +298,8 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
   // COMMANDS
   // ──────────────────────────────────────────
 
-  bot.onText(/\/start(?:@\S+)?/, (msg) => {
+  bot.onText(/\/start(?:@\S+)?/, async (msg) => {
+    await ensureLoaded(msg.chat.id);
     bot.sendMessage(msg.chat.id,
       `Welcome to *RelistPro Bot* 🛍️\n\n` +
       `List items on Vinted in seconds — just send photos\\!\n\n` +
@@ -324,7 +328,8 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     );
   });
 
-  bot.onText(/\/help(?:@\S+)?/, (msg) => {
+  bot.onText(/\/help(?:@\S+)?/, async (msg) => {
+    await ensureLoaded(msg.chat.id);
     const c = getChat(msg.chat.id);
     ensureMulti(c);
     const connected = activeAccount(c);
@@ -417,7 +422,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         c.activeIdx = c.accounts.length - 1;
       }
       c.step = 'idle';
-      saveChatAccounts(chatId, c.accounts, c.activeIdx);
+      saveChatState(chatId);
 
       const vintedInfo = vintedName ? `\nVinted account: *${esc(vintedName)}* on ${esc(session.domain)}` : `\nVinted: ${esc(session.domain)}`;
       const countMsg = c.accounts.length > 1 ? `\n${c.accounts.length} accounts linked\\. Use /switch to change\\.` : '';
@@ -493,7 +498,8 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     saveChatAccounts(chatId, c.accounts, c.activeIdx);
   });
 
-  bot.onText(/\/cancel(?:@\S+)?/, (msg) => {
+  bot.onText(/\/cancel(?:@\S+)?/, async (msg) => {
+    await ensureLoaded(msg.chat.id);
     const c = getChat(msg.chat.id);
     c.step = 'idle';
     c.photos = [];
@@ -1136,7 +1142,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
   // ──────────────────────────────────────────
 
   bot.on('message', async (msg) => {
-    if (!msg.text) return;
+    if (!msg.text || msg.photo) return; // skip photo messages — handled by photo handler
     const chatId = msg.chat.id;
     await ensureLoaded(chatId);
     const c = getChat(chatId);
