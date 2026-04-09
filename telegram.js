@@ -513,7 +513,13 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     ensureMulti(c);
     if (!activeAccount(c)) return bot.sendMessage(chatId, 'Not connected. Use /login first.');
 
-    // If mid-wizard or review, ask user what to do
+    // If in review with no photos, accept photos for the current listing
+    if (c.step === 'review' && (!c.photos || !c.photos.length)) {
+      c.step = 'collecting_photos_for_review';
+      c.photos = [];
+    }
+
+    // If mid-wizard or review (with photos already), ask user what to do
     if (c.step.startsWith('wiz_') || c.step === 'review' || c.step === 'analyzing') {
       const kb = [
         [{ text: '📝 Continue current listing', callback_data: 'resume' }],
@@ -532,7 +538,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       c.caption = null;
     }
 
-    if (c.step !== 'collecting_photos') {
+    if (c.step !== 'collecting_photos' && c.step !== 'collecting_photos_for_review') {
       return bot.sendMessage(chatId, 'Finish or /cancel your current listing first.');
     }
 
@@ -552,7 +558,17 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
     // Debounce — wait for more photos in media group
     if (c.photoTimer) clearTimeout(c.photoTimer);
-    c.photoTimer = setTimeout(() => processPhotos(chatId), 2000);
+    if (c.step === 'collecting_photos_for_review') {
+      // Photos for an existing listing — go back to review, no AI re-analysis
+      c.photoTimer = setTimeout(async () => {
+        c.step = 'review';
+        saveChatState(chatId);
+        await bot.sendMessage(chatId, `📸 Got ${c.photos.length} photo(s) for your listing. Ready to post!`);
+        showSummary(chatId);
+      }, 2000);
+    } else {
+      c.photoTimer = setTimeout(() => processPhotos(chatId), 2000);
+    }
   });
 
   // ──────────────────────────────────────────
@@ -1280,6 +1296,10 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
     if (c.step === 'collecting_photos') {
       return bot.sendMessage(chatId, '📸 Send more photos, or wait a moment — I\'ll start analyzing once you\'re done.');
     }
+
+    if (c.step === 'collecting_photos_for_review') {
+      return bot.sendMessage(chatId, '📸 Send photos for your listing. Once done, I\'ll take you back to the summary.');
+    }
   });
 
   // ──────────────────────────────────────────
@@ -1563,8 +1583,13 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
     }
 
     if (!c.photos || !c.photos.length) {
-      c.step = 'idle';
-      return bot.sendMessage(chatId, 'No photos found. Send photos to start a new listing.');
+      c.step = 'review';
+      return bot.sendMessage(chatId,
+        '📸 No photos attached. Send your photos for this listing first, then tap 🚀 POST TO VINTED again.',
+        { reply_markup: { inline_keyboard: [
+          [{ text: '❌ Cancel listing', callback_data: 'cancel' }]
+        ]}}
+      );
     }
 
     c.step = 'posting';
@@ -1775,15 +1800,15 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
         );
       }
 
-      // No draft created yet — safe to retry if listing still exists
+      // No draft created yet — clear photos (they can't be reused), keep listing details
       if (c.listing) {
+        c.photos = [];
         c.step = 'review';
+        saveChatState(chatId);
         bot.sendMessage(chatId,
           `Failed: ${e.message}\n\n` +
-          `What to do:\n` +
-          `• Tap 🚀 POST TO VINTED to retry\n` +
-          `• Edit any field using the buttons\n` +
-          `• /cancel to start over`
+          `Your listing details are saved but photos need to be re-uploaded.\n` +
+          `📸 Send your photos again, then tap 🚀 POST TO VINTED to retry.`
         );
         return showSummary(chatId);
       }
