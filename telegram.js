@@ -424,9 +424,14 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       c.step = 'idle';
       saveChatState(chatId);
 
-      const vintedInfo = vintedName ? `\nVinted account: *${esc(vintedName)}* on ${esc(session.domain)}` : `\nVinted: ${esc(session.domain)}`;
+      const vintedLabel = vintedName || username;
       const countMsg = c.accounts.length > 1 ? `\n${c.accounts.length} accounts linked\\. Use /switch to change\\.` : '';
-      bot.sendMessage(chatId, `✅ Logged in\\!${vintedInfo}${countMsg}\n\nSend me photos of an item to list\\.`, { parse_mode: 'MarkdownV2' });
+      bot.sendMessage(chatId,
+        `✅ Logged in as *${esc(vintedLabel)}*\n` +
+        `Vinted: ${esc(session.domain)}\n` +
+        `${countMsg}\n` +
+        `📸 Send me photos of an item to list on *${esc(vintedLabel)}*'s Vinted\\!`,
+        { parse_mode: 'MarkdownV2' });
     } catch (e) {
       console.error('[TG] Login error:', e.message);
       c.step = 'idle';
@@ -587,9 +592,11 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
   async function processPhotos(chatId) {
     const c = getChat(chatId);
     c.step = 'analyzing';
+    const acctName = activeAccount(c)?.vintedName || activeAccount(c)?.username || '';
+    const acctInfo = acctName ? ` for ${acctName}` : '';
 
     await bot.sendMessage(chatId,
-      `📸 Got ${c.photos.length} photo(s). Analyzing with AI — detecting brand, condition, estimating price...\n\nThis takes a few seconds.`
+      `📸 Got ${c.photos.length} photo(s)${acctInfo}. Analyzing with AI — detecting brand, condition, estimating price...\n\nThis takes a few seconds.`
     );
 
     try {
@@ -1284,7 +1291,8 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       if (!activeAccount(c)) {
         return bot.sendMessage(chatId, 'To get started, connect your account with /login\n\nOnce logged in, send photos of an item to create a listing.');
       }
-      return bot.sendMessage(chatId, '📸 Send me photos of an item to list on Vinted!\n\nYou can also add a caption with details like "Nike hoodie size M £25".');
+      const acctName = activeAccount(c)?.vintedName || activeAccount(c)?.username || 'Vinted';
+      return bot.sendMessage(chatId, `📸 Send me photos of an item to list on ${acctName}!\n\nYou can also add a caption with details like "Nike hoodie size M £25".`);
     }
 
     if (c.step === 'review') {
@@ -1444,11 +1452,11 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
     const session = await store.getSession(acct.userId);
     if (!session) throw new Error('No session');
 
-    const resp = await vintedFetch(session, `/api/v2/catalog_sizes?catalog_ids[]=${c.listing.catalog_id}`);
+    const resp = await vintedFetch(session, `/api/v2/size_groups?catalog_ids=${c.listing.catalog_id}`);
     if (!resp.ok) throw new Error(`sizes API returned ${resp.status}`);
 
     const data = await resp.json();
-    const groups = data.catalog_sizes || data.sizes || [];
+    const groups = data.size_groups || data.catalog_sizes || data.sizes || [];
 
     if (!groups.length) {
       c.listing.size_id = null;
@@ -1464,6 +1472,8 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
         if (s.id && s.title) allSizes.push({ id: s.id, title: s.title });
       }
     }
+    // Cache for title lookup when user selects
+    c.sizeCache = allSizes;
 
     if (!allSizes.length) return bot.sendMessage(chatId, 'No sizes found for this category.');
 
@@ -1495,7 +1505,8 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       c.listing.size_name = 'N/A';
     } else {
       c.listing.size_id = sizeId;
-      c.listing.size_name = `ID: ${sizeId}`;
+      const cached = c.sizeCache?.find(s => s.id === sizeId);
+      c.listing.size_name = cached?.title || `ID: ${sizeId}`;
     }
     if (c.step.startsWith('wiz_')) return wizardNext(chatId);
     c.step = 'review';
@@ -1656,6 +1667,9 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
         if (!uploadResp.ok) {
           const errText = await uploadResp.text().catch(() => '');
           console.error(`[TG] Photo ${i + 1} upload error (${uploadResp.status}):`, errText.slice(0, 200));
+          if (uploadResp.status === 401) {
+            throw new Error('SESSION_EXPIRED');
+          }
           throw new Error(`Photo ${i + 1} upload failed (${uploadResp.status}): ${errText.slice(0, 100)}`);
         }
 
@@ -1788,6 +1802,22 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
 
     } catch (e) {
       console.error('[TG] Listing error:', e.message);
+
+      // Vinted session expired — clear photos, keep listing, guide user
+      if (e.message === 'SESSION_EXPIRED') {
+        c.photos = [];
+        c.step = 'review';
+        saveChatState(chatId);
+        const acctName = activeAccount(c)?.vintedName || activeAccount(c)?.username || 'your account';
+        return bot.sendMessage(chatId,
+          `⚠️ Vinted session expired for ${acctName}.\n\n` +
+          `To fix this:\n` +
+          `1. Open Vinted in Chrome on your computer\n` +
+          `2. Click the RelistPro extension and sync\n` +
+          `3. Come back here, send your photos again, and tap POST\n\n` +
+          `Your listing details are saved — you only need to re-upload photos.`
+        );
+      }
 
       // If we have a draftId, it means draft was created — tell user it's saved
       if (c._lastDraftId) {
