@@ -237,7 +237,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       if (r.rows[0]) {
         const row = r.rows[0];
         return {
-          accounts: JSON.parse(row.accounts || '[]'),
+          accounts: typeof row.accounts === 'string' ? JSON.parse(row.accounts) : (row.accounts || []),
           activeIdx: row.active_idx,
           listing: row.listing ? (typeof row.listing === 'string' ? JSON.parse(row.listing) : row.listing) : null,
           photos: row.photos ? (typeof row.photos === 'string' ? JSON.parse(row.photos) : row.photos) : null,
