@@ -99,6 +99,9 @@ function getChat(chatId) {
   return chats.get(chatId);
 }
 
+// Tracks which chats have been loaded from DB this session
+const loadedFromDb = new Set();
+
 // Get the active account for a chat (sugar)
 function activeAccount(c) {
   if (c.activeIdx < 0 || c.activeIdx >= c.accounts.length) return null;
@@ -117,7 +120,63 @@ function ensureMulti(c) {
 }
 
 // ═══ MAIN INIT ═══
-module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app }) {
+module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app, db }) {
+
+  // ── Persist chat accounts to DB so logins survive restarts ──
+  async function saveChatAccounts(chatId, accounts, activeIdx) {
+    if (!db || !db.hasDb()) return;
+    try {
+      await db.query(
+        `INSERT INTO rp_telegram_chats (chat_id, accounts, active_idx)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (chat_id) DO UPDATE SET accounts=$2, active_idx=$3, updated_at=NOW()`,
+        [String(chatId), JSON.stringify(accounts), activeIdx]
+      );
+    } catch (e) { console.error('[TG] Save chat error:', e.message); }
+  }
+
+  async function loadChatAccounts(chatId) {
+    if (!db || !db.hasDb()) return null;
+    try {
+      const r = await db.query('SELECT accounts, active_idx FROM rp_telegram_chats WHERE chat_id=$1', [String(chatId)]);
+      if (r.rows[0]) {
+        return { accounts: JSON.parse(r.rows[0].accounts || '[]'), activeIdx: r.rows[0].active_idx };
+      }
+    } catch (e) { console.error('[TG] Load chat error:', e.message); }
+    return null;
+  }
+
+  // Init the telegram_chats table
+  async function initTelegramTable() {
+    if (!db || !db.hasDb()) return;
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS rp_telegram_chats (
+          chat_id TEXT PRIMARY KEY,
+          accounts JSONB NOT NULL DEFAULT '[]',
+          active_idx INTEGER DEFAULT 0,
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        )
+      `);
+      console.log('[TG] Chat persistence table ready');
+    } catch (e) { console.error('[TG] Table init error:', e.message); }
+  }
+  initTelegramTable();
+
+  // Load chat accounts from DB if not yet loaded this session
+  async function ensureLoaded(chatId) {
+    if (loadedFromDb.has(chatId)) return;
+    loadedFromDb.add(chatId);
+    const saved = await loadChatAccounts(chatId);
+    if (saved && saved.accounts.length) {
+      const c = getChat(chatId);
+      if (!c.accounts.length) {
+        c.accounts = saved.accounts;
+        c.activeIdx = saved.activeIdx ?? 0;
+        console.log(`[TG] Restored ${c.accounts.length} account(s) for chat ${chatId}`);
+      }
+    }
+  }
   let TelegramBot;
   try { TelegramBot = require('node-telegram-bot-api'); } catch {
     console.log('[TG] node-telegram-bot-api not installed — bot disabled');
@@ -240,6 +299,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
   bot.onText(/\/login(?:@\S+)?(.*)/, async (msg, match) => {
     const chatId = msg.chat.id;
+    await ensureLoaded(chatId);
     const c = getChat(chatId);
     ensureMulti(c);
 
@@ -305,6 +365,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         c.activeIdx = c.accounts.length - 1;
       }
       c.step = 'idle';
+      saveChatAccounts(chatId, c.accounts, c.activeIdx);
 
       const vintedInfo = vintedName ? `\nVinted account: *${esc(vintedName)}* on ${esc(session.domain)}` : `\nVinted: ${esc(session.domain)}`;
       const countMsg = c.accounts.length > 1 ? `\n${c.accounts.length} accounts linked\\. Use /switch to change\\.` : '';
@@ -317,6 +378,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
   }
 
   bot.onText(/\/status(?:@\S+)?/, async (msg) => {
+    await ensureLoaded(msg.chat.id);
     const c = getChat(msg.chat.id);
     ensureMulti(c);
     if (!c.accounts.length) return bot.sendMessage(msg.chat.id, 'Not connected. Use /login first.');
@@ -337,6 +399,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
   bot.onText(/\/switch(?:@\S+)?/, async (msg) => {
     const chatId = msg.chat.id;
+    await ensureLoaded(chatId);
     const c = getChat(chatId);
     ensureMulti(c);
     if (c.accounts.length < 2) return bot.sendMessage(chatId, c.accounts.length ? 'Only one account linked. Use /login to add another.' : 'No accounts linked. Use /login first.');
@@ -350,14 +413,16 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     bot.sendMessage(chatId, 'Switch to which account?', { reply_markup: { inline_keyboard: rows } });
   });
 
-  bot.onText(/\/logout(?:@\S+)?(.*)/, (msg, match) => {
+  bot.onText(/\/logout(?:@\S+)?(.*)/, async (msg, match) => {
     const chatId = msg.chat.id;
+    await ensureLoaded(chatId);
     const c = getChat(chatId);
     ensureMulti(c);
     const arg = (match[1] || '').trim().toLowerCase();
 
     if (arg === 'all') {
       chats.delete(chatId);
+      saveChatAccounts(chatId, [], -1);
       return bot.sendMessage(chatId, 'All accounts disconnected.');
     }
 
@@ -373,6 +438,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       c.step = 'idle';
       bot.sendMessage(chatId, `Removed ${removed.username}. No accounts left.`);
     }
+    saveChatAccounts(chatId, c.accounts, c.activeIdx);
   });
 
   bot.onText(/\/cancel(?:@\S+)?/, (msg) => {
@@ -390,6 +456,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
   bot.on('photo', async (msg) => {
     const chatId = msg.chat.id;
+    await ensureLoaded(chatId);
     const c = getChat(chatId);
     ensureMulti(c);
     if (!activeAccount(c)) return bot.sendMessage(chatId, 'Not connected. Use /login first.');
@@ -448,7 +515,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     c.step = 'analyzing';
 
     await bot.sendMessage(chatId,
-      `Got ${c.photos.length} photo(s). Analyzing item, detecting brand, estimating price...`
+      `📸 Got ${c.photos.length} photo(s). Analyzing with AI — detecting brand, condition, estimating price...\n\nThis takes a few seconds.`
     );
 
     try {
@@ -508,15 +575,15 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     if (stepName === 'title') {
       c.step = 'wiz_title';
       let detected = '';
-      if (L.brand) detected += `Brand: ${L.brand}\n`;
-      if (L.size_hint) detected += `Size: ${L.size_hint}\n`;
-      if (L.material) detected += `Material: ${L.material}\n`;
-      if (L.color) detected += `Colour: ${L.color}\n`;
+      if (L.brand) detected += `  Brand: ${L.brand}\n`;
+      if (L.size_hint) detected += `  Size: ${L.size_hint}\n`;
+      if (L.material) detected += `  Material: ${L.material}\n`;
+      if (L.color) detected += `  Colour: ${L.color}\n`;
       if (detected) detected = `\nDetected:\n${detected}`;
       return bot.sendMessage(chatId,
         `📝 Step 1/9 — Title\n\n` +
-        `AI suggestion:\n"${L.title}"${detected}\n` +
-        `Accept, edit, or type your own:`,
+        `AI suggestion:\n"${L.title}"${detected}\n\n` +
+        `Tap Accept to keep, Edit to tweak with AI, or just type a new title below:`,
         { reply_markup: { inline_keyboard: [
           [{ text: '✅ Accept', callback_data: 'wiz:accept' }, { text: '✏️ Edit', callback_data: 'wiz:edit:title' }],
           [{ text: '❌ Cancel listing', callback_data: 'cancel' }]
@@ -529,7 +596,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       return bot.sendMessage(chatId,
         `📝 Step 2/9 — Description\n\n` +
         `AI suggestion:\n"${L.description}"\n\n` +
-        `Accept, edit, or type your own:`,
+        `Tap Accept to keep, Edit to tweak (e.g. "make shorter", "add that it's new"), or type a full replacement:`,
         { reply_markup: { inline_keyboard: [
           [{ text: '✅ Accept', callback_data: 'wiz:accept' }, { text: '✏️ Edit', callback_data: 'wiz:edit:desc' }],
         ]}}
@@ -541,7 +608,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       return bot.sendMessage(chatId,
         `💰 Step 3/9 — Price\n\n` +
         `AI suggestion: £${L.price}\n\n` +
-        `Accept or type a different price:`,
+        `Tap Accept, Edit (e.g. "lower it", "make it £20"), or type a price:`,
         { reply_markup: { inline_keyboard: [
           [{ text: `✅ Accept £${L.price}`, callback_data: 'wiz:accept' }, { text: '✏️ Edit', callback_data: 'wiz:edit:price' }],
         ]}}
@@ -556,10 +623,10 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
           ? L.category_hint.split('/').filter(Boolean).pop() || L.title
           : (L.title || '').split(' ').slice(0, 2).join(' ');
         if (searchTerm) return await searchCategories(chatId, searchTerm);
-        return bot.sendMessage(chatId, '📂 Step 4/9 — Category\n\nType a category name to search (e.g. "t-shirt", "hoodie", "trainers"):');
+        return bot.sendMessage(chatId, '📂 Step 4/9 — Category\n\nType a category name below (e.g. "t-shirt", "hoodie", "trainers", "stroller"):');
       } catch (e) {
         console.error('[TG] Category step error:', e.message);
-        return bot.sendMessage(chatId, '📂 Step 4/9 — Category\n\nType a category name to search (e.g. "t-shirt", "hoodie", "trainers"):');
+        return bot.sendMessage(chatId, '📂 Step 4/9 — Category\n\nType a category name below (e.g. "t-shirt", "hoodie", "trainers", "stroller"):');
       }
     }
 
@@ -579,7 +646,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         callback_data: `cond:${x.id}`
       }]));
       return bot.sendMessage(chatId,
-        `📦 Step 6/9 — Condition\n\nAI detected: ${L.condition}\n\nSelect condition:`,
+        `📦 Step 6/9 — Condition\n\nAI detected: ${L.condition}\n\nTap a button below to select the item's condition:`,
         { reply_markup: { inline_keyboard: keyboard } }
       );
     }
@@ -595,7 +662,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       if (L.color1_id) rows.push([{ text: '✅ Keep: ' + L.color, callback_data: 'wiz:accept' }]);
       rows.push([{ text: '⏭️ Skip', callback_data: 'wiz:accept' }]);
       return bot.sendMessage(chatId,
-        `🎨 Step 7/9 — Colour\n\nAI detected: ${L.color || 'Not set'}\n\nSelect colour:`,
+        `🎨 Step 7/9 — Colour\n\nAI detected: ${L.color || 'Not set'}\n\nTap a colour below, or skip:`,
         { reply_markup: { inline_keyboard: rows } }
       );
     }
@@ -606,7 +673,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       if (L.brand) kb.push([{ text: `✅ Keep: ${L.brand}`, callback_data: 'wiz:accept' }]);
       kb.push([{ text: '⏭️ No brand / Skip', callback_data: 'wiz:accept' }]);
       return bot.sendMessage(chatId,
-        `🏷️ Step 8/9 — Brand\n\nAI detected: ${L.brand || 'None'}\n\nAccept, skip, or type a brand name to search:`,
+        `🏷️ Step 8/9 — Brand\n\nAI detected: ${L.brand || 'None'}\n\nTap Keep/Skip, or type a brand name below to search:`,
         { reply_markup: { inline_keyboard: kb } }
       );
     }
@@ -756,7 +823,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
     const acct = activeAccount(c);
     const vintedLabel = acct.vintedName ? `${acct.vintedName} @ ${acct.vintedDomain}` : acct.username;
 
-    let text = `✅ *FINAL REVIEW*\n📤 Posting to: *${esc(vintedLabel)}*\n\n` +
+    let text = `✅ *LISTING READY*\n📤 Posting to: *${esc(vintedLabel)}*\n\n` +
       `*Title:* ${esc(L.title)}\n\n` +
       `*Description:*\n${esc(L.description)}\n\n` +
       `*Price:* £${L.price}\n` +
@@ -769,7 +836,9 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       `*Photos:* ${c.photos.length}\n`;
 
     if (missingFields.length) {
-      text += `\n⚠️ *Required:* ${missingFields.join(', ')}`;
+      text += `\n⚠️ *Missing:* ${missingFields.join(', ')} — tap to set`;
+    } else {
+      text += `\n🟢 *All fields complete\\!* Tap POST TO VINTED to list your item, or edit any field below\\.`;
     }
 
     const keyboard = [
@@ -779,7 +848,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
     ];
 
     if (ready) {
-      keyboard.push([{ text: '✅ POST TO VINTED', callback_data: 'post' }]);
+      keyboard.unshift([{ text: '🚀 POST TO VINTED', callback_data: 'post' }]);
     }
     keyboard.push([{ text: '❌ Cancel', callback_data: 'cancel' }]);
 
@@ -806,6 +875,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
 
     try {
     bot.answerCallbackQuery(query.id);
+    await ensureLoaded(chatId);
     const c = getChat(chatId);
 
     // ── Switch account ──
@@ -820,6 +890,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
         c.summaryMsgId = null;
         c.catalogCache = null;
         const a = c.accounts[idx];
+        saveChatAccounts(chatId, c.accounts, c.activeIdx);
         return bot.editMessageText(`Switched to ${a.username}. Send photos to list on this account.`, { chat_id: chatId, message_id: query.message.message_id });
       }
       return;
@@ -986,6 +1057,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
   bot.on('message', async (msg) => {
     if (!msg.text) return;
     const chatId = msg.chat.id;
+    await ensureLoaded(chatId);
     const c = getChat(chatId);
 
     console.log(`[TG] message: "${msg.text.slice(0,30)}" step=${c.step}`);

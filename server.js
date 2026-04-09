@@ -1085,7 +1085,7 @@ const initTelegram = require('./telegram');
 
     // Start Telegram bot AFTER server is listening (webhook needs Express ready)
     try {
-      initTelegram({ store, vintedFetch, verifyPassword, app });
+      initTelegram({ store, vintedFetch, verifyPassword, app, db });
     } catch (e) {
       console.error('[TG] Failed to start:', e.message);
     }
