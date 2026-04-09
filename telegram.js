@@ -123,6 +123,32 @@ function ensureMulti(c) {
 module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app, db }) {
 
   // ── Persist chat accounts to DB so logins survive restarts ──
+  // ── Save full chat state to DB (accounts + active listing + photos) ──
+  async function saveChatState(chatId) {
+    if (!db || !db.hasDb()) return;
+    const c = chats.get(chatId);
+    if (!c) return;
+    try {
+      await db.query(
+        `INSERT INTO rp_telegram_chats (chat_id, accounts, active_idx, listing, photos, wizard_idx, step)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (chat_id) DO UPDATE SET
+           accounts=$2, active_idx=$3, listing=$4, photos=$5,
+           wizard_idx=$6, step=$7, updated_at=NOW()`,
+        [
+          String(chatId),
+          JSON.stringify(c.accounts || []),
+          c.activeIdx ?? -1,
+          c.listing ? JSON.stringify(c.listing) : null,
+          c.photos?.length ? JSON.stringify(c.photos) : null,
+          c.wizardIdx ?? 0,
+          c.step || 'idle'
+        ]
+      );
+    } catch (e) { console.error('[TG] Save state error:', e.message); }
+  }
+
+  // Shortcut: save just accounts (lightweight, no photos)
   async function saveChatAccounts(chatId, accounts, activeIdx) {
     if (!db || !db.hasDb()) return;
     try {
@@ -135,18 +161,29 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     } catch (e) { console.error('[TG] Save chat error:', e.message); }
   }
 
-  async function loadChatAccounts(chatId) {
+  async function loadChatState(chatId) {
     if (!db || !db.hasDb()) return null;
     try {
-      const r = await db.query('SELECT accounts, active_idx FROM rp_telegram_chats WHERE chat_id=$1', [String(chatId)]);
+      const r = await db.query(
+        'SELECT accounts, active_idx, listing, photos, wizard_idx, step FROM rp_telegram_chats WHERE chat_id=$1',
+        [String(chatId)]
+      );
       if (r.rows[0]) {
-        return { accounts: JSON.parse(r.rows[0].accounts || '[]'), activeIdx: r.rows[0].active_idx };
+        const row = r.rows[0];
+        return {
+          accounts: JSON.parse(row.accounts || '[]'),
+          activeIdx: row.active_idx,
+          listing: row.listing ? (typeof row.listing === 'string' ? JSON.parse(row.listing) : row.listing) : null,
+          photos: row.photos ? (typeof row.photos === 'string' ? JSON.parse(row.photos) : row.photos) : null,
+          wizardIdx: row.wizard_idx ?? 0,
+          step: row.step || 'idle'
+        };
       }
-    } catch (e) { console.error('[TG] Load chat error:', e.message); }
+    } catch (e) { console.error('[TG] Load state error:', e.message); }
     return null;
   }
 
-  // Init the telegram_chats table
+  // Init the telegram_chats table (adds new columns if needed)
   async function initTelegramTable() {
     if (!db || !db.hasDb()) return;
     try {
@@ -155,26 +192,41 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
           chat_id TEXT PRIMARY KEY,
           accounts JSONB NOT NULL DEFAULT '[]',
           active_idx INTEGER DEFAULT 0,
+          listing JSONB,
+          photos JSONB,
+          wizard_idx INTEGER DEFAULT 0,
+          step TEXT DEFAULT 'idle',
           updated_at TIMESTAMPTZ DEFAULT NOW()
         )
       `);
+      // Add columns if table already exists without them
+      await db.query(`ALTER TABLE rp_telegram_chats ADD COLUMN IF NOT EXISTS listing JSONB`);
+      await db.query(`ALTER TABLE rp_telegram_chats ADD COLUMN IF NOT EXISTS photos JSONB`);
+      await db.query(`ALTER TABLE rp_telegram_chats ADD COLUMN IF NOT EXISTS wizard_idx INTEGER DEFAULT 0`);
+      await db.query(`ALTER TABLE rp_telegram_chats ADD COLUMN IF NOT EXISTS step TEXT DEFAULT 'idle'`);
       console.log('[TG] Chat persistence table ready');
     } catch (e) { console.error('[TG] Table init error:', e.message); }
   }
   initTelegramTable();
 
-  // Load chat accounts from DB if not yet loaded this session
+  // Load full chat state from DB if not yet loaded this session
   async function ensureLoaded(chatId) {
     if (loadedFromDb.has(chatId)) return;
     loadedFromDb.add(chatId);
-    const saved = await loadChatAccounts(chatId);
-    if (saved && saved.accounts.length) {
-      const c = getChat(chatId);
-      if (!c.accounts.length) {
-        c.accounts = saved.accounts;
-        c.activeIdx = saved.activeIdx ?? 0;
-        console.log(`[TG] Restored ${c.accounts.length} account(s) for chat ${chatId}`);
-      }
+    const saved = await loadChatState(chatId);
+    if (!saved) return;
+    const c = getChat(chatId);
+    if (saved.accounts.length && !c.accounts.length) {
+      c.accounts = saved.accounts;
+      c.activeIdx = saved.activeIdx ?? 0;
+      console.log(`[TG] Restored ${c.accounts.length} account(s) for chat ${chatId}`);
+    }
+    if (saved.listing && !c.listing) {
+      c.listing = saved.listing;
+      c.photos = saved.photos || [];
+      c.wizardIdx = saved.wizardIdx ?? 0;
+      c.step = saved.step || 'idle';
+      console.log(`[TG] Restored listing + ${(c.photos||[]).length} photo(s) for chat ${chatId}`);
     }
   }
   let TelegramBot;
@@ -558,6 +610,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
       // Start wizard at step 0 (title)
       c.wizardIdx = 0;
+      saveChatState(chatId);
       await askWizardStep(chatId);
     } catch (e) {
       console.error('[TG] AI analysis error:', e.message);
@@ -693,6 +746,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
   function wizardNext(chatId) {
     const c = getChat(chatId);
     c.wizardIdx = (c.wizardIdx || 0) + 1;
+    saveChatState(chatId);
     if (c.wizardIdx >= WIZARD_STEPS.length) {
       c.step = 'review';
       return showSummary(chatId);
@@ -809,8 +863,12 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
 
     if (!L) {
       c.step = 'idle';
+      saveChatState(chatId);
       return bot.sendMessage(chatId, 'No listing in progress. Send photos to start a new one.');
     }
+
+    // Persist full state (listing + photos) so it survives redeploys
+    saveChatState(chatId);
 
     const catDisplay = L.category_name || (L.catalog_id ? `ID: ${L.catalog_id}` : 'Not set');
     const sizeDisplay = L.size_name || (L.size_id ? `ID: ${L.size_id}` : 'Not set');
@@ -914,6 +972,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       c.wizardIdx = 0;
       c.catalogCache = null;
       c.caption = null;
+      saveChatState(chatId);
       bot.editMessageText('Previous listing discarded. Send photos for your new item.', { chat_id: chatId, message_id: query.message.message_id });
       return;
     }
@@ -925,6 +984,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       c.listing = null;
       c.summaryMsgId = null;
       c.wizardIdx = 0;
+      saveChatState(chatId);
       return bot.editMessageText('Listing cancelled. Send new photos whenever you\'re ready.', { chat_id: chatId, message_id: query.message.message_id });
     }
 
@@ -1658,6 +1718,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
         c.photos = [];
         c.listing = null;
         c.summaryMsgId = null;
+        saveChatState(chatId);
 
         let errMsg = 'Publishing failed but your draft is saved on Vinted.\n\n';
         if (errorLines.length) {
@@ -1692,6 +1753,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       c.summaryMsgId = null;
       c.catalogCache = null;
       delete c._lastDraftId;
+      saveChatState(chatId);
 
     } catch (e) {
       console.error('[TG] Listing error:', e.message);
@@ -1705,6 +1767,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
         c.listing = null;
         c.summaryMsgId = null;
         delete c._lastDraftId;
+        saveChatState(chatId);
         return bot.sendMessage(chatId,
           `Something went wrong: ${e.message}\n\n` +
           `Your draft is saved on Vinted — open it to finish:\n${dUrl}\n\n` +
@@ -1727,6 +1790,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
 
       // Listing state lost — start fresh
       c.step = 'idle';
+      saveChatState(chatId);
       bot.sendMessage(chatId, `Failed: ${e.message}\n\nSend new photos to start a fresh listing.`);
     }
   }
