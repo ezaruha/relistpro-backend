@@ -395,7 +395,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
     try {
       // Send up to 3 photos for better detection
-      const photosForAI = c.photos.slice(0, 3).map(p => p.base64);
+      const photosForAI = c.photos.slice(0, 20).map(p => p.base64);
       const analysis = await analyzeWithAI(photosForAI, c.caption);
 
       // Map condition text to status_id
@@ -458,9 +458,9 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       return bot.sendMessage(chatId,
         `📝 Step 1/9 — Title\n\n` +
         `AI suggestion:\n"${L.title}"${detected}\n` +
-        `Tap Accept to keep it, or type your own title:`,
+        `Accept, edit, or type your own:`,
         { reply_markup: { inline_keyboard: [
-          [{ text: '✅ Accept title', callback_data: 'wiz:accept' }],
+          [{ text: '✅ Accept', callback_data: 'wiz:accept' }, { text: '✏️ Edit', callback_data: 'wiz:edit:title' }],
           [{ text: '❌ Cancel listing', callback_data: 'cancel' }]
         ]}}
       );
@@ -471,9 +471,9 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       return bot.sendMessage(chatId,
         `📝 Step 2/9 — Description\n\n` +
         `AI suggestion:\n"${L.description}"\n\n` +
-        `Tap Accept to keep it, or type your own description:`,
+        `Accept, edit, or type your own:`,
         { reply_markup: { inline_keyboard: [
-          [{ text: '✅ Accept description', callback_data: 'wiz:accept' }],
+          [{ text: '✅ Accept', callback_data: 'wiz:accept' }, { text: '✏️ Edit', callback_data: 'wiz:edit:desc' }],
         ]}}
       );
     }
@@ -483,9 +483,9 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       return bot.sendMessage(chatId,
         `💰 Step 3/9 — Price\n\n` +
         `AI suggestion: £${L.price}\n\n` +
-        `Tap Accept or type a different price:`,
+        `Accept or type a different price:`,
         { reply_markup: { inline_keyboard: [
-          [{ text: `✅ Accept £${L.price}`, callback_data: 'wiz:accept' }],
+          [{ text: `✅ Accept £${L.price}`, callback_data: 'wiz:accept' }, { text: '✏️ Edit', callback_data: 'wiz:edit:price' }],
         ]}}
       );
     }
@@ -580,7 +580,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     const captionCtx = caption ? `\n\nThe seller provided this info: "${caption}"  — use it to fill in details like brand, size, price, etc. Trust the seller's info over visual guesses.` : '';
 
     // Send up to 3 photos for better analysis
-    const imageBlocks = photos.slice(0, 3).map(p => ({
+    const imageBlocks = photos.slice(0, 20).map(p => ({
       type: 'image',
       source: { type: 'base64', media_type: 'image/jpeg', data: typeof p === 'string' ? p : p.base64 || p }
     }));
@@ -803,6 +803,20 @@ COLOR:
     // ── Wizard accept (keep AI suggestion, move to next step) ──
     if (data === 'wiz:accept') {
       return wizardNext(chatId);
+    }
+
+    // ── Wizard edit (send current suggestion as copyable text, stay on step) ──
+    if (data === 'wiz:edit:title') {
+      bot.sendMessage(chatId, `Current suggestion:\n\n${c.listing.title}\n\nType your new title:`);
+      return; // step stays wiz_title, text handler will pick up
+    }
+    if (data === 'wiz:edit:desc') {
+      bot.sendMessage(chatId, `Current suggestion:\n\n${c.listing.description}\n\nType your new description:`);
+      return;
+    }
+    if (data === 'wiz:edit:price') {
+      bot.sendMessage(chatId, `Current suggestion: £${c.listing.price}\n\nType your new price (number only):`);
+      return;
     }
 
     // ── Edit text fields (from final review) ──
