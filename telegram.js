@@ -784,18 +784,25 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
   // ──────────────────────────────────────────
 
   bot.on('message', async (msg) => {
-    if (!msg.text || msg.text.startsWith('/')) return;
+    if (!msg.text) return;
     const chatId = msg.chat.id;
     const c = getChat(chatId);
 
+    console.log(`[TG] message: "${msg.text.slice(0,30)}" step=${c.step}`);
+
+    // Skip slash commands — they're handled by onText handlers
+    if (msg.text.startsWith('/')) return;
+
     // ── Login flow ──
     if (c.step === 'login_username') {
+      console.log(`[TG] Got username: ${msg.text.trim()}`);
       c.loginUsername = msg.text.trim();
       c.step = 'login_password';
-      return bot.sendMessage(chatId, `Got it. Now what's the password for *${esc(c.loginUsername)}*?`, { parse_mode: 'MarkdownV2' });
+      return bot.sendMessage(chatId, 'Got it. Now what\'s your password?');
     }
 
     if (c.step === 'login_password') {
+      console.log(`[TG] Got password for ${c.loginUsername}`);
       const password = msg.text.trim();
       const username = c.loginUsername;
       delete c.loginUsername;
