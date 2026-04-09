@@ -390,11 +390,13 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     c.step = 'analyzing';
 
     await bot.sendMessage(chatId,
-      `Got ${c.photos.length} photo(s). Analyzing with AI...`
+      `Got ${c.photos.length} photo(s). Analyzing item, detecting brand, estimating price...`
     );
 
     try {
-      const analysis = await analyzeWithAI(c.photos[0].base64, c.caption);
+      // Send up to 3 photos for better detection
+      const photosForAI = c.photos.slice(0, 3).map(p => p.base64);
+      const analysis = await analyzeWithAI(photosForAI, c.caption);
 
       // Map condition text to status_id
       const condMatch = CONDITIONS.find(x =>
@@ -421,8 +423,10 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         category_name: '',
         size_id: null,
         size_name: '',
+        size_hint: analysis.size_hint || '',
         color: colorName,
         color1_id: colorId,
+        material: analysis.material || '',
         package_size_id: null,
         package_size_name: '',
       };
@@ -445,9 +449,15 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
     if (stepName === 'title') {
       c.step = 'wiz_title';
+      let detected = '';
+      if (L.brand) detected += `Brand: ${L.brand}\n`;
+      if (L.size_hint) detected += `Size: ${L.size_hint}\n`;
+      if (L.material) detected += `Material: ${L.material}\n`;
+      if (L.color) detected += `Colour: ${L.color}\n`;
+      if (detected) detected = `\nDetected:\n${detected}`;
       return bot.sendMessage(chatId,
         `📝 Step 1/9 — Title\n\n` +
-        `AI suggestion:\n"${L.title}"\n\n` +
+        `AI suggestion:\n"${L.title}"${detected}\n` +
         `Tap Accept to keep it, or type your own title:`,
         { reply_markup: { inline_keyboard: [
           [{ text: '✅ Accept title', callback_data: 'wiz:accept' }],
@@ -563,11 +573,71 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
   // AI ANALYSIS
   // ──────────────────────────────────────────
 
-  async function analyzeWithAI(base64, caption) {
+  async function analyzeWithAI(photos, caption) {
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) throw new Error('ANTHROPIC_API_KEY not configured on server');
 
-    const captionCtx = caption ? `\nThe seller says: "${caption}"` : '';
+    const captionCtx = caption ? `\n\nThe seller provided this info: "${caption}"  — use it to fill in details like brand, size, price, etc. Trust the seller's info over visual guesses.` : '';
+
+    // Send up to 3 photos for better analysis
+    const imageBlocks = photos.slice(0, 3).map(p => ({
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/jpeg', data: typeof p === 'string' ? p : p.base64 || p }
+    }));
+
+    const systemPrompt = `You are a top Vinted reseller with 10,000+ sales. You write listings that SELL FAST.
+
+TITLE RULES:
+- Max 60 characters
+- Format: [Brand] [Item Type] [Key Detail] [Size if visible]
+- Use words buyers search for — NOT creative/poetic language
+- Include brand name FIRST if visible (check labels, tags, logos carefully)
+- Include size if visible on tag/label
+- Examples: "Nike Air Force 1 White UK 8", "Zara Oversized Blazer Black M", "Levi's 501 Jeans Blue W32 L32"
+
+DESCRIPTION RULES:
+- 4-6 lines, warm and professional
+- Line 1: Hook — what makes this item desirable (brand quality, style, versatility)
+- Line 2-3: Details — material/fabric, fit, notable features, measurements if guessable
+- Line 4: Condition — be specific ("worn twice", "no flaws", "minor pilling on cuffs")
+- Line 5: Practical info — "Fits true to size", "Great for summer", etc.
+- Last line: 5-8 relevant hashtags for Vinted search (#nike #airforce1 #trainers #sneakers #white)
+- Do NOT use generic filler ("amazing item!", "grab it quick!")
+- Do NOT start with "This is a..."
+
+PRICE RULES — THIS IS CRITICAL:
+- Price for USED items on Vinted UK, NOT retail
+- Research-style pricing based on brand + condition + demand:
+  - Fast fashion (Zara, H&M, Primark, Shein): £3-12
+  - Mid-range (Topshop, Mango, COS, & Other Stories): £8-20
+  - Premium high street (Ted Baker, Reiss, All Saints, Ralph Lauren): £15-40
+  - Sportswear (Nike, Adidas, Puma, New Balance): £10-35
+  - Designer (Gucci, Burberry, Prada): £40-200+
+  - Vintage/rare items: price higher
+- Condition affects price: "New with tags" = 60-70% retail, "Very good" = 30-50% retail, "Good" = 20-35% retail
+- NEVER suggest retail price. Buyers are on Vinted for deals.
+
+CONDITION RULES:
+- Look at the photos carefully for wear signs: pilling, fading, stains, creases, sole wear
+- "New with tags" — ONLY if you can see actual tags in the photo
+- "New without tags" — looks completely unworn, crisp fabric, no wear
+- "Very good" — minimal wear, no visible flaws
+- "Good" — some wear but presentable
+- "Satisfactory" — visible wear, stains, damage
+
+BRAND DETECTION:
+- Look for: labels on collar/neck, chest logos, sleeve tags, sole branding, button engravings, zipper pulls
+- Check ALL photos, not just the first one
+- If you can see a brand logo but can't read it clearly, make your best guess
+- Return null only if truly unidentifiable
+
+CATEGORY HINT:
+- Use the Vinted category path format: "women/clothing/tops/t-shirts" or "men/shoes/trainers"
+- Be as specific as possible — "women/clothing/dresses/midi-dresses" not just "women/clothing"
+
+COLOR:
+- Must be one of: Black, White, Grey, Blue, Red, Green, Yellow, Pink, Orange, Purple, Brown, Beige, Cream, Multicolour
+- If the item has a pattern (stripes, floral, etc.) pick the dominant base color, or Multicolour if mixed`;
 
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -578,22 +648,25 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
-        max_tokens: 1024,
+        max_tokens: 1500,
+        system: systemPrompt,
         messages: [{
           role: 'user',
           content: [
-            { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64 } },
+            ...imageBlocks,
             { type: 'text', text:
-              `You are a Vinted UK listing expert. Analyze this item photo and create a compelling listing.${captionCtx}\n\n` +
-              `Return ONLY valid JSON (no markdown, no backticks):\n` +
+              `Analyze ${imageBlocks.length > 1 ? 'these photos' : 'this photo'} and create a Vinted listing.${captionCtx}\n\n` +
+              `Return ONLY valid JSON (no markdown, no backticks, no explanation):\n` +
               `{\n` +
-              `  "title": "concise, searchable title max 60 chars — include brand if visible",\n` +
-              `  "description": "2-4 sentences. Mention brand, condition, material, style, fit. Honest and appealing. Include hashtags at end.",\n` +
-              `  "suggested_price": <number in GBP>,\n` +
-              `  "brand": "brand name or null",\n` +
-              `  "condition": "New with tags" | "New without tags" | "Very good" | "Good" | "Satisfactory",\n` +
-              `  "category_hint": "e.g. women/clothing/tops, men/shoes/trainers, kids/clothing/dresses",\n` +
-              `  "color": "main color (Black, White, Grey, Blue, Red, Green, Yellow, Pink, Orange, Purple, Brown, Beige, Cream, Multicolour)"\n` +
+              `  "title": "searchable title following the rules above",\n` +
+              `  "description": "4-6 line description with hashtags, following the rules above",\n` +
+              `  "suggested_price": <realistic used price in GBP as a number>,\n` +
+              `  "brand": "detected brand name or null",\n` +
+              `  "condition": "New with tags|New without tags|Very good|Good|Satisfactory",\n` +
+              `  "category_hint": "vinted/category/path",\n` +
+              `  "color": "one of the allowed colors",\n` +
+              `  "material": "fabric/material if identifiable or null",\n` +
+              `  "size_hint": "detected size from tags/labels or null"\n` +
               `}`
             }
           ]
