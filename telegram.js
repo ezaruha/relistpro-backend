@@ -943,20 +943,42 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       const session = await store.getSession(acct.userId);
       if (!session) { console.error('[TG] No session for catalog fetch'); return null; }
 
-      console.log(`[TG] Fetching catalogs from ${session.domain}...`);
-      const resp = await vintedFetch(session, '/api/v2/catalogs');
-      if (!resp.ok) {
-        const errText = await resp.text().catch(() => '');
-        console.error(`[TG] Catalog fetch failed: ${resp.status} ${errText.slice(0, 200)}`);
+      // Try multiple catalog endpoints — varies by Vinted domain
+      const endpoints = [
+        '/api/v2/catalog/tree',
+        '/api/v2/catalogs',
+        '/api/v2/catalog-tree',
+        '/api/v2/categories',
+      ];
+      let catalogs = null;
+      for (const ep of endpoints) {
+        console.log(`[TG] Trying ${session.domain}${ep}...`);
+        const resp = await vintedFetch(session, ep);
+        if (resp.ok) {
+          const data = await resp.json();
+          catalogs = data.catalogs || data.categories || data.catalog_tree || data.data || [];
+          if (Array.isArray(catalogs) && catalogs.length) {
+            console.log(`[TG] Got ${catalogs.length} categories from ${ep}`);
+            break;
+          }
+          // If it's an object with nested catalogs, wrap it
+          if (catalogs && typeof catalogs === 'object' && !Array.isArray(catalogs)) {
+            const values = Object.values(catalogs);
+            if (values.length && values[0].title) {
+              catalogs = values;
+              console.log(`[TG] Got ${catalogs.length} categories (object) from ${ep}`);
+              break;
+            }
+          }
+          catalogs = null;
+        } else {
+          console.log(`[TG] ${ep} returned ${resp.status}`);
+        }
+      }
+      if (!catalogs || !catalogs.length) {
+        console.error('[TG] All catalog endpoints failed');
         return null;
       }
-      const data = await resp.json();
-      const catalogs = data.catalogs || data.categories || [];
-      if (!catalogs.length) {
-        console.error('[TG] Catalog response empty:', JSON.stringify(data).slice(0, 200));
-        return null;
-      }
-      console.log(`[TG] Got ${catalogs.length} top-level categories`);
       c.catalogCache = catalogs;
       return catalogs;
     } catch (e) {
@@ -1040,24 +1062,49 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
   });
 
   async function searchCategories(chatId, query) {
-    const catalogs = await fetchCatalogs(chatId);
-    if (!catalogs) return bot.sendMessage(chatId, 'Failed to load categories.');
+    const c = getChat(chatId);
 
-    const flat = flattenCatalogs(catalogs);
-    const q = query.toLowerCase();
-    const matches = flat.filter(x => x.path.toLowerCase().includes(q)).slice(0, 8);
+    // Try local catalog cache first
+    const catalogs = await fetchCatalogs(chatId);
+    let matches = [];
+    if (catalogs) {
+      const flat = flattenCatalogs(catalogs);
+      const q = query.toLowerCase();
+      matches = flat.filter(x => x.path.toLowerCase().includes(q)).slice(0, 8);
+    }
+
+    // If no local matches, try Vinted catalog search API
+    if (!matches.length) {
+      try {
+        const acct = activeAccount(c);
+        const session = await store.getSession(acct.userId);
+        if (session) {
+          const resp = await vintedFetch(session, `/api/v2/catalog/initializers?keyword=${encodeURIComponent(query)}`);
+          if (resp.ok) {
+            const data = await resp.json();
+            const cats = data.dtos || data.catalogs || [];
+            matches = cats.slice(0, 8).map(x => ({
+              id: x.id || x.catalog_id,
+              title: x.title || x.name,
+              path: x.full_title || x.title || x.name,
+              hasChildren: false
+            }));
+            console.log(`[TG] Catalog search found ${matches.length} results for "${query}"`);
+          }
+        }
+      } catch (e) {
+        console.error('[TG] Catalog search error:', e.message);
+      }
+    }
 
     if (!matches.length) {
-      return bot.sendMessage(chatId, `No categories match "${query}". Try again or /cancel.`);
+      return bot.sendMessage(chatId, `No categories found for "${query}". Try different words (e.g. "hoodie", "jeans", "sneakers") or /cancel.`);
     }
 
     const rows = matches.map(m => [{
       text: m.path,
       callback_data: m.hasChildren ? `nav:${m.id}` : `cat:${m.id}`
     }]);
-
-    const c = getChat(chatId);
-    c.step = 'review';
 
     bot.sendMessage(chatId, `Found ${matches.length} match(es):`, {
       reply_markup: { inline_keyboard: rows }
