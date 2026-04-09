@@ -38,11 +38,35 @@ function saveData() {
 }
 
 // ═══ PLANS ═══
+// Two plans only — match the actual extension features so the limits make sense.
+// repostsPerMonth: hard cap on reposts per calendar month (null = unlimited).
+// Free is generous enough to try everything; Pro removes all caps.
 const PLANS = {
-  free:     { name:'Free',     price:0,     itemLimit:50,   scheduleLimit:1,  autoReply:false, analyticsMonths:1  },
-  pro:      { name:'Pro',      price:9.99,  itemLimit:null, scheduleLimit:10, autoReply:true,  analyticsMonths:12 },
-  business: { name:'Business', price:24.99, itemLimit:null, scheduleLimit:null,autoReply:true, analyticsMonths:24 }
+  free: { name:'Free', price:0,    itemLimit:50,   scheduleLimit:1,    repostsPerMonth:30,   backupLimit:50,   autoReply:false, analyticsMonths:1,
+          features:['Up to 50 active items','30 reposts / month','1 schedule','50 backups','Manual messages'] },
+  pro:  { name:'Pro',  price:9.99, itemLimit:null, scheduleLimit:null, repostsPerMonth:null, backupLimit:null, autoReply:true,  analyticsMonths:24,
+          features:['Unlimited items','Unlimited reposts','Unlimited schedules','Unlimited backups','Auto-reply to messages','Full analytics history','Bulk repost & multi-quantity'] }
 };
+
+// Compute usage stats for a user across the current month
+async function getUserUsage(userId) {
+  if (!db.hasDb()) return { repostsThisMonth:0, itemsTotal:0, schedulesActive:0, actionsTotal:0 };
+  const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0,0,0,0);
+  try {
+    const [repostsR, itemsR, schedulesR, actionsR] = await Promise.all([
+      db.query("SELECT COUNT(*) AS n FROM rp_actions WHERE user_id=$1 AND type='repost' AND status='success' AND created_at>=$2", [userId, monthStart]),
+      db.query("SELECT COUNT(*) AS n FROM rp_items WHERE user_id=$1 AND status!='sold'", [userId]),
+      db.query("SELECT COUNT(*) AS n FROM rp_schedules WHERE user_id=$1 AND active=true", [userId]),
+      db.query("SELECT COUNT(*) AS n FROM rp_actions WHERE user_id=$1", [userId])
+    ]);
+    return {
+      repostsThisMonth: parseInt(repostsR.rows[0].n,10)||0,
+      itemsTotal: parseInt(itemsR.rows[0].n,10)||0,
+      schedulesActive: parseInt(schedulesR.rows[0].n,10)||0,
+      actionsTotal: parseInt(actionsR.rows[0].n,10)||0
+    };
+  } catch(e) { console.error('[RP] Usage error:', e.message); return { repostsThisMonth:0, itemsTotal:0, schedulesActive:0, actionsTotal:0 }; }
+}
 
 // ═══ CRYPTO ═══
 async function hashPassword(p) {
@@ -240,8 +264,21 @@ app.get('/api/user/profile', auth, async (req, res) => {
   const session = await store.getSession(req.user.id);
   const plan = req.user.plan || 'free';
   const planInfo = PLANS[plan] || PLANS.free;
+  const usage = await getUserUsage(req.user.id);
+  // Compute remaining + percentages so the client can render bars without re-doing math
+  const limits = {
+    reposts: planInfo.repostsPerMonth,
+    items: planInfo.itemLimit,
+    schedules: planInfo.scheduleLimit
+  };
+  const remaining = {
+    reposts: limits.reposts==null ? null : Math.max(0, limits.reposts - usage.repostsThisMonth),
+    items: limits.items==null ? null : Math.max(0, limits.items - usage.itemsTotal),
+    schedules: limits.schedules==null ? null : Math.max(0, limits.schedules - usage.schedulesActive)
+  };
   res.json({
     ok:true,
+    signedIn:true,
     username: req.user.username,
     email: req.user.email||null,
     plan,
@@ -250,7 +287,10 @@ app.get('/api/user/profile', auth, async (req, res) => {
     vintedConnected: !!session,
     vintedMemberId: session?.memberId||null,
     vintedDomain: session?.domain||null,
-    createdAt: req.user.created_at||req.user.created||null
+    createdAt: req.user.created_at||req.user.created||null,
+    usage,
+    limits,
+    remaining
   });
 });
 
@@ -261,6 +301,29 @@ app.patch('/api/user/profile', auth, async (req, res) => {
     catch(e) { return res.status(500).json({ error:e.message }); }
   }
   res.json({ ok:true });
+});
+
+// Change password — requires current password to authorise the change.
+// On success the existing token is preserved (no forced re-login).
+app.post('/api/auth/change-password', auth, async (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+  if (!currentPassword || !newPassword) return res.status(400).json({ error:'currentPassword and newPassword are required' });
+  if (newPassword.length < 8) return res.status(400).json({ error:'New password must be at least 8 characters' });
+  try {
+    const user = await store.getUser(req.user.username);
+    if (!user) return res.status(404).json({ error:'User not found' });
+    let valid = false;
+    if (user.password_hash && user.password_hash.includes(':')) valid = await verifyPassword(currentPassword, user.password_hash);
+    else if (user.hash && user.hash.includes(':')) valid = await verifyPassword(currentPassword, user.hash);
+    if (!valid) return res.status(401).json({ error:'Current password is incorrect' });
+    const newHash = await hashPassword(newPassword);
+    if (db.hasDb()) {
+      await db.query('UPDATE rp_users SET password_hash=$1,updated_at=NOW() WHERE id=$2', [newHash, req.user.id]);
+    } else {
+      users[req.user.username].hash = newHash; saveData();
+    }
+    res.json({ ok:true });
+  } catch(e) { res.status(500).json({ error:e.message }); }
 });
 
 // ═══ SESSION ═══
@@ -285,7 +348,7 @@ app.post('/api/sync', auth, async (req, res) => {
   const { items, sold, snapshots, messages, schedules, settings } = req.body || {};
   const userId = req.user.id;
   try {
-    // Upsert items
+    // Upsert items + write append-only backup snapshots
     if (items && typeof items === 'object') {
       for (const [itemId, it] of Object.entries(items)) {
         const price = typeof it.price === 'object' ? parseFloat(it.price?.amount||0) : parseFloat(it.price||0);
@@ -302,6 +365,34 @@ app.post('/api/sync', auth, async (req, res) => {
             it.repostCount||0, it.lastRepost||null, it.costPrice||null,
             it.stockQty||1, it.firstSeen||new Date().toISOString(), it.soldAt||null,
             JSON.stringify(it)]);
+
+        // Backup snapshot — only if content changed since the last one (avoid spam)
+        try {
+          const lastBackup = await db.query(
+            'SELECT title,description,price,photos FROM rp_item_backups WHERE user_id=$1 AND item_id=$2 ORDER BY backed_up_at DESC LIMIT 1',
+            [userId, itemId]
+          );
+          const photos = Array.isArray(it.photos) ? it.photos.map(p => ({ id: p.id, url: p.url || p.full_size_url || null })) : [];
+          const last = lastBackup.rows[0];
+          const changed = !last
+            || last.title !== (it.title || '')
+            || (last.description || '') !== (it.description || '')
+            || parseFloat(last.price || 0) !== price
+            || JSON.stringify(last.photos || []) !== JSON.stringify(photos);
+          if (changed) {
+            await db.query(`
+              INSERT INTO rp_item_backups (user_id,item_id,title,description,price,currency,brand,size,photos,raw_data)
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+            `, [userId, itemId, it.title || '', it.description || '', price, it.currency || 'GBP',
+                it.brand || '', it.size || '', JSON.stringify(photos), JSON.stringify(it)]);
+            // Prune to last 5 snapshots per item
+            await db.query(`
+              DELETE FROM rp_item_backups
+              WHERE user_id=$1 AND item_id=$2
+                AND id NOT IN (SELECT id FROM rp_item_backups WHERE user_id=$1 AND item_id=$2 ORDER BY backed_up_at DESC LIMIT 5)
+            `, [userId, itemId]);
+          }
+        } catch (be) { console.warn('[RP] Backup write failed for', itemId, be.message); }
       }
     }
     // Upsert sold items
@@ -348,6 +439,64 @@ app.post('/api/sync', auth, async (req, res) => {
   } catch(e) {
     console.error('[RP] Sync error:', e.message);
     res.status(500).json({ error:e.message });
+  }
+});
+
+// ═══ ITEM BACKUPS — recover items lost to failed reposts ═══
+// List the latest backup for every item the user owns
+app.get('/api/items/backups', auth, async (req, res) => {
+  if (!db.hasDb()) return res.json({ ok:false, error:'Database not configured' });
+  try {
+    const r = await db.query(`
+      SELECT DISTINCT ON (item_id) item_id, title, description, price, currency, brand, size, photos, raw_data, backed_up_at
+      FROM rp_item_backups
+      WHERE user_id=$1
+      ORDER BY item_id, backed_up_at DESC
+    `, [req.user.id]);
+    res.json({ ok:true, backups: r.rows });
+  } catch (e) {
+    console.error('[RP] Backups list error:', e.message);
+    res.status(500).json({ ok:false, error:e.message });
+  }
+});
+
+// Get every snapshot for one specific item (newest first)
+app.get('/api/items/backups/:itemId', auth, async (req, res) => {
+  if (!db.hasDb()) return res.json({ ok:false, error:'Database not configured' });
+  try {
+    const r = await db.query(
+      'SELECT id,item_id,title,description,price,currency,brand,size,photos,raw_data,backed_up_at FROM rp_item_backups WHERE user_id=$1 AND item_id=$2 ORDER BY backed_up_at DESC',
+      [req.user.id, req.params.itemId]
+    );
+    res.json({ ok:true, snapshots: r.rows });
+  } catch (e) {
+    console.error('[RP] Backup fetch error:', e.message);
+    res.status(500).json({ ok:false, error:e.message });
+  }
+});
+
+// Manual backup write — content script can call this directly before risky operations
+app.post('/api/items/backup', auth, async (req, res) => {
+  if (!db.hasDb()) return res.json({ ok:false, error:'Database not configured' });
+  const { item } = req.body || {};
+  if (!item || !item.id) return res.status(400).json({ ok:false, error:'item.id required' });
+  try {
+    const price = typeof item.price === 'object' ? parseFloat(item.price?.amount||0) : parseFloat(item.price||0);
+    const photos = Array.isArray(item.photos) ? item.photos.map(p => ({ id: p.id, url: p.url || p.full_size_url || null })) : [];
+    await db.query(`
+      INSERT INTO rp_item_backups (user_id,item_id,title,description,price,currency,brand,size,photos,raw_data)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+    `, [req.user.id, String(item.id), item.title||'', item.description||'', price, item.currency||'GBP',
+        item.brand||'', item.size||'', JSON.stringify(photos), JSON.stringify(item)]);
+    await db.query(`
+      DELETE FROM rp_item_backups
+      WHERE user_id=$1 AND item_id=$2
+        AND id NOT IN (SELECT id FROM rp_item_backups WHERE user_id=$1 AND item_id=$2 ORDER BY backed_up_at DESC LIMIT 5)
+    `, [req.user.id, String(item.id)]);
+    res.json({ ok:true });
+  } catch (e) {
+    console.error('[RP] Manual backup error:', e.message);
+    res.status(500).json({ ok:false, error:e.message });
   }
 });
 
@@ -402,8 +551,19 @@ app.get('/api/dashboard', auth, async (req, res) => {
       createdAt:row.created_at
     }));
     const totalRevenue = sold.reduce((s,i) => s+(i.price||0), 0);
+    const usage = await getUserUsage(userId);
+    const limits = { reposts:planInfo.repostsPerMonth, items:planInfo.itemLimit, schedules:planInfo.scheduleLimit };
+    const remaining = {
+      reposts: limits.reposts==null ? null : Math.max(0, limits.reposts - usage.repostsThisMonth),
+      items: limits.items==null ? null : Math.max(0, limits.items - usage.itemsTotal),
+      schedules: limits.schedules==null ? null : Math.max(0, limits.schedules - usage.schedulesActive)
+    };
     res.json({ ok:true, items, sold, snapshots, messages, schedules, actions, settings:settingsR,
-      totalRevenue, plan, planInfo,
+      totalRevenue, plan, planInfo, usage, limits, remaining,
+      profile: {
+        signedIn:true, username:req.user.username, email:req.user.email||null,
+        plan, planInfo, planExpires:req.user.plan_expires_at||null
+      },
       account: { memberId:sessionR?.memberId, domain:sessionR?.domain, connected:!!sessionR }
     });
   } catch(e) {
@@ -760,6 +920,14 @@ app.get('/api/actions', auth, async (req, res) => {
 app.post('/api/vinted/items/:itemId/repost-log', auth, async (req, res) => {
   const { newId, edits } = req.body || {};
   try {
+    // Enforce monthly quota
+    const planInfo = PLANS[req.user.plan||'free'] || PLANS.free;
+    if (planInfo.repostsPerMonth != null) {
+      const usage = await getUserUsage(req.user.id);
+      if (usage.repostsThisMonth >= planInfo.repostsPerMonth) {
+        return res.status(429).json({ ok:false, error:`Repost quota reached for ${planInfo.name} plan (${planInfo.repostsPerMonth}/month). Upgrade to continue.`, quotaExceeded:true });
+      }
+    }
     if (db.hasDb()) {
       const now = new Date().toISOString();
       if (newId && newId !== req.params.itemId) {
@@ -903,11 +1071,18 @@ app.get('/api/vinted/package-sizes', auth, async (req, res) => {
   } catch(e) { res.status(502).json({ error:e.message }); }
 });
 
+// ═══ TELEGRAM BOT ═══
+const initTelegram = require('./telegram');
+
 // ═══ START ═══
 (async () => {
   if (!db.hasDb()) loadData();
   await db.initSchema();
   await recoverPendingActivations();
+
+  // Start Telegram bot (requires TELEGRAM_BOT_TOKEN env var)
+  initTelegram({ store, vintedFetch, verifyPassword, app });
+
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[RelistPro] v3.0.0 on port ${PORT} | db:${db.hasDb()} | stripe:${!!stripe}`);
   });

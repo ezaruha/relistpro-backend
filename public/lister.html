@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="RP Lister">
+<title>RelistPro Lister</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+:root{
+  --bg:#0a0a0a;--card:#141414;--card2:#1c1c1c;--border:#252525;
+  --text:#e2e8f0;--sub:#94a3b8;--accent:#6366f1;--accent2:#818cf8;
+  --green:#22c55e;--red:#ef4444;--radius:10px;
+}
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;overflow-x:hidden}
+
+/* ── Screens ── */
+.screen{display:none;min-height:100vh}
+.screen.active{display:block}
+
+/* ── Login ── */
+#loginScreen{display:none;align-items:center;justify-content:center;min-height:100vh;background:radial-gradient(ellipse at 50% 0%,#1e1b4b 0%,var(--bg) 60%)}
+#loginScreen.active{display:flex}
+.login-box{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:32px 28px;width:calc(100% - 40px);max-width:360px}
+.login-logo{font-size:26px;font-weight:700;background:linear-gradient(135deg,#fff,var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:4px}
+.login-sub{color:var(--sub);font-size:13px;margin-bottom:24px}
+.field{margin-bottom:14px}
+.field label{display:block;font-size:11px;font-weight:600;color:var(--sub);margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em}
+.field input,.field select,.field textarea{width:100%;background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;color:var(--text);font-size:15px;outline:none;-webkit-appearance:none;appearance:none;transition:.15s;font-family:inherit}
+.field input:focus,.field select:focus,.field textarea:focus{border-color:var(--accent)}
+.field textarea{resize:vertical;min-height:80px;line-height:1.5}
+.btn{width:100%;padding:13px;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;border:none;transition:.15s;display:flex;align-items:center;justify-content:center;gap:8px}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:active{background:#4f46e5}
+.btn-primary:disabled{opacity:.5;cursor:not-allowed}
+.btn-ghost{background:transparent;color:var(--sub);border:1px solid var(--border);font-size:13px;padding:8px 14px;width:auto;border-radius:8px}
+.err{color:var(--red);font-size:13px;margin-top:10px;display:none}
+
+/* ── Main screen ── */
+#mainScreen{padding-bottom:90px}
+.header{position:sticky;top:0;z-index:10;background:var(--bg);border-bottom:1px solid var(--border);padding:14px 16px;display:flex;align-items:center;justify-content:space-between}
+.header h1{font-size:17px;font-weight:700}
+.header-sub{font-size:12px;color:var(--sub)}
+
+/* ── Photo section ── */
+.section{padding:16px}
+.section-title{font-size:12px;font-weight:600;color:var(--sub);text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px}
+.photo-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px}
+.photo-thumb{position:relative;aspect-ratio:1;border-radius:8px;overflow:hidden;background:var(--card2)}
+.photo-thumb img{width:100%;height:100%;object-fit:cover}
+.remove-photo{position:absolute;top:4px;right:4px;background:rgba(0,0,0,.7);color:#fff;border:none;border-radius:50%;width:22px;height:22px;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1}
+.add-photo-btn{aspect-ratio:1;border-radius:8px;border:2px dashed var(--border);background:var(--card2);display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;color:var(--sub);font-size:12px;gap:4px;transition:.15s}
+.add-photo-btn:active{border-color:var(--accent);color:var(--accent)}
+.add-photo-btn svg{opacity:.5}
+#photoInput{display:none}
+
+/* ── Analyze button ── */
+.analyze-btn{display:none;width:calc(100% - 32px);margin:0 16px 16px;padding:12px;border-radius:10px;background:linear-gradient(135deg,#312e81,var(--accent));color:#fff;font-size:14px;font-weight:600;border:none;cursor:pointer;align-items:center;justify-content:center;gap:8px;transition:.15s}
+.analyze-btn:active{opacity:.85}
+.analyze-btn:disabled{opacity:.5;cursor:not-allowed}
+
+/* ── Form ── */
+.form-section{padding:0 16px}
+.field select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2394a3b8' d='M6 8L1 3h10z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:32px}
+.cat-btn{width:100%;background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;color:var(--text);font-size:15px;text-align:left;cursor:pointer;transition:.15s;display:flex;align-items:center;justify-content:space-between}
+.cat-btn:active{border-color:var(--accent)}
+.cat-btn .chevron{color:var(--sub);font-size:12px}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.autocomplete-wrap{position:relative}
+.autocomplete-dd{position:absolute;top:100%;left:0;right:0;background:var(--card);border:1px solid var(--border);border-radius:8px;z-index:20;display:none;max-height:200px;overflow-y:auto;margin-top:4px}
+.autocomplete-dd div{padding:10px 12px;font-size:14px;cursor:pointer;border-bottom:1px solid var(--border)}
+.autocomplete-dd div:last-child{border:none}
+.autocomplete-dd div:active{background:var(--card2)}
+
+/* ── Sticky post button ── */
+.post-bar{position:fixed;bottom:0;left:0;right:0;padding:12px 16px;background:var(--bg);border-top:1px solid var(--border);z-index:10}
+.post-btn{width:100%;padding:14px;border-radius:12px;background:var(--accent);color:#fff;font-size:16px;font-weight:700;border:none;cursor:pointer;transition:.15s}
+.post-btn:active{background:#4f46e5}
+.post-btn:disabled{opacity:.5;cursor:not-allowed}
+
+/* ── Category modal ── */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;display:none;align-items:flex-end}
+.modal-overlay.open{display:flex}
+.modal-sheet{background:var(--card);border-radius:20px 20px 0 0;width:100%;max-height:80vh;overflow:hidden;display:flex;flex-direction:column}
+.modal-header{padding:16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.modal-header h2{font-size:16px;font-weight:700}
+.modal-close{background:var(--card2);border:none;color:var(--sub);border-radius:50%;width:30px;height:30px;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center}
+.modal-search{padding:12px 16px;border-bottom:1px solid var(--border)}
+.modal-search input{width:100%;background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:9px 12px;color:var(--text);font-size:14px;outline:none}
+.modal-list{overflow-y:auto;flex:1}
+.cat-group-title{padding:8px 16px 4px;font-size:11px;font-weight:700;color:var(--sub);text-transform:uppercase;letter-spacing:.05em;background:var(--bg);position:sticky;top:0}
+.cat-item{padding:12px 16px;font-size:14px;cursor:pointer;border-bottom:1px solid var(--border)}
+.cat-item:active{background:var(--card2)}
+
+/* ── Success screen ── */
+#successScreen{display:none;align-items:center;justify-content:center;min-height:100vh;flex-direction:column;gap:16px;padding:32px;text-align:center}
+#successScreen.active{display:flex}
+.success-icon{font-size:64px}
+.success-title{font-size:24px;font-weight:700}
+.success-msg{color:var(--sub);font-size:15px}
+
+/* ── Spinner ── */
+.spinner{width:18px;height:18px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .6s linear infinite;flex-shrink:0}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ── Divider ── */
+.divider{height:1px;background:var(--border);margin:8px 0}
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="loginScreen" class="screen active">
+  <div class="login-box">
+    <div class="login-logo">RelistPro</div>
+    <div class="login-sub">Lister — post to Vinted from your phone</div>
+    <div class="field"><label>Username</label><input id="loginUser" type="text" autocomplete="username" autocorrect="off" autocapitalize="none" placeholder="your username"></div>
+    <div class="field"><label>Password</label><input id="loginPass" type="password" autocomplete="current-password" placeholder="••••••••"></div>
+    <button class="btn btn-primary" id="loginBtn" onclick="doLogin()">Sign in</button>
+    <div class="err" id="loginErr"></div>
+  </div>
+</div>
+
+<!-- MAIN -->
+<div id="mainScreen" class="screen">
+  <div class="header">
+    <div>
+      <div class="header h1" style="font-size:17px;font-weight:700">New Listing</div>
+      <div class="header-sub">RelistPro Lister</div>
+    </div>
+    <button class="btn-ghost" onclick="logout()">Sign out</button>
+  </div>
+
+  <!-- Photos -->
+  <div class="section">
+    <div class="section-title">Photos</div>
+    <div class="photo-grid" id="photoGrid"></div>
+    <div class="add-photo-btn" onclick="document.getElementById('photoInput').click()">
+      <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
+      Add photos
+    </div>
+    <input type="file" id="photoInput" accept="image/*" multiple onchange="handlePhotos(this)">
+  </div>
+
+  <button class="analyze-btn" id="analyzeBtn" onclick="analyzePhotos()">
+    <span id="analyzeBtnText">✨ Analyze with AI</span>
+  </button>
+
+  <!-- Form -->
+  <div class="form-section">
+    <div class="field">
+      <label>Title</label>
+      <input type="text" id="titleInput" placeholder="e.g. Nike Air Max 90 White" maxlength="60">
+    </div>
+    <div class="field">
+      <label>Description</label>
+      <textarea id="descInput" placeholder="Describe the item, condition, size..."></textarea>
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label>Price (£)</label>
+        <input type="number" id="priceInput" placeholder="0.00" step="0.50" min="0">
+      </div>
+      <div class="field">
+        <label>Condition</label>
+        <select id="conditionSelect">
+          <option value="">Loading...</option>
+        </select>
+      </div>
+    </div>
+    <div class="field">
+      <label>Brand</label>
+      <div class="autocomplete-wrap" id="brandField">
+        <input type="text" id="brandInput" placeholder="Search brand..." autocomplete="off" oninput="onBrandInput(this.value)" onblur="setTimeout(hideBrandDd,200)">
+        <div class="autocomplete-dd" id="brandDd"></div>
+      </div>
+    </div>
+    <div class="field">
+      <label>Category</label>
+      <button class="cat-btn" id="catBtn" onclick="openCatModal()">
+        <span id="catBtnText" style="color:var(--sub)">Select category</span>
+        <span class="chevron">▼</span>
+      </button>
+    </div>
+    <div class="field" id="sizeRow" style="display:none">
+      <label>Size</label>
+      <select id="sizeSelect" onchange="formState.size_id=parseInt(this.value)||null">
+        <option value="">Select size</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Shipping</label>
+      <select id="packageSelect" onchange="formState.package_size_id=parseInt(this.value)||null">
+        <option value="">Select shipping size</option>
+      </select>
+    </div>
+  </div>
+
+  <div style="height:8px"></div>
+  <div class="post-bar">
+    <button class="post-btn" id="postBtn" onclick="postListing()">Post to Vinted</button>
+  </div>
+</div>
+
+<!-- SUCCESS -->
+<div id="successScreen" class="screen">
+  <div class="success-icon">🎉</div>
+  <div class="success-title">Listing submitted!</div>
+  <div class="success-msg" id="successMsg">It will go live on Vinted in ~15 minutes.</div>
+  <button class="btn btn-primary" style="max-width:200px" onclick="resetToNew()">List another</button>
+</div>
+
+<!-- CATEGORY MODAL -->
+<div class="modal-overlay" id="catModal" onclick="if(event.target===this)closeCatModal()">
+  <div class="modal-sheet">
+    <div class="modal-header">
+      <h2>Select Category</h2>
+      <button class="modal-close" onclick="closeCatModal()">×</button>
+    </div>
+    <div class="modal-search">
+      <input type="text" id="catSearch" placeholder="Search..." oninput="filterCats(this.value)">
+    </div>
+    <div class="modal-list" id="catList"></div>
+  </div>
+</div>
+
+<script>
+const API = window.location.origin;
+let token = localStorage.getItem('rp_lister_token');
+let allCatalogs = [];
+let brandTimer = null;
+let formState = { catalog_id: null, size_id: null, package_size_id: null, brand_id: null };
+let photos = []; // [{preview, base64, mimeType}]
+
+// ── Init ──
+(async () => {
+  if (token) {
+    try { await loadDropdowns(); show('mainScreen'); }
+    catch(e) { localStorage.removeItem('rp_lister_token'); token = null; show('loginScreen'); }
+  } else { show('loginScreen'); }
+})();
+
+function show(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+}
+
+// ── Login ──
+async function doLogin() {
+  const user = document.getElementById('loginUser').value.trim();
+  const pass = document.getElementById('loginPass').value;
+  const btn = document.getElementById('loginBtn');
+  const err = document.getElementById('loginErr');
+  err.style.display = 'none';
+  if (!user || !pass) { err.textContent = 'Enter username and password'; err.style.display='block'; return; }
+  btn.disabled = true; btn.textContent = 'Signing in...';
+  try {
+    const res = await fetch(`${API}/api/auth/login`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ username:user, password:pass }) });
+    const d = await res.json();
+    if (!d.token) throw new Error(d.error || 'Login failed');
+    token = d.token;
+    localStorage.setItem('rp_lister_token', token);
+    await loadDropdowns();
+    show('mainScreen');
+  } catch(e) { err.textContent = e.message; err.style.display = 'block'; }
+  btn.disabled = false; btn.textContent = 'Sign in';
+}
+
+function logout() {
+  localStorage.removeItem('rp_lister_token');
+  token = null;
+  photos = [];
+  formState = { catalog_id:null, size_id:null, package_size_id:null, brand_id:null };
+  renderPhotos();
+  show('loginScreen');
+}
+
+function ah() { return { 'Content-Type':'application/json', 'Authorization':'Bearer '+token }; }
+
+// ── Load dropdowns on login ──
+async function loadDropdowns() {
+  await Promise.all([loadCatalogs(), loadConditions(), loadPackageSizes()]);
+}
+
+async function loadCatalogs() {
+  const res = await fetch(`${API}/api/vinted/catalogs`, { headers: ah() });
+  if (!res.ok) throw new Error('Failed to load catalogs');
+  const d = await res.json();
+  allCatalogs = [];
+  function flatten(nodes, parent) {
+    for (const n of (nodes || [])) {
+      if (n.catalogs?.length) { flatten(n.catalogs, n.title); }
+      else { allCatalogs.push({ id:n.id, title:n.title, parent:parent||null }); }
+    }
+  }
+  flatten(d.catalogs || []);
+  renderCatList(allCatalogs);
+}
+
+async function loadConditions() {
+  try {
+    const res = await fetch(`${API}/api/vinted/item-statuses`, { headers: ah() });
+    const d = await res.json();
+    const statuses = d.item_statuses || d.statuses || [];
+    const sel = document.getElementById('conditionSelect');
+    if (statuses.length) {
+      sel.innerHTML = '<option value="">Select condition</option>' + statuses.map(s => `<option value="${s.id}">${s.title}</option>`).join('');
+    } else {
+      // Fallback hardcoded
+      sel.innerHTML = `
+        <option value="">Select condition</option>
+        <option value="6">New with tags</option>
+        <option value="1">New without tags</option>
+        <option value="2">Very good</option>
+        <option value="3">Good</option>
+        <option value="4">Satisfactory</option>`;
+    }
+  } catch(e) {
+    document.getElementById('conditionSelect').innerHTML = `
+      <option value="">Select condition</option>
+      <option value="6">New with tags</option>
+      <option value="1">New without tags</option>
+      <option value="2">Very good</option>
+      <option value="3">Good</option>
+      <option value="4">Satisfactory</option>`;
+  }
+}
+
+async function loadPackageSizes() {
+  try {
+    const res = await fetch(`${API}/api/vinted/package-sizes`, { headers: ah() });
+    const d = await res.json();
+    const sizes = d.package_sizes || d.sizes || [];
+    const sel = document.getElementById('packageSelect');
+    if (sizes.length) {
+      sel.innerHTML = '<option value="">Select shipping size</option>' + sizes.map(s => `<option value="${s.id}">${s.title}</option>`).join('');
+    }
+  } catch(e) {}
+}
+
+// ── Photos ──
+function handlePhotos(input) {
+  const files = Array.from(input.files);
+  let loaded = 0;
+  for (const file of files) {
+    const reader = new FileReader();
+    reader.onload = ev => {
+      const dataUrl = ev.target.result;
+      const base64 = dataUrl.split(',')[1];
+      photos.push({ preview: dataUrl, base64, mimeType: file.type || 'image/jpeg' });
+      loaded++;
+      if (loaded === files.length) renderPhotos();
+    };
+    reader.readAsDataURL(file);
+  }
+  input.value = '';
+}
+
+function removePhoto(i) {
+  photos.splice(i, 1);
+  renderPhotos();
+}
+
+function renderPhotos() {
+  const grid = document.getElementById('photoGrid');
+  grid.innerHTML = photos.map((p, i) => `
+    <div class="photo-thumb">
+      <img src="${p.preview}" loading="lazy">
+      <button class="remove-photo" onclick="removePhoto(${i})">×</button>
+    </div>
+  `).join('');
+  const btn = document.getElementById('analyzeBtn');
+  btn.style.display = photos.length ? 'flex' : 'none';
+}
+
+// ── AI Analyze ──
+async function analyzePhotos() {
+  if (!photos.length) return;
+  const btn = document.getElementById('analyzeBtn');
+  const txt = document.getElementById('analyzeBtnText');
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner"></div><span>Analyzing...</span>';
+  try {
+    const res = await fetch(`${API}/api/ai/analyze`, {
+      method: 'POST', headers: ah(),
+      body: JSON.stringify({ imageData: photos[0].base64, mimeType: photos[0].mimeType })
+    });
+    const d = await res.json();
+    if (!d.ok) throw new Error(d.error || 'AI failed');
+    if (d.title) document.getElementById('titleInput').value = d.title;
+    if (d.description) document.getElementById('descInput').value = d.description;
+    if (d.suggested_price) document.getElementById('priceInput').value = d.suggested_price;
+    if (d.brand) { document.getElementById('brandInput').value = d.brand; }
+    if (d.condition) {
+      const condMap = { 'New with tags':'6','New without tags':'1','Very good':'2','Good':'3','Satisfactory':'4' };
+      const id = condMap[d.condition];
+      if (id) document.getElementById('conditionSelect').value = id;
+    }
+  } catch(e) { alert('AI analysis failed: ' + e.message); }
+  btn.disabled = false;
+  btn.innerHTML = '<span>✨ Analyze with AI</span>';
+}
+
+// ── Brand autocomplete ──
+function onBrandInput(val) {
+  clearTimeout(brandTimer);
+  formState.brand_id = null;
+  if (val.length < 2) { hideBrandDd(); return; }
+  brandTimer = setTimeout(() => searchBrands(val), 400);
+}
+
+async function searchBrands(q) {
+  try {
+    const res = await fetch(`${API}/api/vinted/brands?q=${encodeURIComponent(q)}`, { headers: ah() });
+    const d = await res.json();
+    const brands = d.brands || [];
+    const dd = document.getElementById('brandDd');
+    if (!brands.length) { hideBrandDd(); return; }
+    dd.innerHTML = brands.slice(0,8).map(b => `<div onmousedown="selectBrand(${b.id},${JSON.stringify(b.title)})">${b.title}</div>`).join('');
+    dd.style.display = 'block';
+  } catch(e) {}
+}
+
+function selectBrand(id, title) {
+  formState.brand_id = id;
+  document.getElementById('brandInput').value = title;
+  hideBrandDd();
+}
+
+function hideBrandDd() {
+  document.getElementById('brandDd').style.display = 'none';
+}
+
+// ── Category modal ──
+function renderCatList(cats) {
+  const list = document.getElementById('catList');
+  const groups = {};
+  for (const c of cats) {
+    const g = c.parent || 'Other';
+    if (!groups[g]) groups[g] = [];
+    groups[g].push(c);
+  }
+  list.innerHTML = Object.entries(groups).map(([parent, items]) =>
+    `<div class="cat-group-title">${parent}</div>` +
+    items.map(c => `<div class="cat-item" onclick="selectCat(${c.id},${JSON.stringify((c.parent?c.parent+' › ':'')+c.title)})">${c.title}</div>`).join('')
+  ).join('');
+}
+
+function filterCats(q) {
+  const filtered = q.trim() ? allCatalogs.filter(c => (c.title+' '+(c.parent||'')).toLowerCase().includes(q.toLowerCase())) : allCatalogs;
+  renderCatList(filtered);
+}
+
+function openCatModal() {
+  document.getElementById('catSearch').value = '';
+  renderCatList(allCatalogs);
+  document.getElementById('catModal').classList.add('open');
+}
+
+function closeCatModal() {
+  document.getElementById('catModal').classList.remove('open');
+}
+
+async function selectCat(id, label) {
+  formState.catalog_id = id;
+  formState.size_id = null;
+  document.getElementById('catBtnText').textContent = label;
+  document.getElementById('catBtnText').style.color = 'var(--text)';
+  closeCatModal();
+  // Load sizes
+  const sizeRow = document.getElementById('sizeRow');
+  const sizeSelect = document.getElementById('sizeSelect');
+  sizeRow.style.display = 'block';
+  sizeSelect.innerHTML = '<option value="">Loading sizes...</option>';
+  try {
+    const res = await fetch(`${API}/api/vinted/sizes?catalog_id=${id}`, { headers: ah() });
+    const d = await res.json();
+    const sizes = d.catalog_sizes || d.sizes || [];
+    if (sizes.length) {
+      sizeSelect.innerHTML = '<option value="">Select size</option>' + sizes.map(s => `<option value="${s.id}">${s.title}</option>`).join('');
+    } else {
+      sizeSelect.innerHTML = '<option value="">N/A for this category</option>';
+    }
+  } catch(e) { sizeSelect.innerHTML = '<option value="">Could not load sizes</option>'; }
+}
+
+// ── Post listing ──
+async function postListing() {
+  const title = document.getElementById('titleInput').value.trim();
+  const description = document.getElementById('descInput').value.trim();
+  const price = parseFloat(document.getElementById('priceInput').value);
+  const brand = document.getElementById('brandInput').value.trim();
+  const status_id = parseInt(document.getElementById('conditionSelect').value) || null;
+  const size_id = parseInt(document.getElementById('sizeSelect').value) || null;
+  const package_size_id = parseInt(document.getElementById('packageSelect').value) || null;
+
+  if (!photos.length) { alert('Add at least one photo.'); return; }
+  if (!title) { alert('Title is required.'); return; }
+  if (!price || price <= 0) { alert('Enter a valid price.'); return; }
+  if (!formState.catalog_id) { alert('Select a category.'); return; }
+  if (!status_id) { alert('Select a condition.'); return; }
+
+  const btn = document.getElementById('postBtn');
+  btn.disabled = true;
+
+  try {
+    // 1. Upload photos
+    const uploadedPhotos = [];
+    for (let i = 0; i < photos.length; i++) {
+      btn.textContent = `Uploading photo ${i+1} of ${photos.length}...`;
+      const res = await fetch(`${API}/api/vinted/photos/upload`, {
+        method: 'POST', headers: ah(),
+        body: JSON.stringify({ imageData: photos[i].base64, mimeType: photos[i].mimeType })
+      });
+      const d = await res.json();
+      if (!d.ok || !d.photoId) throw new Error(`Photo ${i+1} upload failed: ${d.error || d.detail || res.status}`);
+      uploadedPhotos.push({ id: d.photoId, orientation: 0 });
+      if (i < photos.length - 1) await new Promise(r => setTimeout(r, 400));
+    }
+
+    // 2. Create draft listing
+    btn.textContent = 'Creating listing...';
+    const payload = {
+      title, description, price, status_id,
+      catalog_id: formState.catalog_id,
+      ...(size_id && { size_id }),
+      ...(package_size_id && { package_size_id }),
+      ...(formState.brand_id && { brand_id: formState.brand_id }),
+      ...(brand && { brand }),
+      assigned_photos: uploadedPhotos
+    };
+
+    const res = await fetch(`${API}/api/vinted/items/create`, {
+      method: 'POST', headers: ah(),
+      body: JSON.stringify(payload)
+    });
+    const d = await res.json();
+    if (!d.ok) throw new Error(d.error || 'Listing creation failed');
+
+    // Success
+    document.getElementById('successMsg').textContent = `"${title}" will go live on Vinted in ~15 minutes.`;
+    show('successScreen');
+
+  } catch(e) {
+    alert('Error: ' + e.message);
+  }
+  btn.disabled = false;
+  btn.textContent = 'Post to Vinted';
+}
+
+// ── Reset ──
+function resetToNew() {
+  photos = [];
+  formState = { catalog_id:null, size_id:null, package_size_id:null, brand_id:null };
+  document.getElementById('titleInput').value = '';
+  document.getElementById('descInput').value = '';
+  document.getElementById('priceInput').value = '';
+  document.getElementById('brandInput').value = '';
+  document.getElementById('conditionSelect').value = '';
+  document.getElementById('catBtnText').textContent = 'Select category';
+  document.getElementById('catBtnText').style.color = 'var(--sub)';
+  document.getElementById('sizeRow').style.display = 'none';
+  renderPhotos();
+  show('mainScreen');
+}
+</script>
+</body>
+</html>

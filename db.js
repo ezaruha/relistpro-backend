@@ -143,6 +143,24 @@ async function initSchema() {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
       CREATE INDEX IF NOT EXISTS idx_rp_actions_user_time ON rp_actions(user_id, created_at DESC);
+
+      -- Append-only item backups so a lost/failed-repost item can always be recovered.
+      -- One row per backup snapshot — never overwritten, pruned to keep last 5 per item.
+      CREATE TABLE IF NOT EXISTS rp_item_backups (
+        id BIGSERIAL PRIMARY KEY,
+        user_id UUID NOT NULL REFERENCES rp_users(id) ON DELETE CASCADE,
+        item_id TEXT NOT NULL,
+        title TEXT,
+        description TEXT,
+        price NUMERIC(10,2),
+        currency TEXT,
+        brand TEXT,
+        size TEXT,
+        photos JSONB DEFAULT '[]',
+        raw_data JSONB DEFAULT '{}',
+        backed_up_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_rp_item_backups_user_item ON rp_item_backups(user_id, item_id, backed_up_at DESC);
     `);
     console.log('[DB] Schema ready');
   } catch (e) {
