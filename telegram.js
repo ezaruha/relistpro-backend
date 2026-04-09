@@ -1478,17 +1478,38 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
 
   async function createListing(chatId) {
     const c = getChat(chatId);
+    ensureMulti(c);
     const L = c.listing;
 
+    if (!L) {
+      c.step = 'idle';
+      return bot.sendMessage(chatId, 'No listing data found. Send photos to start a new listing.');
+    }
+
     if (!L.catalog_id || !L.status_id) {
-      return bot.sendMessage(chatId, 'Category and condition are required before posting.');
+      c.step = 'review';
+      return showSummary(chatId);
+    }
+
+    const acct = activeAccount(c);
+    if (!acct) {
+      c.step = 'idle';
+      return bot.sendMessage(chatId, 'Not connected. Use /login first, then send photos.');
+    }
+
+    if (!c.photos || !c.photos.length) {
+      c.step = 'idle';
+      return bot.sendMessage(chatId, 'No photos found. Send photos to start a new listing.');
     }
 
     c.step = 'posting';
     const statusMsg = await bot.sendMessage(chatId, `Uploading ${c.photos.length} photo(s) to Vinted...`);
 
-    const session = await store.getSession(activeAccount(c).userId);
-    if (!session) return bot.sendMessage(chatId, 'Vinted session expired. Sync from Chrome extension and try again.');
+    const session = await store.getSession(acct.userId);
+    if (!session) {
+      c.step = 'review';
+      return bot.sendMessage(chatId, 'Vinted session expired. Sync from Chrome extension, then come back and tap POST again.');
+    }
 
     try {
       // ── Step 1: Upload photos ──
@@ -1591,6 +1612,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       const newDraft = createData.draft || createData;
       const draftId = String(newDraft.id || '');
       if (!draftId) throw new Error('No draft ID returned');
+      c._lastDraftId = draftId; // Save for error recovery
 
       await bot.editMessageText(`Draft created. Publishing...`, {
         chat_id: chatId, message_id: statusMsg.message_id
@@ -1617,13 +1639,25 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
 
       if (!completeResp.ok) {
         const errBody = await completeResp.json().catch(() => ({}));
-        // Check if there are validation errors we can show
         const errors = errBody.errors || errBody.message_errors || {};
         const errorLines = Object.entries(errors).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`);
+        const draftUrl = `https://${domain}/items/${draftId}/edit`;
+
+        // Draft exists on Vinted — tell user to finish there
+        c.step = 'idle';
+        c.photos = [];
+        c.listing = null;
+        c.summaryMsgId = null;
+
+        let errMsg = 'Publishing failed but your draft is saved on Vinted.\n\n';
         if (errorLines.length) {
-          throw new Error(`Vinted validation errors:\n${errorLines.join('\n')}`);
+          errMsg += `Issues:\n${errorLines.join('\n')}\n\n`;
         }
-        throw new Error(`Publish failed (${completeResp.status}): ${JSON.stringify(errBody).slice(0, 200)}`);
+        errMsg += `Open your draft to fix and publish:\n${draftUrl}\n\n`;
+        errMsg += 'Send new photos to create another listing.';
+
+        console.error(`[TG] Publish failed for draft ${draftId}:`, errorLines.join('; ') || completeResp.status);
+        return bot.sendMessage(chatId, errMsg);
       }
 
       // ── Success! ──
@@ -1647,11 +1681,36 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       c.listing = null;
       c.summaryMsgId = null;
       c.catalogCache = null;
+      delete c._lastDraftId;
 
     } catch (e) {
       console.error('[TG] Listing error:', e.message);
+
+      // If we have a draftId, it means draft was created — tell user it's saved
+      if (c._lastDraftId) {
+        const dUrl = `https://${session?.domain || 'www.vinted.co.uk'}/items/${c._lastDraftId}/edit`;
+        c.step = 'idle';
+        c.photos = [];
+        c.listing = null;
+        c.summaryMsgId = null;
+        delete c._lastDraftId;
+        return bot.sendMessage(chatId,
+          `Something went wrong: ${e.message}\n\n` +
+          `Your draft is saved on Vinted — open it to finish:\n${dUrl}\n\n` +
+          `Send new photos to create another listing.`
+        );
+      }
+
+      // No draft created yet — safe to retry
       c.step = 'review';
-      bot.sendMessage(chatId, `Failed to post: ${e.message}\n\nTap 🚀 POST TO VINTED to try again, edit any field, or /cancel to start over.`);
+      bot.sendMessage(chatId,
+        `Failed: ${e.message}\n\n` +
+        `What to do:\n` +
+        `• Tap 🚀 POST TO VINTED to retry\n` +
+        `• Edit any field using the buttons\n` +
+        `• /cancel to start over`
+      );
+      showSummary(chatId);
     }
   }
 
