@@ -1190,6 +1190,31 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
     if (c.step === 'searching_cat' || c.step === 'wiz_category') {
       return searchCategories(chatId, msg.text);
     }
+
+    // ── Catch-all: guide the user on what to do next ──
+    if (c.step === 'idle') {
+      ensureMulti(c);
+      if (!activeAccount(c)) {
+        return bot.sendMessage(chatId, 'To get started, connect your account with /login\n\nOnce logged in, send photos of an item to create a listing.');
+      }
+      return bot.sendMessage(chatId, '📸 Send me photos of an item to list on Vinted!\n\nYou can also add a caption with details like "Nike hoodie size M £25".');
+    }
+
+    if (c.step === 'review') {
+      return bot.sendMessage(chatId, 'You have a listing ready for review. Use the buttons above to edit or post it, or /cancel to start over.');
+    }
+
+    if (c.step === 'analyzing') {
+      return bot.sendMessage(chatId, 'Still analyzing your photos — please wait a moment...');
+    }
+
+    if (c.step === 'posting') {
+      return bot.sendMessage(chatId, 'Your item is being posted to Vinted — please wait...');
+    }
+
+    if (c.step === 'collecting_photos') {
+      return bot.sendMessage(chatId, '📸 Send more photos, or wait a moment — I\'ll start analyzing once you\'re done.');
+    }
   });
 
   // ──────────────────────────────────────────
@@ -1473,23 +1498,42 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       for (let i = 0; i < c.photos.length; i++) {
         const buffer = Buffer.from(c.photos[i].base64, 'base64');
         const uuid = crypto.randomBytes(16).toString('hex');
-        const form = new FormData();
-        form.append('photo[type]', 'item');
-        form.append('photo[temp_uuid]', uuid);
-        form.append('photo[file]', new Blob([buffer], { type: 'image/jpeg' }), 'photo.jpg');
+
+        // Build multipart form manually for reliable Node.js uploads
+        const boundary = '----VintedUpload' + crypto.randomBytes(8).toString('hex');
+        const preamble =
+          `--${boundary}\r\n` +
+          `Content-Disposition: form-data; name="photo[type]"\r\n\r\n` +
+          `item\r\n` +
+          `--${boundary}\r\n` +
+          `Content-Disposition: form-data; name="photo[temp_uuid]"\r\n\r\n` +
+          `${uuid}\r\n` +
+          `--${boundary}\r\n` +
+          `Content-Disposition: form-data; name="photo[file]"; filename="photo_${i + 1}.jpg"\r\n` +
+          `Content-Type: image/jpeg\r\n\r\n`;
+
+        const head = Buffer.from(preamble, 'utf-8');
+        const tail = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf-8');
+        const body = Buffer.concat([head, buffer, tail]);
 
         const uploadResp = await fetch(`https://${domain}/api/v2/photos`, {
           method: 'POST',
           headers: {
             'Cookie': session.cookies,
             'X-CSRF-Token': session.csrf,
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            'Content-Type': `multipart/form-data; boundary=${boundary}`,
+            'Accept': 'application/json, text/javascript, */*; q=0.01',
+            'Referer': `https://${domain}/`,
+            'Origin': `https://${domain}`,
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'X-Requested-With': 'XMLHttpRequest'
           },
-          body: form
+          body: body
         });
 
         if (!uploadResp.ok) {
           const errText = await uploadResp.text().catch(() => '');
+          console.error(`[TG] Photo ${i + 1} upload error (${uploadResp.status}):`, errText.slice(0, 200));
           throw new Error(`Photo ${i + 1} upload failed (${uploadResp.status}): ${errText.slice(0, 100)}`);
         }
 
@@ -1497,6 +1541,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
         const photoId = photoData.photo?.id || photoData.id;
         if (!photoId) throw new Error(`Photo ${i + 1}: no ID returned`);
         photoIds.push({ id: photoId, orientation: 0 });
+        console.log(`[TG] Photo ${i + 1} uploaded: id=${photoId}`);
 
         if (i < c.photos.length - 1) await new Promise(r => setTimeout(r, 500));
       }
@@ -1585,11 +1630,14 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       const itemUrl = `https://${domain}/items/${draftId}`;
 
       await bot.editMessageText(
-        `*Item listed successfully\\!*\n\n` +
+        `*Item listed successfully\\!* 🎉\n\n` +
         `*${esc(L.title)}* — £${L.price}\n\n` +
         `[View on Vinted](${esc(itemUrl)})`,
         { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'MarkdownV2' }
       );
+
+      // Follow-up message with next action
+      bot.sendMessage(chatId, '📸 Send more photos to list another item, or use /help to see all commands.');
 
       console.log(`[TG] Listed item ${draftId} for user ${activeAccount(c).username}`);
 
@@ -1603,7 +1651,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
     } catch (e) {
       console.error('[TG] Listing error:', e.message);
       c.step = 'review';
-      bot.sendMessage(chatId, `Failed to post: ${e.message}\n\nYou can try again or /cancel.`);
+      bot.sendMessage(chatId, `Failed to post: ${e.message}\n\nTap 🚀 POST TO VINTED to try again, edit any field, or /cancel to start over.`);
     }
   }
 
