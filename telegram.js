@@ -336,8 +336,20 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     ensureMulti(c);
     if (!activeAccount(c)) return bot.sendMessage(chatId, 'Not connected. Use /login first.');
 
+    // If mid-wizard or review, ask user what to do
+    if (c.step.startsWith('wiz_') || c.step === 'review' || c.step === 'analyzing') {
+      const kb = [
+        [{ text: '📝 Continue current listing', callback_data: 'resume' }],
+        [{ text: '🆕 Start new listing', callback_data: 'newlisting' }],
+      ];
+      c.pendingPhoto = msg;
+      return bot.sendMessage(chatId, 'You have a listing in progress. What would you like to do?', {
+        reply_markup: { inline_keyboard: kb }
+      });
+    }
+
     // Start fresh collection if idle
-    if (c.step === 'idle' || c.step === 'review') {
+    if (c.step === 'idle') {
       c.step = 'collecting_photos';
       c.photos = [];
       c.caption = null;
@@ -433,27 +445,46 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
     if (stepName === 'title') {
       c.step = 'wiz_title';
-      const kb = [[{ text: '✅ Accept', callback_data: 'wiz:accept' }], [{ text: '❌ Cancel listing', callback_data: 'cancel' }]];
-      return bot.sendMessage(chatId, `📝 *Step 1/9 — Title*\n\nSuggested: *${esc(L.title)}*\n\nAccept or type a new title:`, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: kb } });
+      return bot.sendMessage(chatId,
+        `📝 Step 1/9 — Title\n\n` +
+        `AI suggestion:\n"${L.title}"\n\n` +
+        `Tap Accept to keep it, or type your own title:`,
+        { reply_markup: { inline_keyboard: [
+          [{ text: '✅ Accept title', callback_data: 'wiz:accept' }],
+          [{ text: '❌ Cancel listing', callback_data: 'cancel' }]
+        ]}}
+      );
     }
 
     if (stepName === 'description') {
       c.step = 'wiz_description';
-      const kb = [[{ text: '✅ Accept', callback_data: 'wiz:accept' }]];
-      return bot.sendMessage(chatId, `📝 *Step 2/9 — Description*\n\n${esc(L.description)}\n\nAccept or type a new description:`, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: kb } });
+      return bot.sendMessage(chatId,
+        `📝 Step 2/9 — Description\n\n` +
+        `AI suggestion:\n"${L.description}"\n\n` +
+        `Tap Accept to keep it, or type your own description:`,
+        { reply_markup: { inline_keyboard: [
+          [{ text: '✅ Accept description', callback_data: 'wiz:accept' }],
+        ]}}
+      );
     }
 
     if (stepName === 'price') {
       c.step = 'wiz_price';
-      const kb = [[{ text: `✅ Accept £${L.price}`, callback_data: 'wiz:accept' }]];
-      return bot.sendMessage(chatId, `💰 *Step 3/9 — Price*\n\nSuggested: *£${L.price}*\n\nAccept or type a new price:`, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: kb } });
+      return bot.sendMessage(chatId,
+        `💰 Step 3/9 — Price\n\n` +
+        `AI suggestion: £${L.price}\n\n` +
+        `Tap Accept or type a different price:`,
+        { reply_markup: { inline_keyboard: [
+          [{ text: `✅ Accept £${L.price}`, callback_data: 'wiz:accept' }],
+        ]}}
+      );
     }
 
     if (stepName === 'category') {
       c.step = 'wiz_category';
-      // Try to auto-search using AI hint
       if (L.category_hint && !L.catalog_id) {
-        return searchCategories(chatId, L.category_hint.split('/').pop());
+        const searchTerm = L.category_hint.split('/').pop();
+        return searchCategories(chatId, searchTerm);
       }
       return showCategoryPicker(chatId, null);
     }
@@ -461,7 +492,6 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     if (stepName === 'size') {
       c.step = 'wiz_size';
       if (!L.catalog_id) {
-        // Skip size if no category
         c.wizardIdx++;
         return askWizardStep(chatId);
       }
@@ -474,7 +504,10 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         text: `${x.emoji} ${x.label}${x.id === L.status_id ? ' ✓' : ''}`,
         callback_data: `cond:${x.id}`
       }]));
-      return bot.sendMessage(chatId, `📦 *Step 6/9 — Condition*\n\nCurrent: *${esc(L.condition)}*\n\nSelect condition:`, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: keyboard } });
+      return bot.sendMessage(chatId,
+        `📦 Step 6/9 — Condition\n\nAI detected: ${L.condition}\n\nSelect condition:`,
+        { reply_markup: { inline_keyboard: keyboard } }
+      );
     }
 
     if (stepName === 'colour') {
@@ -487,7 +520,10 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       }
       if (L.color1_id) rows.push([{ text: '✅ Keep: ' + L.color, callback_data: 'wiz:accept' }]);
       rows.push([{ text: '⏭️ Skip', callback_data: 'wiz:accept' }]);
-      return bot.sendMessage(chatId, `🎨 *Step 7/9 — Colour*\n\nCurrent: *${esc(L.color || 'Not set')}*\n\nSelect colour:`, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: rows } });
+      return bot.sendMessage(chatId,
+        `🎨 Step 7/9 — Colour\n\nAI detected: ${L.color || 'Not set'}\n\nSelect colour:`,
+        { reply_markup: { inline_keyboard: rows } }
+      );
     }
 
     if (stepName === 'brand') {
@@ -495,7 +531,10 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       const kb = [];
       if (L.brand) kb.push([{ text: `✅ Keep: ${L.brand}`, callback_data: 'wiz:accept' }]);
       kb.push([{ text: '⏭️ No brand / Skip', callback_data: 'wiz:accept' }]);
-      return bot.sendMessage(chatId, `🏷️ *Step 8/9 — Brand*\n\nDetected: *${esc(L.brand || 'None')}*\n\nAccept, skip, or type a brand name to search:`, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: kb } });
+      return bot.sendMessage(chatId,
+        `🏷️ Step 8/9 — Brand\n\nAI detected: ${L.brand || 'None'}\n\nAccept, skip, or type a brand name to search:`,
+        { reply_markup: { inline_keyboard: kb } }
+      );
     }
 
     if (stepName === 'parcel') {
@@ -658,6 +697,23 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         const a = c.accounts[idx];
         return bot.editMessageText(`Switched to ${a.username}. Send photos to list on this account.`, { chat_id: chatId, message_id: query.message.message_id });
       }
+      return;
+    }
+
+    // ── Resume / New listing ──
+    if (data === 'resume') {
+      // Go back to wherever they were
+      return askWizardStep(chatId);
+    }
+    if (data === 'newlisting') {
+      c.step = 'collecting_photos';
+      c.photos = [];
+      c.listing = null;
+      c.summaryMsgId = null;
+      c.wizardIdx = 0;
+      c.catalogCache = null;
+      c.caption = null;
+      bot.editMessageText('Previous listing discarded. Send photos for your new item.', { chat_id: chatId, message_id: query.message.message_id });
       return;
     }
 
@@ -879,16 +935,34 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
   async function fetchCatalogs(chatId) {
     const c = getChat(chatId);
-    if (c.catalogCache) return c.catalogCache;
+    if (c.catalogCache && c.catalogCache.length) return c.catalogCache;
 
-    const session = await store.getSession(activeAccount(c).userId);
-    if (!session) return null;
+    try {
+      const acct = activeAccount(c);
+      if (!acct) { console.error('[TG] No active account for catalog fetch'); return null; }
+      const session = await store.getSession(acct.userId);
+      if (!session) { console.error('[TG] No session for catalog fetch'); return null; }
 
-    const resp = await vintedFetch(session, '/api/v2/catalogs');
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    c.catalogCache = data.catalogs || [];
-    return c.catalogCache;
+      console.log(`[TG] Fetching catalogs from ${session.domain}...`);
+      const resp = await vintedFetch(session, '/api/v2/catalogs');
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => '');
+        console.error(`[TG] Catalog fetch failed: ${resp.status} ${errText.slice(0, 200)}`);
+        return null;
+      }
+      const data = await resp.json();
+      const catalogs = data.catalogs || data.categories || [];
+      if (!catalogs.length) {
+        console.error('[TG] Catalog response empty:', JSON.stringify(data).slice(0, 200));
+        return null;
+      }
+      console.log(`[TG] Got ${catalogs.length} top-level categories`);
+      c.catalogCache = catalogs;
+      return catalogs;
+    } catch (e) {
+      console.error('[TG] Catalog fetch error:', e.message);
+      return null;
+    }
   }
 
   function findCatalog(catalogs, id) {
@@ -912,8 +986,16 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
   }
 
   async function showCategoryPicker(chatId, parentId) {
+    const c = getChat(chatId);
     const catalogs = await fetchCatalogs(chatId);
-    if (!catalogs) return bot.sendMessage(chatId, 'Failed to load categories. Check Vinted session.');
+    const inWiz = c.step.startsWith('wiz_');
+    const header = inWiz ? '📂 Step 4/9 — Category\n\n' : '';
+
+    if (!catalogs) {
+      // Catalogs failed — offer text search as fallback
+      if (inWiz) c.step = 'wiz_category';
+      return bot.sendMessage(chatId, header + 'Could not load category list. Type a category name to search (e.g. "t-shirt", "hoodie", "trainers"):');
+    }
 
     let items;
     if (parentId) {
@@ -924,9 +1006,8 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     }
 
     if (!items.length) {
-      // Leaf node — select it
       if (parentId) return selectCategory(chatId, parentId);
-      return bot.sendMessage(chatId, 'No categories found.');
+      return bot.sendMessage(chatId, 'No categories found. Type a category name to search:');
     }
 
     const rows = items.map(cat => [{
@@ -934,7 +1015,6 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       callback_data: cat.catalogs?.length ? `nav:${cat.id}` : `cat:${cat.id}`
     }]);
 
-    // Add a "search" button and "select this level" if applicable
     const extra = [];
     if (parentId) {
       extra.push({ text: '✅ Select this category', callback_data: `cat:${parentId}` });
@@ -943,11 +1023,8 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     extra.push({ text: '🔍 Search by name', callback_data: 'cat:search' });
     rows.push(extra);
 
-    const c = getChat(chatId);
-    const header = c.step.startsWith('wiz_') ? '📂 *Step 4/9 — Category*\n\n' : '';
     const label = parentId ? 'Pick a subcategory:' : 'Pick a category:';
     bot.sendMessage(chatId, header + label, {
-      parse_mode: 'MarkdownV2',
       reply_markup: { inline_keyboard: rows }
     });
   }
@@ -1043,8 +1120,8 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     }
     rows.push([{ text: '⏭️ Skip (no size)', callback_data: 'size:0' }]);
 
-    const header = c.step.startsWith('wiz_') ? '📏 *Step 5/9 — Size*\n\nSelect size:' : 'Select size:';
-    bot.sendMessage(chatId, header, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: rows } });
+    const header = c.step.startsWith('wiz_') ? '📏 Step 5/9 — Size\n\nSelect size:' : 'Select size:';
+    bot.sendMessage(chatId, header, { reply_markup: { inline_keyboard: rows } });
   }
 
   async function selectSize(chatId, sizeId) {
@@ -1084,8 +1161,8 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     }]);
 
     const c2 = getChat(chatId);
-    const header2 = c2.step.startsWith('wiz_') ? '📮 *Step 9/9 — Parcel Size*\n\nSelect parcel size:' : 'Select parcel size:';
-    bot.sendMessage(chatId, header2, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: rows } });
+    const header2 = c2.step.startsWith('wiz_') ? '📮 Step 9/9 — Parcel Size\n\nSelect parcel size:' : 'Select parcel size:';
+    bot.sendMessage(chatId, header2, { reply_markup: { inline_keyboard: rows } });
   }
 
   async function selectPackageSize(chatId, pkgId) {
