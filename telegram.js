@@ -98,7 +98,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
   // COMMANDS
   // ──────────────────────────────────────────
 
-  bot.onText(/\/start/, (msg) => {
+  bot.onText(/\/start(?:@\S+)?/, (msg) => {
     bot.sendMessage(msg.chat.id,
       `Welcome to *RelistPro Bot* 🛍️\n\n` +
       `List items on Vinted in seconds — just send photos\\!\n\n` +
@@ -127,7 +127,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     );
   });
 
-  bot.onText(/\/help/, (msg) => {
+  bot.onText(/\/help(?:@\S+)?/, (msg) => {
     const c = getChat(msg.chat.id);
     ensureMulti(c);
     const connected = activeAccount(c);
@@ -152,7 +152,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     bot.sendMessage(msg.chat.id, text, { parse_mode: 'MarkdownV2' });
   });
 
-  bot.onText(/\/login (.+)/, async (msg, match) => {
+  bot.onText(/\/login(?:@\S+)? (.+)/, async (msg, match) => {
     const chatId = msg.chat.id;
     const parts = match[1].trim().split(/\s+/);
     if (parts.length < 2) return bot.sendMessage(chatId, 'Usage: /login username password');
@@ -194,7 +194,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     }
   });
 
-  bot.onText(/\/status/, async (msg) => {
+  bot.onText(/\/status(?:@\S+)?/, async (msg) => {
     const c = getChat(msg.chat.id);
     ensureMulti(c);
     if (!c.accounts.length) return bot.sendMessage(msg.chat.id, 'Not connected. Use /login first.');
@@ -212,7 +212,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     bot.sendMessage(msg.chat.id, `Linked accounts:\n${lines.join('\n')}`);
   });
 
-  bot.onText(/\/switch/, async (msg) => {
+  bot.onText(/\/switch(?:@\S+)?/, async (msg) => {
     const chatId = msg.chat.id;
     const c = getChat(chatId);
     ensureMulti(c);
@@ -228,7 +228,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     bot.sendMessage(chatId, 'Switch to which account?', { reply_markup: { inline_keyboard: rows } });
   });
 
-  bot.onText(/\/logout(.*)/, (msg, match) => {
+  bot.onText(/\/logout(?:@\S+)?(.*)/, (msg, match) => {
     const chatId = msg.chat.id;
     const c = getChat(chatId);
     ensureMulti(c);
@@ -253,7 +253,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     }
   });
 
-  bot.onText(/\/cancel/, (msg) => {
+  bot.onText(/\/cancel(?:@\S+)?/, (msg) => {
     const c = getChat(msg.chat.id);
     c.step = 'idle';
     c.photos = [];
