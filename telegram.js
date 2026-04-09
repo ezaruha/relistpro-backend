@@ -114,7 +114,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
   // ── Register command menu (shows in Telegram's command list) ──
   bot.setMyCommands([
     { command: 'start',  description: 'Welcome message & setup guide' },
-    { command: 'login',  description: 'Connect account — /login user pass' },
+    { command: 'login',  description: 'Connect your RelistPro account' },
     { command: 'switch', description: 'Switch between linked Vinted accounts' },
     { command: 'status', description: 'Check connection & Vinted session' },
     { command: 'cancel', description: 'Abort current listing' },
@@ -133,7 +133,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       `━━━━━━━━━━━━━━━━━━━━━━\n` +
       `*How it works:*\n\n` +
       `1️⃣ *Connect your account*\n` +
-      `Send: /login your\\_username your\\_password\n` +
+      `Tap /login — I'll ask for your username and password step by step\n` +
       `\\(Use your RelistPro account — register via the Chrome extension first\\)\n\n` +
       `2️⃣ *Send photos*\n` +
       `Take photos of your item and send them here \\(1\\-5 photos\\)\\.  You can add a caption like "Nike hoodie size M £25"\n\n` +
@@ -143,7 +143,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       `Choose the Vinted category, size, parcel size, then hit *POST TO VINTED*\\.\n` +
       `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
       `*Commands:*\n` +
-      `/login — connect a RelistPro account\n` +
+      `/login — connect your account\n` +
       `/switch — switch between accounts\n` +
       `/status — check connection\n` +
       `/cancel — abort current listing\n` +
@@ -164,12 +164,12 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
     if (!connected) {
       text += `⚠️ *Not connected yet\\!*\n` +
-        `Send: /login your\\_username your\\_password\n\n`;
+        `Tap /login and I'll ask for your details\n\n`;
     } else {
       text += `✅ Connected as *${esc(connected.username)}*\n\n`;
     }
 
-    text += `/login \\<user\\> \\<pass\\> — connect a RelistPro account\n` +
+    text += `/login — connect a RelistPro account\n` +
       `/switch — switch between linked accounts\n` +
       `/status — check connection \\& Vinted session\n` +
       `/cancel — abort current listing\n` +
@@ -180,31 +180,51 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     bot.sendMessage(msg.chat.id, text, { parse_mode: 'MarkdownV2' });
   });
 
-  bot.onText(/\/login(?:@\S+)? (.+)/, async (msg, match) => {
+  bot.onText(/\/login(?:@\S+)?(.*)/, async (msg, match) => {
     const chatId = msg.chat.id;
-    const parts = match[1].trim().split(/\s+/);
-    if (parts.length < 2) return bot.sendMessage(chatId, 'Usage: /login username password');
-    const [username, password] = parts;
+    const c = getChat(chatId);
+    ensureMulti(c);
+
+    const args = (match[1] || '').trim().split(/\s+/).filter(Boolean);
+
+    if (args.length >= 2) {
+      // Inline login: /login username password
+      return doLogin(chatId, args[0], args[1]);
+    }
+
+    // Conversational login — ask for username first
+    c.step = 'login_username';
+    bot.sendMessage(chatId, 'What\'s your RelistPro username?');
+  });
+
+  async function doLogin(chatId, username, password) {
+    const c = getChat(chatId);
+    ensureMulti(c);
 
     try {
       const user = await store.getUser(username);
-      if (!user) return bot.sendMessage(chatId, 'User not found. Register via the extension first.');
+      if (!user) {
+        c.step = 'idle';
+        return bot.sendMessage(chatId, 'User not found. Register via the Chrome extension first, then come back here.');
+      }
 
       let valid = false;
       const hash = user.password_hash || user.hash;
       if (hash && hash.includes(':')) valid = await verifyPassword(password, hash);
-      if (!valid) return bot.sendMessage(chatId, 'Wrong password.');
+      if (!valid) {
+        c.step = 'idle';
+        return bot.sendMessage(chatId, 'Wrong password. Try /login again.');
+      }
 
       const session = await store.getSession(user.id);
-      if (!session) return bot.sendMessage(chatId, 'No Vinted session found. Open Vinted in Chrome, sync with the extension first, then try again.');
-
-      const c = getChat(chatId);
-      ensureMulti(c);
+      if (!session) {
+        c.step = 'idle';
+        return bot.sendMessage(chatId, 'No Vinted session found.\n\nOpen Vinted in your Chrome browser, click the RelistPro extension and sync first. Then come back and /login again.');
+      }
 
       // Check if already linked
       const existing = c.accounts.findIndex(a => a.username === username);
       if (existing >= 0) {
-        // Update token and switch to it
         c.accounts[existing].token = user.token;
         c.accounts[existing].userId = user.id;
         c.activeIdx = existing;
@@ -215,12 +235,13 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       c.step = 'idle';
 
       const countMsg = c.accounts.length > 1 ? `\n${c.accounts.length} accounts linked\\. Use /switch to change\\.` : '';
-      bot.sendMessage(chatId, `Connected as *${esc(username)}*\\! Vinted session active \\(${esc(session.domain)}\\)\\.${countMsg}\n\nSend me photos of an item to list\\.`, { parse_mode: 'MarkdownV2' });
+      bot.sendMessage(chatId, `✅ Connected as *${esc(username)}*\\!\nVinted session active \\(${esc(session.domain)}\\)\\.${countMsg}\n\nSend me photos of an item to list\\.`, { parse_mode: 'MarkdownV2' });
     } catch (e) {
       console.error('[TG] Login error:', e.message);
+      c.step = 'idle';
       bot.sendMessage(chatId, 'Login failed: ' + e.message);
     }
-  });
+  }
 
   bot.onText(/\/status(?:@\S+)?/, async (msg) => {
     const c = getChat(msg.chat.id);
@@ -646,6 +667,22 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     if (!msg.text || msg.text.startsWith('/')) return;
     const chatId = msg.chat.id;
     const c = getChat(chatId);
+
+    // ── Login flow ──
+    if (c.step === 'login_username') {
+      c.loginUsername = msg.text.trim();
+      c.step = 'login_password';
+      return bot.sendMessage(chatId, `Got it. Now what's the password for *${esc(c.loginUsername)}*?`, { parse_mode: 'MarkdownV2' });
+    }
+
+    if (c.step === 'login_password') {
+      const password = msg.text.trim();
+      const username = c.loginUsername;
+      delete c.loginUsername;
+      // Delete the password message for security
+      try { await bot.deleteMessage(chatId, msg.message_id); } catch {}
+      return doLogin(chatId, username, password);
+    }
 
     if (c.step === 'editing_title') {
       c.listing.title = msg.text.slice(0, 60);
