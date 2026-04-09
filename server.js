@@ -1080,10 +1080,14 @@ const initTelegram = require('./telegram');
   await db.initSchema();
   await recoverPendingActivations();
 
-  // Start Telegram bot (requires TELEGRAM_BOT_TOKEN env var)
-  initTelegram({ store, vintedFetch, verifyPassword, app });
-
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[RelistPro] v3.0.0 on port ${PORT} | db:${db.hasDb()} | stripe:${!!stripe}`);
+
+    // Start Telegram bot AFTER server is listening (webhook needs Express ready)
+    try {
+      initTelegram({ store, vintedFetch, verifyPassword, app });
+    } catch (e) {
+      console.error('[TG] Failed to start:', e.message);
+    }
   });
 })();

@@ -70,18 +70,46 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
   if (!BOT_TOKEN) { console.log('[TG] No TELEGRAM_BOT_TOKEN — bot disabled'); return; }
 
   const WEBHOOK_URL = process.env.TELEGRAM_WEBHOOK_URL;
-  const bot = new TelegramBot(BOT_TOKEN, { polling: !WEBHOOK_URL });
+  let botMode = 'polling';
 
+  // Use polling — works reliably on Railway without needing webhook URL config
+  const bot = new TelegramBot(BOT_TOKEN, {
+    polling: {
+      autoStart: true,
+      params: { timeout: 30 }
+    }
+  });
+
+  // If webhook URL is set, switch to webhook mode instead
   if (WEBHOOK_URL) {
+    bot.stopPolling();
     bot.setWebHook(WEBHOOK_URL);
     app.post('/api/telegram/webhook', (req, res) => {
       bot.processUpdate(req.body);
       res.sendStatus(200);
     });
-    console.log('[TG] Bot started (webhook)');
-  } else {
-    console.log('[TG] Bot started (polling)');
+    botMode = 'webhook';
   }
+
+  // Error handling — log but don't crash
+  bot.on('polling_error', (err) => {
+    console.error('[TG] Polling error:', err.code, err.message);
+  });
+  bot.on('error', (err) => {
+    console.error('[TG] Error:', err.message);
+  });
+
+  // Verify bot token works
+  bot.getMe().then((me) => {
+    console.log(`[TG] Bot started (${botMode}) — @${me.username}`);
+  }).catch((err) => {
+    console.error('[TG] Bot token invalid or network error:', err.message);
+  });
+
+  // Debug endpoint to check bot status
+  app.get('/api/telegram/status', (req, res) => {
+    res.json({ ok: true, mode: botMode, token_set: !!BOT_TOKEN, webhook: WEBHOOK_URL || null });
+  });
 
   // ── Register command menu (shows in Telegram's command list) ──
   bot.setMyCommands([
