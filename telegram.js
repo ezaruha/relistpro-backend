@@ -494,9 +494,13 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       c.step = 'wiz_category';
       try {
         if (L.category_hint && !L.catalog_id) {
-          const searchTerm = L.category_hint.split('/').pop();
+          // Try the most specific part first, then broaden
+          const parts = L.category_hint.split('/').filter(Boolean);
+          const searchTerm = parts[parts.length - 1] || parts[0] || L.title;
           return await searchCategories(chatId, searchTerm);
         }
+        // No hint — search by item title
+        if (L.title) return await searchCategories(chatId, L.title.split(' ').slice(0, 2).join(' '));
         return await showCategoryPicker(chatId, null);
       } catch (e) {
         console.error('[TG] Category step error:', e.message);
@@ -835,7 +839,7 @@ COLOR:
       c.listing = null;
       c.summaryMsgId = null;
       c.wizardIdx = 0;
-      return bot.editMessageText('Listing cancelled.', { chat_id: chatId, message_id: query.message.message_id });
+      return bot.editMessageText('Listing cancelled. Send new photos whenever you\'re ready.', { chat_id: chatId, message_id: query.message.message_id });
     }
 
     // ── Wizard accept (keep AI suggestion, move to next step) ──
@@ -1240,15 +1244,16 @@ COLOR:
     }
   });
 
-  async function searchCategories(chatId, query) {
+  // Search catalogs with a single keyword — returns array of matches
+  async function searchCatalogsByKeyword(chatId, keyword) {
     const c = getChat(chatId);
-
-    // Try local catalog cache first
-    const catalogs = await fetchCatalogs(chatId);
     let matches = [];
+
+    // Try local catalog cache
+    const catalogs = await fetchCatalogs(chatId);
     if (catalogs) {
       const flat = flattenCatalogs(catalogs);
-      const q = query.toLowerCase();
+      const q = keyword.toLowerCase();
       matches = flat.filter(x => x.path.toLowerCase().includes(q)).slice(0, 8);
     }
 
@@ -1256,10 +1261,10 @@ COLOR:
     if (!matches.length) {
       try {
         const acct = activeAccount(c);
-        if (!acct) throw new Error('No active account');
+        if (!acct) return [];
         const session = await store.getSession(acct.userId);
         if (session) {
-          const resp = await vintedFetch(session, `/api/v2/catalog/initializers?keyword=${encodeURIComponent(query)}`);
+          const resp = await vintedFetch(session, `/api/v2/catalog/initializers?keyword=${encodeURIComponent(keyword)}`);
           if (resp.ok) {
             const data = await resp.json();
             const cats = data.dtos || data.catalogs || [];
@@ -1269,24 +1274,84 @@ COLOR:
               path: x.full_title || x.title || x.name,
               hasChildren: false
             }));
-            console.log(`[TG] Catalog search found ${matches.length} results for "${query}"`);
           }
         }
       } catch (e) {
-        console.error('[TG] Catalog search error:', e.message);
+        console.error('[TG] Catalog keyword search error:', e.message);
+      }
+    }
+    return matches;
+  }
+
+  // Use AI to suggest alternative category search terms
+  async function aiCategoryTerms(itemDescription) {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return [];
+    try {
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 200,
+          system: `You help find Vinted marketplace categories. Given an item, suggest 3-5 simple category search terms that would match on Vinted. Think broadly — if the exact item type doesn't exist as a category, suggest the parent/related category it would fall under. For example: "stroller" → ["pushchair", "pram", "baby transport", "baby"]. "gaming chair" → ["chair", "office chair", "furniture", "gaming"]. Return ONLY a JSON array of strings, nothing else.`,
+          messages: [{ role: 'user', content: `Item: ${itemDescription}` }]
+        })
+      });
+      const data = await resp.json();
+      const text = data.content?.[0]?.text?.trim() || '';
+      const arr = JSON.parse(text.match(/\[[\s\S]*\]/)?.[0] || '[]');
+      return arr.filter(t => typeof t === 'string').slice(0, 5);
+    } catch (e) {
+      console.error('[TG] AI category terms error:', e.message);
+      return [];
+    }
+  }
+
+  async function searchCategories(chatId, query) {
+    const c = getChat(chatId);
+    const inWiz = c.step.startsWith('wiz_');
+    const header = inWiz ? '📂 Step 4/9 — Category\n\n' : '';
+
+    // 1. Try the exact search term first
+    let matches = await searchCatalogsByKeyword(chatId, query);
+    console.log(`[TG] Category search "${query}": ${matches.length} matches`);
+
+    // 2. If no matches and we have a category_hint, try each part
+    if (!matches.length && c.listing?.category_hint) {
+      const parts = c.listing.category_hint.split('/').filter(p => p && p !== query);
+      for (const part of parts) {
+        matches = await searchCatalogsByKeyword(chatId, part);
+        if (matches.length) { console.log(`[TG] Found matches via hint part "${part}"`); break; }
+      }
+    }
+
+    // 3. If still nothing, ask AI for alternative search terms
+    if (!matches.length) {
+      const itemDesc = c.listing ? `${c.listing.title || ''} ${query}`.trim() : query;
+      const altTerms = await aiCategoryTerms(itemDesc);
+      console.log(`[TG] AI suggested category terms: ${altTerms.join(', ')}`);
+      for (const term of altTerms) {
+        matches = await searchCatalogsByKeyword(chatId, term);
+        if (matches.length) { console.log(`[TG] Found matches via AI term "${term}"`); break; }
       }
     }
 
     if (!matches.length) {
-      return bot.sendMessage(chatId, `No categories found for "${query}". Try different words (e.g. "hoodie", "jeans", "sneakers") or /cancel.`);
+      return bot.sendMessage(chatId, header + `No categories found for "${query}". Try different words (e.g. "hoodie", "jeans", "sneakers") or /cancel.`);
     }
 
     const rows = matches.map(m => [{
-      text: m.path,
+      text: m.path.length > 50 ? '...' + m.path.slice(-47) : m.path,
       callback_data: m.hasChildren ? `nav:${m.id}` : `cat:${m.id}`
     }]);
+    rows.push([{ text: '🔍 Search different term', callback_data: 'cat:search' }]);
 
-    bot.sendMessage(chatId, `Found ${matches.length} match(es):`, {
+    bot.sendMessage(chatId, header + `Found ${matches.length} match(es) for "${query}":`, {
       reply_markup: { inline_keyboard: rows }
     });
   }
