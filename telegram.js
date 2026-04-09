@@ -222,20 +222,35 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         return bot.sendMessage(chatId, 'No Vinted session found.\n\nOpen Vinted in your Chrome browser, click the RelistPro extension and sync first. Then come back and /login again.');
       }
 
+      // Fetch Vinted profile to show the real Vinted username
+      let vintedName = null;
+      if (session.memberId) {
+        try {
+          const profileResp = await vintedFetch(session, `/api/v2/users/${session.memberId}`);
+          if (profileResp.ok) {
+            const profileData = await profileResp.json();
+            vintedName = profileData.user?.login || profileData.user?.username || null;
+          }
+        } catch {}
+      }
+
       // Check if already linked
       const existing = c.accounts.findIndex(a => a.username === username);
       if (existing >= 0) {
         c.accounts[existing].token = user.token;
         c.accounts[existing].userId = user.id;
+        c.accounts[existing].vintedName = vintedName;
+        c.accounts[existing].vintedDomain = session.domain;
         c.activeIdx = existing;
       } else {
-        c.accounts.push({ userId: user.id, token: user.token, username: user.username });
+        c.accounts.push({ userId: user.id, token: user.token, username: user.username, vintedName, vintedDomain: session.domain });
         c.activeIdx = c.accounts.length - 1;
       }
       c.step = 'idle';
 
+      const vintedInfo = vintedName ? `\nVinted account: *${esc(vintedName)}* on ${esc(session.domain)}` : `\nVinted: ${esc(session.domain)}`;
       const countMsg = c.accounts.length > 1 ? `\n${c.accounts.length} accounts linked\\. Use /switch to change\\.` : '';
-      bot.sendMessage(chatId, `✅ Connected as *${esc(username)}*\\!\nVinted session active \\(${esc(session.domain)}\\)\\.${countMsg}\n\nSend me photos of an item to list\\.`, { parse_mode: 'MarkdownV2' });
+      bot.sendMessage(chatId, `✅ Logged in\\!${vintedInfo}${countMsg}\n\nSend me photos of an item to list\\.`, { parse_mode: 'MarkdownV2' });
     } catch (e) {
       console.error('[TG] Login error:', e.message);
       c.step = 'idle';
@@ -252,13 +267,14 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     for (let i = 0; i < c.accounts.length; i++) {
       const a = c.accounts[i];
       const session = await store.getSession(a.userId);
-      const active = i === c.activeIdx ? ' (active)' : '';
+      const active = i === c.activeIdx ? ' [active]' : '';
+      const vintedLabel = a.vintedName || session?.memberId || '?';
       const vinted = session
-        ? `${session.domain} (member ${session.memberId})`
+        ? `Vinted: ${vintedLabel} (${session.domain})`
         : 'NO SESSION — sync from Chrome';
-      lines.push(`${i + 1}. ${a.username}${active} — ${vinted}`);
+      lines.push(`${i + 1}. ${a.username}${active}\n   ${vinted}`);
     }
-    bot.sendMessage(msg.chat.id, `Linked accounts:\n${lines.join('\n')}`);
+    bot.sendMessage(msg.chat.id, `Linked accounts:\n\n${lines.join('\n\n')}`);
   });
 
   bot.onText(/\/switch(?:@\S+)?/, async (msg) => {
@@ -269,9 +285,8 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
     const rows = [];
     for (const [i, a] of c.accounts.entries()) {
-      const session = await store.getSession(a.userId);
-      const domain = session ? session.domain : 'no session';
-      const label = i === c.activeIdx ? `${a.username} (${domain}) [current]` : `${a.username} (${domain})`;
+      const vintedLabel = a.vintedName ? `${a.vintedName} @ ${a.vintedDomain || '?'}` : a.username;
+      const label = i === c.activeIdx ? `${vintedLabel} [current]` : vintedLabel;
       rows.push([{ text: label, callback_data: `sw:${i}` }]);
     }
     bot.sendMessage(chatId, 'Switch to which account?', { reply_markup: { inline_keyboard: rows } });
@@ -355,11 +370,14 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
   // PROCESS PHOTOS → AI ANALYSIS
   // ──────────────────────────────────────────
 
+  // ── Step-by-step wizard order ──
+  const WIZARD_STEPS = ['title', 'description', 'price', 'category', 'size', 'condition', 'colour', 'brand', 'parcel', 'confirm'];
+
   async function processPhotos(chatId) {
     const c = getChat(chatId);
     c.step = 'analyzing';
 
-    const statusMsg = await bot.sendMessage(chatId,
+    await bot.sendMessage(chatId,
       `Got ${c.photos.length} photo(s). Analyzing with AI...`
     );
 
@@ -370,6 +388,13 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       const condMatch = CONDITIONS.find(x =>
         x.label.toLowerCase() === (analysis.condition || '').toLowerCase()
       );
+
+      // Auto-match color
+      let colorId = null, colorName = analysis.color || '';
+      if (analysis.color) {
+        const colorMatch = COLORS.find(x => x.label.toLowerCase() === analysis.color.toLowerCase());
+        if (colorMatch) { colorId = colorMatch.id; colorName = colorMatch.label; }
+      }
 
       c.listing = {
         title: analysis.title || 'Untitled item',
@@ -384,30 +409,115 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         category_name: '',
         size_id: null,
         size_name: '',
-        color: analysis.color || '',
-        color1_id: null,
+        color: colorName,
+        color1_id: colorId,
         package_size_id: null,
         package_size_name: '',
       };
 
-      // Try to auto-match color
-      if (analysis.color) {
-        const colorMatch = COLORS.find(x =>
-          x.label.toLowerCase() === analysis.color.toLowerCase()
-        );
-        if (colorMatch) {
-          c.listing.color1_id = colorMatch.id;
-          c.listing.color = colorMatch.label;
-        }
-      }
-
-      c.step = 'review';
-      await showSummary(chatId);
+      // Start wizard at step 0 (title)
+      c.wizardIdx = 0;
+      await askWizardStep(chatId);
     } catch (e) {
       console.error('[TG] AI analysis error:', e.message);
       c.step = 'idle';
       bot.sendMessage(chatId, 'AI analysis failed: ' + e.message + '\nTry sending the photos again.');
     }
+  }
+
+  // ── Ask the current wizard step ──
+  async function askWizardStep(chatId) {
+    const c = getChat(chatId);
+    const L = c.listing;
+    const stepName = WIZARD_STEPS[c.wizardIdx];
+
+    if (stepName === 'title') {
+      c.step = 'wiz_title';
+      const kb = [[{ text: '✅ Accept', callback_data: 'wiz:accept' }], [{ text: '❌ Cancel listing', callback_data: 'cancel' }]];
+      return bot.sendMessage(chatId, `📝 *Step 1/9 — Title*\n\nSuggested: *${esc(L.title)}*\n\nAccept or type a new title:`, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: kb } });
+    }
+
+    if (stepName === 'description') {
+      c.step = 'wiz_description';
+      const kb = [[{ text: '✅ Accept', callback_data: 'wiz:accept' }]];
+      return bot.sendMessage(chatId, `📝 *Step 2/9 — Description*\n\n${esc(L.description)}\n\nAccept or type a new description:`, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: kb } });
+    }
+
+    if (stepName === 'price') {
+      c.step = 'wiz_price';
+      const kb = [[{ text: `✅ Accept £${L.price}`, callback_data: 'wiz:accept' }]];
+      return bot.sendMessage(chatId, `💰 *Step 3/9 — Price*\n\nSuggested: *£${L.price}*\n\nAccept or type a new price:`, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: kb } });
+    }
+
+    if (stepName === 'category') {
+      c.step = 'wiz_category';
+      // Try to auto-search using AI hint
+      if (L.category_hint && !L.catalog_id) {
+        return searchCategories(chatId, L.category_hint.split('/').pop());
+      }
+      return showCategoryPicker(chatId, null);
+    }
+
+    if (stepName === 'size') {
+      c.step = 'wiz_size';
+      if (!L.catalog_id) {
+        // Skip size if no category
+        c.wizardIdx++;
+        return askWizardStep(chatId);
+      }
+      return showSizePicker(chatId);
+    }
+
+    if (stepName === 'condition') {
+      c.step = 'wiz_condition';
+      const keyboard = CONDITIONS.map(x => ([{
+        text: `${x.emoji} ${x.label}${x.id === L.status_id ? ' ✓' : ''}`,
+        callback_data: `cond:${x.id}`
+      }]));
+      return bot.sendMessage(chatId, `📦 *Step 6/9 — Condition*\n\nCurrent: *${esc(L.condition)}*\n\nSelect condition:`, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: keyboard } });
+    }
+
+    if (stepName === 'colour') {
+      c.step = 'wiz_colour';
+      const rows = [];
+      for (let i = 0; i < COLORS.length; i += 3) {
+        rows.push(COLORS.slice(i, i + 3).map(x => ({
+          text: x.label + (x.id === L.color1_id ? ' ✓' : ''), callback_data: `color:${x.id}`
+        })));
+      }
+      if (L.color1_id) rows.push([{ text: '✅ Keep: ' + L.color, callback_data: 'wiz:accept' }]);
+      rows.push([{ text: '⏭️ Skip', callback_data: 'wiz:accept' }]);
+      return bot.sendMessage(chatId, `🎨 *Step 7/9 — Colour*\n\nCurrent: *${esc(L.color || 'Not set')}*\n\nSelect colour:`, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: rows } });
+    }
+
+    if (stepName === 'brand') {
+      c.step = 'wiz_brand';
+      const kb = [];
+      if (L.brand) kb.push([{ text: `✅ Keep: ${L.brand}`, callback_data: 'wiz:accept' }]);
+      kb.push([{ text: '⏭️ No brand / Skip', callback_data: 'wiz:accept' }]);
+      return bot.sendMessage(chatId, `🏷️ *Step 8/9 — Brand*\n\nDetected: *${esc(L.brand || 'None')}*\n\nAccept, skip, or type a brand name to search:`, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: kb } });
+    }
+
+    if (stepName === 'parcel') {
+      c.step = 'wiz_parcel';
+      return showPackageSizePicker(chatId);
+    }
+
+    if (stepName === 'confirm') {
+      c.step = 'review';
+      return showSummary(chatId);
+    }
+  }
+
+  // ── Advance wizard to next step ──
+  function wizardNext(chatId) {
+    const c = getChat(chatId);
+    c.wizardIdx = (c.wizardIdx || 0) + 1;
+    if (c.wizardIdx >= WIZARD_STEPS.length) {
+      c.step = 'review';
+      return showSummary(chatId);
+    }
+    return askWizardStep(chatId);
   }
 
   // ──────────────────────────────────────────
@@ -481,9 +591,9 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
     ensureMulti(c);
     const acct = activeAccount(c);
-    const acctLabel = c.accounts.length > 1 ? ` \\(${esc(acct.username)}\\)` : '';
+    const vintedLabel = acct.vintedName ? `${acct.vintedName} @ ${acct.vintedDomain}` : acct.username;
 
-    let text = `*LISTING PREVIEW*${acctLabel}\n\n` +
+    let text = `✅ *FINAL REVIEW*\n📤 Posting to: *${esc(vintedLabel)}*\n\n` +
       `*Title:* ${esc(L.title)}\n\n` +
       `*Description:*\n${esc(L.description)}\n\n` +
       `*Price:* £${L.price}\n` +
@@ -557,10 +667,16 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       c.photos = [];
       c.listing = null;
       c.summaryMsgId = null;
+      c.wizardIdx = 0;
       return bot.editMessageText('Listing cancelled.', { chat_id: chatId, message_id: query.message.message_id });
     }
 
-    // ── Edit text fields ──
+    // ── Wizard accept (keep AI suggestion, move to next step) ──
+    if (data === 'wiz:accept') {
+      return wizardNext(chatId);
+    }
+
+    // ── Edit text fields (from final review) ──
     if (data === 'edit:title') {
       c.step = 'editing_title';
       return bot.sendMessage(chatId, `Current title: *${esc(c.listing.title)}*\n\nType the new title:`, { parse_mode: 'MarkdownV2' });
@@ -590,6 +706,8 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       const id = parseInt(data.split(':')[1]);
       const cond = CONDITIONS.find(x => x.id === id);
       if (cond) { c.listing.status_id = cond.id; c.listing.condition = cond.label; }
+      // If in wizard, advance; if in review, go back to summary
+      if (c.step.startsWith('wiz_')) return wizardNext(chatId);
       c.step = 'review';
       return showSummary(chatId);
     }
@@ -608,6 +726,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       const id = parseInt(data.split(':')[1]);
       const col = COLORS.find(x => x.id === id);
       if (col) { c.listing.color1_id = col.id; c.listing.color = col.label; }
+      if (c.step.startsWith('wiz_')) return wizardNext(chatId);
       c.step = 'review';
       return showSummary(chatId);
     }
@@ -648,7 +767,8 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     if (data.startsWith('brand:')) {
       const parts = data.split(':');
       c.listing.brand_id = parseInt(parts[1]);
-      c.listing.brand = parts.slice(2).join(':'); // brand name may contain colons
+      c.listing.brand = parts.slice(2).join(':');
+      if (c.step.startsWith('wiz_')) return wizardNext(chatId);
       c.step = 'review';
       return showSummary(chatId);
     }
@@ -679,11 +799,38 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       const password = msg.text.trim();
       const username = c.loginUsername;
       delete c.loginUsername;
-      // Delete the password message for security
       try { await bot.deleteMessage(chatId, msg.message_id); } catch {}
       return doLogin(chatId, username, password);
     }
 
+    // ── Wizard text inputs ──
+    if (c.step === 'wiz_title') {
+      c.listing.title = msg.text.slice(0, 60);
+      return wizardNext(chatId);
+    }
+
+    if (c.step === 'wiz_description') {
+      c.listing.description = msg.text;
+      return wizardNext(chatId);
+    }
+
+    if (c.step === 'wiz_price') {
+      const price = parseFloat(msg.text.replace(/[^0-9.]/g, ''));
+      if (isNaN(price) || price <= 0) return bot.sendMessage(chatId, 'Enter a valid price (e.g. 25 or 14.50):');
+      c.listing.price = Math.round(price * 100) / 100;
+      return wizardNext(chatId);
+    }
+
+    if (c.step === 'wiz_brand') {
+      if (msg.text.toLowerCase() === 'none' || msg.text.toLowerCase() === 'skip') {
+        c.listing.brand = '';
+        c.listing.brand_id = null;
+        return wizardNext(chatId);
+      }
+      return searchBrands(chatId, msg.text);
+    }
+
+    // ── Review edit inputs (from final summary) ──
     if (c.step === 'editing_title') {
       c.listing.title = msg.text.slice(0, 60);
       c.step = 'review';
@@ -711,11 +858,10 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         c.step = 'review';
         return showSummary(chatId);
       }
-      // Search Vinted brands
       return searchBrands(chatId, msg.text);
     }
 
-    if (c.step === 'searching_cat') {
+    if (c.step === 'searching_cat' || c.step === 'wiz_category') {
       return searchCategories(chatId, msg.text);
     }
   });
@@ -790,7 +936,11 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     extra.push({ text: '🔍 Search by name', callback_data: 'cat:search' });
     rows.push(extra);
 
-    bot.sendMessage(chatId, parentId ? 'Pick a subcategory:' : 'Pick a category:', {
+    const c = getChat(chatId);
+    const header = c.step.startsWith('wiz_') ? '📂 *Step 4/9 — Category*\n\n' : '';
+    const label = parentId ? 'Pick a subcategory:' : 'Pick a category:';
+    bot.sendMessage(chatId, header + label, {
+      parse_mode: 'MarkdownV2',
       reply_markup: { inline_keyboard: rows }
     });
   }
@@ -799,7 +949,8 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     if (query.data === 'cat:search') {
       bot.answerCallbackQuery(query.id);
       const c = getChat(query.message.chat.id);
-      c.step = 'searching_cat';
+      if (!c.step.startsWith('wiz_')) c.step = 'searching_cat';
+      // In wizard mode, wiz_category already handles text input
       return bot.sendMessage(query.message.chat.id, 'Type a category name to search (e.g. "t-shirt", "trainers", "dress"):');
     }
   });
@@ -839,6 +990,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     c.listing.category_name = match ? match.path : `ID: ${catId}`;
     c.listing.size_id = null;
     c.listing.size_name = '';
+    if (c.step.startsWith('wiz_')) return wizardNext(chatId);
     c.step = 'review';
     return showSummary(chatId);
   }
@@ -884,7 +1036,8 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     }
     rows.push([{ text: '⏭️ Skip (no size)', callback_data: 'size:0' }]);
 
-    bot.sendMessage(chatId, 'Select size:', { reply_markup: { inline_keyboard: rows } });
+    const header = c.step.startsWith('wiz_') ? '📏 *Step 5/9 — Size*\n\nSelect size:' : 'Select size:';
+    bot.sendMessage(chatId, header, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: rows } });
   }
 
   async function selectSize(chatId, sizeId) {
@@ -896,6 +1049,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       c.listing.size_id = sizeId;
       c.listing.size_name = `ID: ${sizeId}`;
     }
+    if (c.step.startsWith('wiz_')) return wizardNext(chatId);
     c.step = 'review';
     return showSummary(chatId);
   }
@@ -922,13 +1076,16 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       callback_data: `pkg:${s.id}`
     }]);
 
-    bot.sendMessage(chatId, 'Select parcel size:', { reply_markup: { inline_keyboard: rows } });
+    const c2 = getChat(chatId);
+    const header2 = c2.step.startsWith('wiz_') ? '📮 *Step 9/9 — Parcel Size*\n\nSelect parcel size:' : 'Select parcel size:';
+    bot.sendMessage(chatId, header2, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: rows } });
   }
 
   async function selectPackageSize(chatId, pkgId) {
     const c = getChat(chatId);
     c.listing.package_size_id = pkgId;
     c.listing.package_size_name = `ID: ${pkgId}`;
+    if (c.step.startsWith('wiz_')) return wizardNext(chatId);
     c.step = 'review';
     return showSummary(chatId);
   }
