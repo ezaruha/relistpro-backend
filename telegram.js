@@ -28,8 +28,7 @@ const CONDITIONS = [
 const PACKAGE_SIZES = [
   { id: 1, title: 'Small', desc: 'Up to 2kg, fits in a large letter' },
   { id: 2, title: 'Medium', desc: 'Up to 5kg, shoebox size' },
-  { id: 3, title: 'Large', desc: 'Up to 10kg, medium box' },
-  { id: 5, title: 'Extra large', desc: 'Over 10kg, large box' },
+  { id: 3, title: 'Large', desc: 'Up to 10kg, large box' },
 ];
 
 // ── Vinted UK categories (hardcoded with real IDs — API often fails) ──
@@ -1694,14 +1693,6 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       console.error('[TG] Session fetch error:', e.message);
     }
 
-    // Try to refresh the Vinted session before uploading
-    if (session) {
-      try {
-        session = await refreshVintedSession(session, acct.userId);
-      } catch (e) {
-        console.log('[TG] Session refresh skipped:', e.message);
-      }
-    }
     if (!session) {
       c.step = 'review';
       return bot.sendMessage(chatId, 'Vinted session expired. Sync from Chrome extension, then come back and tap POST again.');
@@ -1806,13 +1797,24 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       // ── Step 3: Small delay then activate ──
       await new Promise(r => setTimeout(r, 1500 + Math.random() * 1000));
 
-      // Refresh the draft to get server-side defaults
+      // Refresh the draft to get server-side defaults (shipping, attributes, etc.)
       const refreshResp = await vintedFetch(session, `/api/v2/item_upload/items/${draftId}`);
       let completionDraft = draft;
       if (refreshResp.ok) {
         const refreshed = (await refreshResp.json()).item;
         if (refreshed) {
           completionDraft = buildCompletionDraft(refreshed, photoIds);
+          // Re-apply user's chosen values — server refresh can override them with defaults
+          completionDraft.title = L.title;
+          completionDraft.description = L.description;
+          completionDraft.catalog_id = L.catalog_id;
+          completionDraft.status_id = L.status_id;
+          completionDraft.price = L.price;
+          completionDraft.package_size_id = L.package_size_id || null;
+          completionDraft.color_ids = L.color1_id ? [L.color1_id] : [];
+          completionDraft.brand_id = L.brand_id || null;
+          completionDraft.brand = L.brand || null;
+          completionDraft.size_id = L.size_id || null;
         }
       }
       completionDraft.id = parseInt(draftId);
@@ -1825,7 +1827,19 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       if (!completeResp.ok) {
         const errBody = await completeResp.json().catch(() => ({}));
         const errors = errBody.errors || errBody.message_errors || {};
-        const errorLines = Object.entries(errors).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`);
+        let errorLines;
+        if (Array.isArray(errors)) {
+          // Vinted code 99 format: [{ field: "title", value: "...", message: "..." }, ...]
+          errorLines = errors.map(e => {
+            const field = e.field || 'unknown';
+            const msg = e.message || e.value || JSON.stringify(e);
+            return `${field}: ${msg}`;
+          });
+        } else {
+          errorLines = Object.entries(errors).map(([k, v]) =>
+            `${k}: ${Array.isArray(v) ? v.join(', ') : (typeof v === 'object' ? JSON.stringify(v) : v)}`
+          );
+        }
         const draftUrl = `https://${domain}/items/${draftId}/edit`;
 
         // Draft exists on Vinted — tell user to finish there
@@ -1835,7 +1849,8 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
         c.summaryMsgId = null;
         saveChatState(chatId);
 
-        let errMsg = 'Publishing failed but your draft is saved on Vinted.\n\n';
+        const acctName = activeAccount(c)?.vintedName || activeAccount(c)?.username || 'your account';
+        let errMsg = `Publishing failed but your draft is saved on Vinted (${acctName}).\n\n`;
         if (errorLines.length) {
           errMsg += `Issues:\n${errorLines.join('\n')}\n\n`;
         }
