@@ -666,6 +666,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     if (!db || !db.hasDb()) return;
     const c = chats.get(chatId);
     if (!c) return;
+    await tableReady; // ensure table exists before writing
     try {
       const accts = JSON.stringify(c.accounts || []);
       // Save only fileIds for photos (not base64 — too large for JSONB, causes save to fail)
@@ -690,12 +691,17 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         ]
       );
       console.log(`[TG] State saved OK for chat ${chatId}`);
-    } catch (e) { console.error('[TG] Save state error:', e.message); }
+    } catch (e) {
+      console.error('[TG] Save state error:', e.message);
+      // Fallback: at least save accounts so login persists
+      try { await saveChatAccounts(chatId, c.accounts || [], c.activeIdx ?? -1); } catch {}
+    }
   }
 
   // Shortcut: save just accounts (lightweight, no photos)
   async function saveChatAccounts(chatId, accounts, activeIdx) {
     if (!db || !db.hasDb()) return;
+    await tableReady;
     try {
       await db.query(
         `INSERT INTO rp_telegram_chats (chat_id, accounts, active_idx)
@@ -708,6 +714,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
   async function loadChatState(chatId) {
     if (!db || !db.hasDb()) return null;
+    await tableReady;
     try {
       const r = await db.query(
         'SELECT accounts, active_idx, listing, photos, wizard_idx, step FROM rp_telegram_chats WHERE chat_id=$1',
@@ -761,7 +768,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       console.log('[TG] Chat persistence table ready');
     } catch (e) { console.error('[TG] Table init error:', e.message); }
   }
-  initTelegramTable();
+  const tableReady = initTelegramTable();
 
   // Load full chat state from DB if not yet loaded this session
   async function ensureLoaded(chatId) {
