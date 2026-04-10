@@ -932,28 +932,26 @@ app.post('/api/vinted/items/:itemId/repost', auth, async (req, res) => {
     const newDraft = (await createResp.json()).draft;
     const newId = String(newDraft?.id || '');
     if (!newId) return res.status(500).json({ error:'No draft id returned' });
-    await deleteVintedItem(session, itemId, 'RP');
+    // Refresh & complete the new draft BEFORE deleting old — so user never loses both
     await new Promise(r => setTimeout(r, 800 + Math.random() * 400));
     const refreshResp = await vintedFetch(session, `/api/v2/item_upload/items/${newId}`);
     const refreshedItem = refreshResp.ok ? (await refreshResp.json()).item : null;
-    await new Promise(r => setTimeout(r, 1500 + Math.random() * 1000));
+    await new Promise(r => setTimeout(r, 1000 + Math.random() * 500));
     const completionDraft = refreshedItem ? buildDraftPayload(refreshedItem) : { ...draft, id:parseInt(newId) };
     completionDraft.id = parseInt(newId);
-    completionDraft.assigned_photos = freshPhotos; // Always use freshly uploaded photo IDs
+    completionDraft.assigned_photos = freshPhotos;
     const completionUuid = completionDraft.temp_uuid || uuid;
     const completeResp = await vintedFetch(session, `/api/v2/item_upload/drafts/${newId}/completion`, {
       method:'POST', body:{ draft:completionDraft, feedback_id:null, parcel:null, push_up:false, upload_session_id:completionUuid }
     });
     const completeBody = await completeResp.json().catch(() => ({}));
-    // Unhide the new listing — Vinted can leave it hidden after publish
     if (completeResp.ok) {
-      await new Promise(r => setTimeout(r, 1000));
+      // New listing is live — now delete the old one and unhide the new one
+      await deleteVintedItem(session, itemId, 'RP');
       try { await vintedFetch(session, `/api/v2/items/${newId}/is_hidden`, { method:'PUT', body:{ is_hidden:false } }); } catch(_) {}
-      // Transfer old item → new in DB
       if (db.hasDb()) {
         try { await db.query('UPDATE rp_items SET item_id=$1, repost_count=repost_count+1, last_repost=NOW() WHERE item_id=$2 AND user_id=$3', [newId, itemId, req.user.id]); } catch(_) {}
       }
-      // Backup the new item so future reposts have data
       const newItem = Object.assign({}, item, { id: newId });
       await saveItemBackup(req.user.id, newItem);
     }
@@ -1019,13 +1017,11 @@ app.post('/api/repost-queue', auth, async (req, res) => {
         }
         const newDraft = (await createResp.json()).draft;
         const newId = String(newDraft?.id || '');
-        // Delete original — always try, even if initial GET failed (item may still exist)
-        await deleteVintedItem(session, itemId, 'RP-queue');
-        // Refresh & complete
+        // Refresh & complete BEFORE deleting old
         await new Promise(r => setTimeout(r, 800 + Math.random() * 400));
         const refreshResp = await vintedFetch(session, `/api/v2/item_upload/items/${newId}`);
         const refreshedItem = refreshResp.ok ? (await refreshResp.json()).item : null;
-        await new Promise(r => setTimeout(r, 1500 + Math.random() * 1000));
+        await new Promise(r => setTimeout(r, 1000 + Math.random() * 500));
         const completionDraft = refreshedItem ? buildDraftPayload(refreshedItem) : { ...draft, id:parseInt(newId) };
         completionDraft.id = parseInt(newId);
         completionDraft.assigned_photos = freshPhotos;
@@ -1033,6 +1029,8 @@ app.post('/api/repost-queue', auth, async (req, res) => {
           method:'POST', body:{ draft:completionDraft, feedback_id:null, parcel:null, push_up:false, upload_session_id:completionDraft.temp_uuid || uuid }
         });
         if (completeResp.ok) {
+          // New listing is live — now delete old and unhide new
+          await deleteVintedItem(session, itemId, 'RP-queue');
           try { await vintedFetch(session, `/api/v2/items/${newId}/is_hidden`, { method:'PUT', body:{ is_hidden:false } }); } catch(_) {}
           console.log(`[RP-queue] Reposted ${itemId} → ${newId}`);
           await logAction(userId, 'repost', { itemId, newItemId:newId, itemTitle:item.title, status:'success', details:{ source:'backend-queue' } });
@@ -1348,27 +1346,24 @@ async function checkAllSchedules() {
           const newDraft = (await createResp.json()).draft;
           const newId = String(newDraft?.id || '');
 
-          // Delete original — always try, even if initial GET failed
-          await deleteVintedItem(session, itemId, 'RP-cron');
-
-          // Refresh & complete
+          // Refresh & complete BEFORE deleting old
           await new Promise(r => setTimeout(r, 800 + Math.random() * 400));
           const refreshResp = await vintedFetch(session, `/api/v2/item_upload/items/${newId}`);
           const refreshedItem = refreshResp.ok ? (await refreshResp.json()).item : null;
-          await new Promise(r => setTimeout(r, 1500 + Math.random() * 1000));
+          await new Promise(r => setTimeout(r, 1000 + Math.random() * 500));
           const completionDraft = refreshedItem ? buildDraftPayload(refreshedItem) : { ...draft, id: parseInt(newId) };
           completionDraft.id = parseInt(newId);
-          completionDraft.assigned_photos = freshPhotos; // Always use freshly uploaded photo IDs
+          completionDraft.assigned_photos = freshPhotos;
           const completeResp = await vintedFetch(session, `/api/v2/item_upload/drafts/${newId}/completion`, {
             method: 'POST', body: { draft: completionDraft, feedback_id: null, parcel: null, push_up: false, upload_session_id: completionDraft.temp_uuid || uuid }
           });
 
-          // Unhide the new listing
           if (completeResp.ok) {
+            // New listing is live — now delete old and unhide new
+            await deleteVintedItem(session, itemId, 'RP-cron');
             try { await vintedFetch(session, `/api/v2/items/${newId}/is_hidden`, { method:'PUT', body:{ is_hidden:false } }); } catch(_) {}
             console.log(`[RP-cron] Reposted ${itemId} → ${newId}`);
             await logAction(userId, 'repost', { itemId, newItemId: newId, itemTitle: item.title, status: 'success', details: { source: 'server-schedule', scheduleId: row.id } });
-            // Update item in DB — transfer old to new ID
             if (db.hasDb()) {
               try {
                 await db.query(`UPDATE rp_items SET item_id=$1, repost_count=repost_count+1, last_repost=NOW() WHERE item_id=$2 AND user_id=$3`, [newId, itemId, userId]);
