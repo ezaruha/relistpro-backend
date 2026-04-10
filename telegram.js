@@ -32,74 +32,130 @@ const PACKAGE_SIZES = [
 ];
 
 // ── Vinted UK categories (hardcoded with real IDs — API often fails) ──
-// Verified Vinted UK catalog IDs (scraped from vinted.co.uk/catalog)
+// Verified Vinted UK catalog IDs (scraped from vinted.co.uk/catalog April 2026)
 const CATEGORIES = [
-  // Women > Clothing
-  { id: 12, title: 'Women > Tops & T-shirts', keywords: ['top','t-shirt','tshirt','blouse','shirt','tank','vest','cami','crop top','women top'] },
-  { id: 10, title: 'Women > Dresses', keywords: ['dress','midi','maxi','mini dress','gown','sundress','women dress'] },
+  // ── Women > Clothing > Tops ──
+  { id: 1043, title: 'Women > Tops > Blouses', keywords: ['blouse','women blouse'] },
+  { id: 221, title: 'Women > Tops > T-shirts', keywords: ['t-shirt','tshirt','tee','women t-shirt','women tee'] },
+  { id: 1041, title: 'Women > Tops > Crop tops', keywords: ['crop top','cropped'] },
+  { id: 224, title: 'Women > Tops > Long-sleeved tops', keywords: ['long sleeve','women long sleeve'] },
+  { id: 534, title: 'Women > Tops > Vest tops', keywords: ['vest','tank top','cami','vest top'] },
+  { id: 222, title: 'Women > Tops > Shirts', keywords: ['shirt','women shirt'] },
+  { id: 12, title: 'Women > Tops & T-shirts', keywords: ['top','women top'] },
+  // ── Women > Clothing > Dresses ──
+  { id: 1065, title: 'Women > Dresses > Summer dresses', keywords: ['summer dress','sundress'] },
+  { id: 1055, title: 'Women > Dresses > Long dresses', keywords: ['long dress','maxi dress','maxi'] },
+  { id: 1056, title: 'Women > Dresses > Midi dresses', keywords: ['midi dress','midi'] },
+  { id: 178, title: 'Women > Dresses > Mini dresses', keywords: ['mini dress'] },
+  { id: 1059, title: 'Women > Dresses > Casual dresses', keywords: ['casual dress'] },
+  { id: 1057, title: 'Women > Dresses > Formal dresses', keywords: ['formal dress','work dress'] },
+  { id: 10, title: 'Women > Dresses', keywords: ['dress','gown','women dress'] },
+  // ── Women > Clothing > Other ──
   { id: 13, title: 'Women > Jumpers & Sweaters', keywords: ['jumper','sweater','cardigan','pullover','knitwear','knit','women jumper'] },
-  { id: 1037, title: 'Women > Outerwear', keywords: ['coat','jacket','blazer','bomber','parka','puffer','denim jacket','raincoat','trench','women coat'] },
-  { id: 9, title: 'Women > Trousers & Leggings', keywords: ['trousers','pants','chinos','leggings','joggers','cargo','women trousers'] },
-  { id: 183, title: 'Women > Jeans', keywords: ['jeans','denim','skinny jeans','mom jeans','wide leg jeans','straight jeans','women jeans'] },
-  { id: 11, title: 'Women > Skirts', keywords: ['skirt','mini skirt','midi skirt','maxi skirt','pleated','women skirt'] },
+  { id: 1908, title: 'Women > Outerwear > Jackets', keywords: ['jacket','bomber','denim jacket','women jacket'] },
+  { id: 1907, title: 'Women > Outerwear > Coats', keywords: ['coat','parka','puffer','trench','raincoat','women coat'] },
+  { id: 1037, title: 'Women > Outerwear', keywords: ['outerwear','blazer'] },
+  { id: 525, title: 'Women > Trousers > Leggings', keywords: ['leggings','women leggings'] },
+  { id: 9, title: 'Women > Trousers & Leggings', keywords: ['trousers','pants','chinos','joggers','cargo','women trousers'] },
+  { id: 183, title: 'Women > Jeans', keywords: ['jeans','denim','skinny jeans','mom jeans','wide leg jeans','women jeans'] },
+  { id: 11, title: 'Women > Skirts', keywords: ['skirt','mini skirt','midi skirt','maxi skirt','pleated'] },
   { id: 15, title: 'Women > Shorts', keywords: ['shorts','hot pants','denim shorts','women shorts'] },
-  { id: 73, title: 'Women > Activewear', keywords: ['activewear','sportswear','gym','running','yoga','sports bra','women gym'] },
-  { id: 28, title: 'Women > Swimwear', keywords: ['swimwear','bikini','swimsuit','bathing suit','swimming','women swim'] },
-  { id: 29, title: 'Women > Lingerie & Nightwear', keywords: ['lingerie','bra','underwear','knickers','pyjamas','nightwear','sleepwear'] },
-  { id: 1035, title: 'Women > Jumpsuits & Playsuits', keywords: ['jumpsuit','playsuit','romper','dungarees','women jumpsuit'] },
-  { id: 8, title: 'Women > Suits & Blazers', keywords: ['suit','blazer','co-ord','women suit','women blazer'] },
-  // Women > Shoes
-  { id: 16, title: 'Women > Shoes', keywords: ['women shoes','heels','women boots','women sandals','women flats','pumps','platforms'] },
-  { id: 2632, title: 'Women > Trainers', keywords: ['women trainers','women sneakers','women running shoes'] },
-  { id: 1049, title: 'Women > Boots', keywords: ['women boots','ankle boots','knee boots','chelsea boots'] },
-  // Women > Other
-  { id: 19, title: 'Women > Bags', keywords: ['bag','handbag','purse','tote','crossbody','clutch','backpack','shoulder bag','rucksack'] },
-  { id: 1187, title: 'Women > Accessories', keywords: ['accessory','scarf','hat','gloves','belt','jewellery','jewelry','watch','sunglasses','hair'] },
-  // Men > Clothing
-  { id: 76, title: 'Men > Tops & T-shirts', keywords: ['men t-shirt','men tshirt','mens top','mens tee','men top'] },
-  { id: 79, title: 'Men > Jumpers & Sweaters', keywords: ['men jumper','mens sweater','men cardigan','men knitwear'] },
-  { id: 1206, title: 'Men > Outerwear', keywords: ['men coat','mens jacket','men blazer','men puffer','men parka','men bomber'] },
-  { id: 34, title: 'Men > Trousers', keywords: ['men trousers','mens pants','men chinos','men joggers','mens cargo'] },
+  { id: 73, title: 'Women > Activewear', keywords: ['activewear','sportswear','gym','running','yoga','sports bra'] },
+  { id: 28, title: 'Women > Swimwear', keywords: ['swimwear','bikini','swimsuit','bathing suit'] },
+  { id: 29, title: 'Women > Lingerie & Nightwear', keywords: ['lingerie','bra','underwear','pyjamas','nightwear','sleepwear'] },
+  { id: 1035, title: 'Women > Jumpsuits', keywords: ['jumpsuit','playsuit','romper','dungarees'] },
+  { id: 1835, title: 'Women > Tops > Bodysuits', keywords: ['bodysuit','body'] },
+  // ── Women > Shoes ──
+  { id: 2632, title: 'Women > Shoes > Trainers', keywords: ['women trainers','women sneakers'] },
+  { id: 543, title: 'Women > Shoes > Heels', keywords: ['heels','high heels','stilettos'] },
+  { id: 1049, title: 'Women > Shoes > Boots', keywords: ['women boots','ankle boots','knee boots','chelsea boots'] },
+  { id: 2949, title: 'Women > Shoes > Sandals', keywords: ['women sandals'] },
+  { id: 2955, title: 'Women > Shoes > Ballerinas', keywords: ['ballerinas','ballet flats','flats'] },
+  { id: 16, title: 'Women > Shoes', keywords: ['women shoes','pumps','platforms','loafers'] },
+  // ── Women > Bags ──
+  { id: 156, title: 'Women > Bags > Handbags', keywords: ['handbag'] },
+  { id: 158, title: 'Women > Bags > Shoulder bags', keywords: ['shoulder bag','crossbody'] },
+  { id: 552, title: 'Women > Bags > Tote bags', keywords: ['tote','tote bag'] },
+  { id: 157, title: 'Women > Bags > Backpacks', keywords: ['backpack','rucksack','women backpack'] },
+  { id: 159, title: 'Women > Bags > Clutches', keywords: ['clutch','evening bag'] },
+  { id: 19, title: 'Women > Bags', keywords: ['bag','handbag','purse','women bag'] },
+  // ── Women > Accessories ──
+  { id: 1187, title: 'Women > Accessories', keywords: ['accessory','scarf','hat','gloves','belt','jewellery','watch','sunglasses'] },
+  // ── Men > Clothing > Tops ──
+  { id: 77, title: 'Men > Tops > T-shirts', keywords: ['men t-shirt','mens tee','men tshirt'] },
+  { id: 536, title: 'Men > Tops > Shirts', keywords: ['men shirt','mens shirt','dress shirt'] },
+  { id: 5492, title: 'Men > Tops > Polo shirts', keywords: ['polo','polo shirt','men polo'] },
+  { id: 76, title: 'Men > Tops & T-shirts', keywords: ['mens top','men top'] },
+  // ── Men > Clothing > Other ──
+  { id: 79, title: 'Men > Jumpers & Sweaters', keywords: ['men jumper','mens sweater','men cardigan','hoodie','men hoodie','sweatshirt'] },
+  { id: 2052, title: 'Men > Outerwear > Jackets', keywords: ['men jacket','mens jacket','bomber','men bomber'] },
+  { id: 2051, title: 'Men > Outerwear > Coats', keywords: ['men coat','mens coat','men parka','men puffer'] },
+  { id: 1206, title: 'Men > Outerwear', keywords: ['men outerwear','men blazer'] },
+  { id: 1821, title: 'Men > Trousers > Joggers', keywords: ['men joggers','mens joggers','tracksuit bottoms'] },
+  { id: 1820, title: 'Men > Trousers > Chinos', keywords: ['men chinos','chinos'] },
+  { id: 34, title: 'Men > Trousers', keywords: ['men trousers','mens pants','mens cargo'] },
   { id: 257, title: 'Men > Jeans', keywords: ['men jeans','mens jeans','mens denim'] },
   { id: 80, title: 'Men > Shorts', keywords: ['men shorts','mens shorts','swim shorts'] },
-  { id: 30, title: 'Men > Activewear', keywords: ['men sportswear','mens activewear','mens gym','men running','football shirt','jersey'] },
-  { id: 84, title: 'Men > Swimwear', keywords: ['men swimwear','swim trunks','men swim'] },
+  { id: 30, title: 'Men > Activewear', keywords: ['men sportswear','football shirt','jersey','men gym'] },
+  { id: 84, title: 'Men > Swimwear', keywords: ['men swimwear','swim trunks'] },
   { id: 32, title: 'Men > Suits & Blazers', keywords: ['men suit','mens blazer','men formal'] },
-  { id: 1231, title: 'Men > Shoes', keywords: ['men shoes','mens trainers','mens sneakers','mens boots','mens sandals','mens loafers'] },
-  { id: 82, title: 'Men > Accessories', keywords: ['men accessory','mens hat','mens belt','mens wallet','mens scarf','tie','cufflinks'] },
-  // Kids
-  { id: 1195, title: 'Kids > Girls clothing', keywords: ['girls','girl dress','girls top','girls coat','girls school'] },
-  { id: 1194, title: 'Kids > Boys clothing', keywords: ['boys','boy shirt','boys top','boys coat','boys school'] },
+  // ── Men > Shoes ──
+  { id: 1242, title: 'Men > Shoes > Trainers', keywords: ['men trainers','mens sneakers','men sneakers'] },
+  { id: 1233, title: 'Men > Shoes > Boots', keywords: ['men boots','mens boots'] },
+  { id: 1238, title: 'Men > Shoes > Formal shoes', keywords: ['men formal shoes','dress shoes','oxford','brogues'] },
+  { id: 1231, title: 'Men > Shoes', keywords: ['men shoes','mens sandals','mens loafers'] },
+  // ── Men > Other ──
+  { id: 82, title: 'Men > Accessories', keywords: ['men accessory','mens hat','mens belt','mens wallet','tie','cufflinks'] },
+  // ── Kids ──
+  { id: 1245, title: 'Kids > Girls > Tops & T-shirts', keywords: ['girls top','girls t-shirt'] },
+  { id: 1247, title: 'Kids > Girls > Dresses', keywords: ['girls dress','girl dress'] },
+  { id: 1244, title: 'Kids > Girls > Outerwear', keywords: ['girls coat','girls jacket'] },
+  { id: 1255, title: 'Kids > Girls > Shoes', keywords: ['girls shoes'] },
+  { id: 1195, title: 'Kids > Girls clothing', keywords: ['girls','girls clothing'] },
+  { id: 1198, title: 'Kids > Boys > Tops & T-shirts', keywords: ['boys top','boys t-shirt'] },
+  { id: 1197, title: 'Kids > Boys > Outerwear', keywords: ['boys coat','boys jacket'] },
+  { id: 1256, title: 'Kids > Boys > Shoes', keywords: ['boys shoes'] },
+  { id: 1194, title: 'Kids > Boys clothing', keywords: ['boys','boys clothing'] },
+  { id: 1243, title: 'Kids > Baby girls clothing', keywords: ['baby girl','baby dress','newborn girl'] },
+  { id: 1196, title: 'Kids > Baby boys clothing', keywords: ['baby boy','babygrow','onesie','romper','newborn boy'] },
   { id: 1499, title: 'Kids > Toys', keywords: ['toy','teddy','doll','lego','puzzle','board game','plush','action figure'] },
-  { id: 1496, title: 'Kids > Pushchairs & car seats', keywords: ['stroller','pushchair','pram','car seat','buggy','travel system','baby carrier','highchair','booster'] },
+  { id: 1612, title: 'Kids > Buggies & pushchairs', keywords: ['stroller','pushchair','pram','buggy'] },
+  { id: 3383, title: 'Kids > Car seats', keywords: ['car seat','booster seat','child seat'] },
   { id: 3461, title: 'Kids > Baby carriers & wraps', keywords: ['baby carrier','sling','wrap','baby wrap'] },
-  { id: 1501, title: 'Kids > School supplies', keywords: ['school','backpack','lunch box','pencil case','school bag'] },
-  // Home
+  { id: 1496, title: 'Kids > Pushchairs & car seats', keywords: ['travel system','highchair'] },
+  { id: 1501, title: 'Kids > School supplies', keywords: ['school','lunch box','pencil case','school bag'] },
+  // ── Home ──
   { id: 1919, title: 'Home > Textiles', keywords: ['blanket','pillow','cushion','towel','bedding','curtain','rug','duvet','throw'] },
   { id: 1934, title: 'Home > Home accessories', keywords: ['decoration','ornament','vase','candle','frame','mirror','wall art','home decor'] },
-  { id: 1920, title: 'Home > Tableware', keywords: ['plate','mug','cup','bowl','glass','kitchen','cutlery','dinnerware'] },
-  { id: 3477, title: 'Home > Kitchen tools', keywords: ['cookware','utensil','pan','pot','baking'] },
+  { id: 1920, title: 'Home > Tableware', keywords: ['plate','mug','cup','bowl','glass','cutlery','dinnerware'] },
+  { id: 3477, title: 'Home > Kitchen tools', keywords: ['cookware','utensil','pan','pot','baking','kitchen'] },
   { id: 5106, title: 'Home > Pet care', keywords: ['pet','dog','cat','collar','lead','pet bed','pet toy'] },
-  // Entertainment
-  { id: 2309, title: 'Entertainment', keywords: ['book','novel','manga','comic','vinyl','record','cd','dvd','blu-ray','cassette'] },
+  { id: 3154, title: 'Home > Furniture', keywords: ['furniture','shelf','table','chair','desk','cabinet'] },
+  // ── Entertainment ──
+  { id: 2309, title: 'Entertainment', keywords: ['book','novel','manga','comic','vinyl','record','cd','dvd','cassette'] },
+  // ── Electronics ──
   { id: 3002, title: 'Electronics > Video games & consoles', keywords: ['game','video game','console','playstation','xbox','nintendo','ps5','ps4'] },
-  // Electronics
-  { id: 3565, title: 'Electronics > Phones', keywords: ['phone','iphone','samsung','mobile','smartphone'] },
+  { id: 3661, title: 'Electronics > Mobile phones', keywords: ['phone','iphone','samsung','mobile','smartphone'] },
+  { id: 3662, title: 'Electronics > Phone accessories', keywords: ['phone case','screen protector','phone charger'] },
   { id: 3564, title: 'Electronics > Computers', keywords: ['laptop','computer','macbook','pc','monitor','keyboard'] },
   { id: 3567, title: 'Electronics > Tablets & e-readers', keywords: ['tablet','ipad','kindle','e-reader'] },
-  { id: 3566, title: 'Electronics > Audio & headphones', keywords: ['headphones','speaker','earphones','airpods','earbuds','bluetooth speaker'] },
+  { id: 3566, title: 'Electronics > Audio & headphones', keywords: ['headphones','speaker','earphones','airpods','earbuds'] },
   { id: 3054, title: 'Electronics > Cameras', keywords: ['camera','dslr','gopro','lens','photography'] },
   { id: 3004, title: 'Electronics > Wearables', keywords: ['smartwatch','apple watch','fitbit','fitness tracker'] },
   { id: 2995, title: 'Electronics > Other devices', keywords: ['charger','cable','adapter','electronics','gadget','tech'] },
 ];
 
-// ── Common colors ──
+// Verified Vinted UK color IDs (scraped from vinted.co.uk)
 const COLORS = [
-  { id: 1, label: 'Black' }, { id: 3, label: 'White' }, { id: 2, label: 'Grey' },
-  { id: 12, label: 'Blue' }, { id: 7, label: 'Red' }, { id: 9, label: 'Green' },
-  { id: 11, label: 'Yellow' }, { id: 20, label: 'Pink' }, { id: 10, label: 'Orange' },
-  { id: 17, label: 'Purple' }, { id: 6, label: 'Brown' }, { id: 5, label: 'Beige' },
-  { id: 4, label: 'Cream' }, { id: 22, label: 'Multicolour' },
+  { id: 1, label: 'Black' }, { id: 12, label: 'White' }, { id: 3, label: 'Grey' },
+  { id: 9, label: 'Blue' }, { id: 7, label: 'Red' }, { id: 10, label: 'Green' },
+  { id: 8, label: 'Yellow' }, { id: 5, label: 'Pink' }, { id: 11, label: 'Orange' },
+  { id: 6, label: 'Purple' }, { id: 2, label: 'Brown' }, { id: 4, label: 'Beige' },
+  { id: 18, label: 'Cream' }, { id: 15, label: 'Multicolour' },
+  { id: 16, label: 'Khaki' }, { id: 17, label: 'Turquoise' },
+  { id: 13, label: 'Silver' }, { id: 14, label: 'Gold' },
+  { id: 25, label: 'Navy' }, { id: 21, label: 'Burgundy' },
+  { id: 20, label: 'Coral' }, { id: 24, label: 'Light blue' },
 ];
 
 // ── Chat sessions (in-memory, keyed by chatId) ──
@@ -917,7 +973,7 @@ PRICE: Vinted UK used prices, NOT retail. Fast fashion £3-12, mid-range £8-20,
 CONDITION: Check photos for wear. NWT=visible tags only, NwoT=unworn, Very good=minimal wear, Good=some wear, Satisfactory=visible damage.
 BRAND: Check labels, logos, tags in ALL photos. Guess if partial logo visible. null if unidentifiable.
 CATEGORY: Vinted path like "women/clothing/tops" or "kids/strollers". Be specific.
-COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,Beige,Cream,Multicolour.`;
+COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,Beige,Cream,Multicolour,Khaki,Turquoise,Silver,Gold,Navy,Burgundy,Coral,Light blue.`;
 
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
