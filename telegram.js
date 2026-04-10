@@ -1447,87 +1447,12 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
     return scored.slice(0, 8);
   }
 
-  // Flatten Vinted catalog tree into searchable leaf nodes
-  function flattenCatalogs(catalogs, parentPath = '', depth = 0) {
-    if (!Array.isArray(catalogs) || depth > 10) return [];
-    const results = [];
-    for (const cat of catalogs) {
-      if (!cat || !cat.id) continue;
-      const path = parentPath ? `${parentPath} > ${cat.title || ''}` : (cat.title || '');
-      const children = cat.catalogs || cat.children || [];
-      if (!Array.isArray(children) || children.length === 0) {
-        // Only leaf categories — Vinted rejects parent IDs at completion
-        results.push({ id: cat.id, title: path, path });
-      } else {
-        results.push(...flattenCatalogs(children, path, depth + 1));
-      }
-    }
-    return results;
-  }
-
-  // Search Vinted's live catalog API
-  let cachedCatalogs = null;
-  let catalogCacheTime = 0;
-  async function searchVintedCatalogs(chatId, keyword) {
-    const c = getChat(chatId);
-    const acct = activeAccount(c);
-    if (!acct) return [];
-
-    try {
-      // Cache catalogs for 1 hour
-      if (!cachedCatalogs || Date.now() - catalogCacheTime > 3600000) {
-        const session = await store.getSession(acct.userId);
-        if (!session) return [];
-        const resp = await vintedFetch(session, '/api/v2/catalogs');
-        if (!resp.ok) throw new Error(`Catalog API ${resp.status}`);
-        const data = await resp.json();
-        cachedCatalogs = flattenCatalogs(data.catalogs || []);
-        catalogCacheTime = Date.now();
-        console.log(`[TG] Cached ${cachedCatalogs.length} catalog entries from Vinted`);
-      }
-
-      const q = keyword.toLowerCase().trim();
-      if (!q) return [];
-      const qWords = q.split(/\s+/).filter(w => w.length >= 2);
-      // Strip common plural/suffix for fuzzy matching
-      const stem = w => w.replace(/(s|es|ing|er|ies)$/, '');
-      const qStems = qWords.map(stem);
-
-      // Score each catalog entry
-      const scored = [];
-      for (const cat of cachedCatalogs) {
-        let score = 0;
-        const titleLower = cat.title.toLowerCase();
-        const titleWords = titleLower.split(/[\s>&,\-/]+/).filter(w => w.length >= 2);
-        const titleStems = titleWords.map(stem);
-
-        // Full query appears in title
-        if (titleLower.includes(q)) score += 15;
-
-        // Each query word matching a title word
-        for (const qs of qStems) {
-          for (const ts of titleStems) {
-            if (ts === qs) score += 8;           // exact stem match
-            else if (ts.startsWith(qs) || qs.startsWith(ts)) score += 5; // prefix match
-            else if (ts.includes(qs) || qs.includes(ts)) score += 3;     // substring
-          }
-        }
-
-        if (score > 0) scored.push({ ...cat, score });
-      }
-      scored.sort((a, b) => b.score - a.score);
-      return scored.slice(0, 8);
-    } catch (e) {
-      console.error('[TG] Vinted catalog search error:', e.message);
-      return [];
-    }
-  }
-
-  // Use AI to suggest alternative category search terms
-  async function aiCategoryTerms(itemDescription) {
+  // Use AI to pick the best category from our list
+  async function aiPickCategory(itemDescription) {
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) return [];
     try {
+      const catList = CATEGORIES.map(c => `${c.id}: ${c.title}`).join('\n');
       const resp = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
@@ -1537,17 +1462,18 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
         },
         body: JSON.stringify({
           model: 'claude-haiku-4-5-20251001',
-          max_tokens: 100,
-          system: `Given an item, return 3-5 simple search keywords for finding it on Vinted marketplace. Think of parent categories and synonyms. Example: "stroller" → ["pushchair","pram","buggy","baby"]. Return ONLY a JSON array of strings.`,
+          max_tokens: 200,
+          system: `You are a Vinted category matcher. Given an item description, pick the 3 best matching categories from the list below. Return ONLY a JSON array of category IDs (numbers).\n\nCategories:\n${catList}`,
           messages: [{ role: 'user', content: `Item: ${itemDescription}` }]
         })
       });
       const data = await resp.json();
       const text = data.content?.[0]?.text?.trim() || '';
       const arr = JSON.parse(text.match(/\[[\s\S]*\]/)?.[0] || '[]');
-      return arr.filter(t => typeof t === 'string').slice(0, 5);
+      const ids = arr.filter(id => typeof id === 'number');
+      return ids.map(id => CATEGORIES.find(c => c.id === id)).filter(Boolean);
     } catch (e) {
-      console.error('[TG] AI category terms error:', e.message);
+      console.error('[TG] AI category pick error:', e.message);
       return [];
     }
   }
@@ -1557,43 +1483,33 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
     const inWiz = c.step.startsWith('wiz_');
     const header = inWiz ? '📂 Step 4/9 — Category\n\n' : '';
 
-    // 1. Search Vinted's LIVE catalog API first (correct IDs guaranteed)
-    let matches = await searchVintedCatalogs(chatId, query);
-    console.log(`[TG] Category search "${query}": ${matches.length} live API matches`);
+    // 1. Search hardcoded categories by keyword
+    let matches = searchCategoriesByKeyword(query);
+    console.log(`[TG] Category search "${query}": ${matches.length} keyword matches`);
 
     // 2. Try individual words from the query
     if (!matches.length && query.includes(' ')) {
       const words = query.split(/\s+/).filter(w => w.length >= 3);
       for (const word of words) {
-        matches = await searchVintedCatalogs(chatId, word);
+        matches = searchCategoriesByKeyword(word);
         if (matches.length) { console.log(`[TG] Found via word "${word}"`); break; }
       }
     }
 
-    // 3. If API fails/no results, try each part of category_hint
+    // 3. Try each part of category_hint
     if (!matches.length && c.listing?.category_hint) {
       const parts = c.listing.category_hint.split(/[\/>,]+/).map(p => p.trim()).filter(p => p && p !== query);
       for (const part of parts) {
-        matches = await searchVintedCatalogs(chatId, part);
+        matches = searchCategoriesByKeyword(part);
         if (matches.length) { console.log(`[TG] Found via hint part "${part}"`); break; }
       }
     }
 
-    // 4. Ask AI for alternative/similar terms and search live catalog
+    // 4. Ask AI to pick the best category from our list
     if (!matches.length) {
       const itemDesc = c.listing ? `${c.listing.title || ''} ${query}`.trim() : query;
-      const altTerms = await aiCategoryTerms(itemDesc);
-      console.log(`[TG] AI category terms: ${altTerms.join(', ')}`);
-      for (const term of altTerms) {
-        matches = await searchVintedCatalogs(chatId, term);
-        if (matches.length) { console.log(`[TG] Found via AI term "${term}"`); break; }
-      }
-    }
-
-    // 5. Fallback to hardcoded categories if API unavailable
-    if (!matches.length) {
-      matches = searchCategoriesByKeyword(query);
-      if (matches.length) console.log(`[TG] Using ${matches.length} hardcoded fallback matches`);
+      matches = await aiPickCategory(itemDesc);
+      if (matches.length) console.log(`[TG] AI picked ${matches.length} categories`);
     }
 
     if (!matches.length) {
@@ -1615,12 +1531,10 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
 
   async function selectCategory(chatId, catId) {
     const c = getChat(chatId);
-    // Look up name from live catalog cache first, then hardcoded list
-    const liveMatch = cachedCatalogs?.find(x => x.id === catId);
-    const match = liveMatch || CATEGORIES.find(x => x.id === catId);
+    const match = CATEGORIES.find(x => x.id === catId);
     c.listing.catalog_id = catId;
     c.listing.category_name = match ? match.title : `ID: ${catId}`;
-    console.log(`[TG] Category selected: ${c.listing.category_name} (catalog_id=${catId}, source=${liveMatch ? 'live' : 'hardcoded'})`);
+    console.log(`[TG] Category selected: ${c.listing.category_name} (catalog_id=${catId})`);
     c.listing.size_id = null;
     c.listing.size_name = '';
     if (c.step.startsWith('wiz_')) return wizardNext(chatId);
@@ -1877,7 +1791,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
         id: null,
         currency: 'GBP',
         temp_uuid: uuid,
-        title: L.title,
+        title: normalizeTitle(L.title),
         description: L.description,
         brand_id: L.brand_id || null,
         brand: L.brand || null,
@@ -1931,7 +1845,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
           const refreshedPhotos = (refreshed.photos || []).map(p => ({ id: p.id, orientation: p.orientation || 0 }));
           completionDraft = buildCompletionDraft(refreshed, refreshedPhotos.length ? refreshedPhotos : photoIds);
           // Re-apply user's chosen values — server refresh can override them with defaults
-          completionDraft.title = L.title;
+          completionDraft.title = normalizeTitle(L.title);
           completionDraft.description = L.description;
           completionDraft.catalog_id = L.catalog_id || refreshed.catalog_id || null;
           completionDraft.status_id = L.status_id || refreshed.status_id || null;
@@ -2108,6 +2022,19 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
   // ──────────────────────────────────────────
   // UTILS
   // ──────────────────────────────────────────
+
+  // Normalize title for Vinted — sentence case, no ALL CAPS
+  function normalizeTitle(title) {
+    if (!title) return '';
+    const t = String(title);
+    // If more than half the letters are uppercase, convert to sentence case
+    const letters = t.replace(/[^a-zA-Z]/g, '');
+    const upperCount = (t.match(/[A-Z]/g) || []).length;
+    if (letters.length > 3 && upperCount > letters.length * 0.5) {
+      return t.toLowerCase().replace(/(^|\.\s+|!\s+|\?\s+)([a-z])/g, (_, pre, c) => pre + c.toUpperCase());
+    }
+    return t;
+  }
 
   function esc(text) {
     if (!text) return '';
