@@ -647,6 +647,30 @@ app.post('/api/webhooks/stripe', express.raw({ type:'application/json' }), async
   } catch(e) { console.error('[RP] Webhook error:', e.message); res.status(500).json({ error:e.message }); }
 });
 
+// Reliably hide + delete an item on Vinted with retry logic
+async function deleteVintedItem(session, itemId, label) {
+  const tag = label || 'RP';
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      // Hide first
+      await vintedFetch(session, `/api/v2/items/${itemId}/is_hidden`, { method:'PUT', body:{ is_hidden:true } });
+      await new Promise(r => setTimeout(r, 400 + Math.random() * 400));
+      // Delete
+      const delResp = await vintedFetch(session, `/api/v2/items/${itemId}/delete`, { method:'POST' });
+      if (delResp.ok || delResp.status === 404) {
+        console.log(`[${tag}] Deleted old item ${itemId} (attempt ${attempt}, status ${delResp.status})`);
+        return true;
+      }
+      console.log(`[${tag}] Delete ${itemId} attempt ${attempt} failed: ${delResp.status}`);
+    } catch (e) {
+      console.log(`[${tag}] Delete ${itemId} attempt ${attempt} error: ${e.message}`);
+    }
+    if (attempt < 3) await new Promise(r => setTimeout(r, 2000 + Math.random() * 2000));
+  }
+  console.log(`[${tag}] Failed to delete ${itemId} after 3 attempts`);
+  return false;
+}
+
 // ═══ VINTED PROXY ═══
 async function vintedFetch(session, urlPath, options = {}) {
   const domain = session.domain || 'www.vinted.co.uk';
@@ -888,9 +912,7 @@ app.post('/api/vinted/items/:itemId/repost', auth, async (req, res) => {
     const newDraft = (await createResp.json()).draft;
     const newId = String(newDraft?.id || '');
     if (!newId) return res.status(500).json({ error:'No draft id returned' });
-    await vintedFetch(session, `/api/v2/items/${itemId}/is_hidden`, { method:'PUT', body:{ is_hidden:true } });
-    await new Promise(r => setTimeout(r, 400 + Math.random() * 400));
-    await vintedFetch(session, `/api/v2/items/${itemId}/delete`, { method:'POST' });
+    await deleteVintedItem(session, itemId, 'RP');
     await new Promise(r => setTimeout(r, 800 + Math.random() * 400));
     const refreshResp = await vintedFetch(session, `/api/v2/item_upload/items/${newId}`);
     const refreshedItem = refreshResp.ok ? (await refreshResp.json()).item : null;
@@ -907,6 +929,10 @@ app.post('/api/vinted/items/:itemId/repost', auth, async (req, res) => {
     if (completeResp.ok) {
       await new Promise(r => setTimeout(r, 1000));
       try { await vintedFetch(session, `/api/v2/items/${newId}/is_hidden`, { method:'PUT', body:{ is_hidden:false } }); } catch(_) {}
+      // Transfer old item → new in DB
+      if (db.hasDb()) {
+        try { await db.query('UPDATE rp_items SET item_id=$1, repost_count=repost_count+1, last_repost=NOW() WHERE item_id=$2 AND user_id=$3', [newId, itemId, req.user.id]); } catch(_) {}
+      }
     }
     console.log(`[RP] Reposted ${itemId} → ${newId} (${completeResp.status})`);
     res.json({ ok:completeResp.ok, oldId:itemId, newId, published:completeResp.ok, details:completeBody });
@@ -967,12 +993,8 @@ app.post('/api/repost-queue', auth, async (req, res) => {
         }
         const newDraft = (await createResp.json()).draft;
         const newId = String(newDraft?.id || '');
-        // Hide & delete original
-        if (getResp.ok) {
-          await vintedFetch(session, `/api/v2/items/${itemId}/is_hidden`, { method:'PUT', body:{ is_hidden:true } });
-          await new Promise(r => setTimeout(r, 400 + Math.random() * 400));
-          await vintedFetch(session, `/api/v2/items/${itemId}/delete`, { method:'POST' });
-        }
+        // Delete original — always try, even if initial GET failed (item may still exist)
+        await deleteVintedItem(session, itemId, 'RP-queue');
         // Refresh & complete
         await new Promise(r => setTimeout(r, 800 + Math.random() * 400));
         const refreshResp = await vintedFetch(session, `/api/v2/item_upload/items/${newId}`);
@@ -1297,12 +1319,8 @@ async function checkAllSchedules() {
           const newDraft = (await createResp.json()).draft;
           const newId = String(newDraft?.id || '');
 
-          // Hide & delete original (only if it still exists on Vinted)
-          if (getResp.ok) {
-            await vintedFetch(session, `/api/v2/items/${itemId}/is_hidden`, { method: 'PUT', body: { is_hidden: true } });
-            await new Promise(r => setTimeout(r, 400 + Math.random() * 400));
-            await vintedFetch(session, `/api/v2/items/${itemId}/delete`, { method: 'POST' });
-          }
+          // Delete original — always try, even if initial GET failed
+          await deleteVintedItem(session, itemId, 'RP-cron');
 
           // Refresh & complete
           await new Promise(r => setTimeout(r, 800 + Math.random() * 400));
