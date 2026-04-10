@@ -892,6 +892,8 @@ app.post('/api/vinted/items/:itemId/repost', auth, async (req, res) => {
     const getResp = await vintedFetch(session, `/api/v2/item_upload/items/${itemId}`);
     if (getResp.ok) {
       item = (await getResp.json()).item;
+      // Pre-repost backup — capture photo URLs while item still exists
+      if (item) await saveItemBackup(req.user.id, item);
     }
     // If item not found on Vinted, try to recover from backend backup
     if (!item) {
@@ -990,7 +992,10 @@ app.post('/api/repost-queue', auth, async (req, res) => {
         // Fetch item from Vinted, fall back to backup
         let item = null;
         const getResp = await vintedFetch(session, `/api/v2/item_upload/items/${itemId}`);
-        if (getResp.ok) item = (await getResp.json()).item;
+        if (getResp.ok) {
+          item = (await getResp.json()).item;
+          if (item) await saveItemBackup(userId, item);
+        }
         if (!item && db.hasDb()) {
           const bk = await db.query('SELECT raw_data FROM rp_item_backups WHERE user_id=$1 AND item_id=$2 ORDER BY backed_up_at DESC LIMIT 1', [userId, itemId]);
           if (bk.rows[0] && bk.rows[0].raw_data) { item = bk.rows[0].raw_data; if (!item.id) item.id = itemId; }
@@ -1304,6 +1309,7 @@ async function checkAllSchedules() {
           const getResp = await vintedFetch(session, `/api/v2/item_upload/items/${itemId}`);
           if (getResp.ok) {
             item = (await getResp.json()).item;
+            if (item) await saveItemBackup(userId, item);
           }
           if (!item) {
             // Try backup
