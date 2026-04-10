@@ -741,9 +741,9 @@ async function reuploadPhotos(session, photos) {
   for (const photo of photos) {
     try {
       const photoUrl = photo.full_size_url || photo.url || photo.high_resolution?.url;
-      if (!photoUrl) { results.push({ id:photo.id, orientation:photo.orientation||0 }); continue; }
+      if (!photoUrl) { console.log(`[RP] Photo ${photo.id}: no URL, skipping`); continue; }
       const imgResp = await fetch(photoUrl, { headers:{ 'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } });
-      if (!imgResp.ok) { results.push({ id:photo.id, orientation:photo.orientation||0 }); continue; }
+      if (!imgResp.ok) { console.log(`[RP] Photo ${photo.id}: fetch failed (${imgResp.status}), skipping`); continue; }
       const imgBuffer = await imgResp.arrayBuffer();
       const uuid = crypto.randomBytes(16).toString('hex');
       const form = new FormData();
@@ -760,8 +760,10 @@ async function reuploadPhotos(session, photos) {
         const newId = data.photo?.id || data.id;
         if (newId) { results.push({ id:newId, orientation:photo.orientation||0 }); await new Promise(r => setTimeout(r,300)); continue; }
       }
-    } catch(e) {}
-    results.push({ id:photo.id, orientation:photo.orientation||0 });
+    } catch(e) { console.log(`[RP] Photo ${photo.id}: error ${e.message}, skipping`); }
+  }
+  if (!results.length && photos.length) {
+    console.log(`[RP] WARNING: All ${photos.length} photo re-uploads failed`);
   }
   return results;
 }
@@ -895,17 +897,112 @@ app.post('/api/vinted/items/:itemId/repost', auth, async (req, res) => {
     await new Promise(r => setTimeout(r, 1500 + Math.random() * 1000));
     const completionDraft = refreshedItem ? buildDraftPayload(refreshedItem) : { ...draft, id:parseInt(newId) };
     completionDraft.id = parseInt(newId);
+    completionDraft.assigned_photos = freshPhotos; // Always use freshly uploaded photo IDs
     const completionUuid = completionDraft.temp_uuid || uuid;
     const completeResp = await vintedFetch(session, `/api/v2/item_upload/drafts/${newId}/completion`, {
       method:'POST', body:{ draft:completionDraft, feedback_id:null, parcel:null, push_up:false, upload_session_id:completionUuid }
     });
     const completeBody = await completeResp.json().catch(() => ({}));
+    // Unhide the new listing — Vinted can leave it hidden after publish
+    if (completeResp.ok) {
+      await new Promise(r => setTimeout(r, 1000));
+      try { await vintedFetch(session, `/api/v2/items/${newId}/is_hidden`, { method:'PUT', body:{ is_hidden:false } }); } catch(_) {}
+    }
     console.log(`[RP] Reposted ${itemId} → ${newId} (${completeResp.status})`);
     res.json({ ok:completeResp.ok, oldId:itemId, newId, published:completeResp.ok, details:completeBody });
   } catch(e) {
     console.error('[RP] Repost error:', e.message);
     res.status(502).json({ error:e.message });
   }
+});
+
+// ═══ BACKEND REPOST QUEUE — works when browser is closed ═══
+// Accepts one or more item IDs and reposts them server-side with staggered timing.
+// The response returns immediately; reposts run in background.
+app.post('/api/repost-queue', auth, async (req, res) => {
+  const { itemIds } = req.body || {};
+  if (!Array.isArray(itemIds) || !itemIds.length) return res.status(400).json({ error:'itemIds array required' });
+  const session = await store.getSession(req.user.id);
+  if (!session) return res.status(401).json({ error:'No Vinted session. Sync from Vinted first.' });
+  const userId = req.user.id;
+  // Quota check
+  const planInfo = PLANS[req.user.plan || 'free'] || PLANS.free;
+  if (planInfo.repostsPerMonth != null) {
+    const usage = await getUserUsage(userId);
+    if (usage.repostsThisMonth + itemIds.length > planInfo.repostsPerMonth) {
+      return res.status(429).json({ ok:false, error:`Would exceed repost quota (${planInfo.repostsPerMonth}/month). ${Math.max(0, planInfo.repostsPerMonth - usage.repostsThisMonth)} remaining.`, quotaExceeded:true });
+    }
+  }
+  // Respond immediately — work runs in background
+  res.json({ ok:true, queued:itemIds.length });
+  // Process reposts in background with staggered timing
+  (async () => {
+    for (let i = 0; i < itemIds.length; i++) {
+      const itemId = String(itemIds[i]);
+      try {
+        // Fetch item from Vinted, fall back to backup
+        let item = null;
+        const getResp = await vintedFetch(session, `/api/v2/item_upload/items/${itemId}`);
+        if (getResp.ok) item = (await getResp.json()).item;
+        if (!item && db.hasDb()) {
+          const bk = await db.query('SELECT raw_data FROM rp_item_backups WHERE user_id=$1 AND item_id=$2 ORDER BY backed_up_at DESC LIMIT 1', [userId, itemId]);
+          if (bk.rows[0] && bk.rows[0].raw_data) { item = bk.rows[0].raw_data; if (!item.id) item.id = itemId; }
+        }
+        if (!item) {
+          await logAction(userId, 'repost', { itemId, status:'failed', details:{ source:'backend-queue', error:'Item not found' } });
+          continue;
+        }
+        // Re-upload photos
+        const freshPhotos = await reuploadPhotos(session, item.photos || []);
+        const draft = buildDraftPayload(item);
+        draft.assigned_photos = freshPhotos;
+        const uuid = draft.temp_uuid;
+        // Create draft
+        const createResp = await vintedFetch(session, '/api/v2/item_upload/drafts', {
+          method:'POST', body:{ draft, feedback_id:null, parcel:null, upload_session_id:uuid }
+        });
+        if (!createResp.ok) {
+          await logAction(userId, 'repost', { itemId, itemTitle:item.title, status:'failed', details:{ source:'backend-queue', error:'Draft creation failed' } });
+          continue;
+        }
+        const newDraft = (await createResp.json()).draft;
+        const newId = String(newDraft?.id || '');
+        // Hide & delete original
+        if (getResp.ok) {
+          await vintedFetch(session, `/api/v2/items/${itemId}/is_hidden`, { method:'PUT', body:{ is_hidden:true } });
+          await new Promise(r => setTimeout(r, 400 + Math.random() * 400));
+          await vintedFetch(session, `/api/v2/items/${itemId}/delete`, { method:'POST' });
+        }
+        // Refresh & complete
+        await new Promise(r => setTimeout(r, 800 + Math.random() * 400));
+        const refreshResp = await vintedFetch(session, `/api/v2/item_upload/items/${newId}`);
+        const refreshedItem = refreshResp.ok ? (await refreshResp.json()).item : null;
+        await new Promise(r => setTimeout(r, 1500 + Math.random() * 1000));
+        const completionDraft = refreshedItem ? buildDraftPayload(refreshedItem) : { ...draft, id:parseInt(newId) };
+        completionDraft.id = parseInt(newId);
+        completionDraft.assigned_photos = freshPhotos;
+        const completeResp = await vintedFetch(session, `/api/v2/item_upload/drafts/${newId}/completion`, {
+          method:'POST', body:{ draft:completionDraft, feedback_id:null, parcel:null, push_up:false, upload_session_id:completionDraft.temp_uuid || uuid }
+        });
+        if (completeResp.ok) {
+          try { await vintedFetch(session, `/api/v2/items/${newId}/is_hidden`, { method:'PUT', body:{ is_hidden:false } }); } catch(_) {}
+          console.log(`[RP-queue] Reposted ${itemId} → ${newId}`);
+          await logAction(userId, 'repost', { itemId, newItemId:newId, itemTitle:item.title, status:'success', details:{ source:'backend-queue' } });
+          if (db.hasDb()) {
+            try { await db.query('UPDATE rp_items SET item_id=$1, repost_count=repost_count+1, last_repost=NOW() WHERE item_id=$2 AND user_id=$3', [newId, itemId, userId]); } catch(_) {}
+          }
+        } else {
+          await logAction(userId, 'repost', { itemId, itemTitle:item.title, status:'failed', details:{ source:'backend-queue', error:`Publish failed (${completeResp.status})` } });
+        }
+        // Stagger between items
+        if (i < itemIds.length - 1) await new Promise(r => setTimeout(r, 60000 + Math.random() * 60000));
+      } catch (e) {
+        console.error(`[RP-queue] Error for ${itemId}:`, e.message);
+        await logAction(userId, 'repost', { itemId, status:'failed', details:{ source:'backend-queue', error:e.message } });
+      }
+    }
+    console.log(`[RP-queue] Finished ${itemIds.length} items for user ${userId}`);
+  })();
 });
 
 // ═══ REPOST LOG (called by extension after browser-side repost — updates DB immediately) ═══
@@ -1207,11 +1304,14 @@ async function checkAllSchedules() {
           await new Promise(r => setTimeout(r, 1500 + Math.random() * 1000));
           const completionDraft = refreshedItem ? buildDraftPayload(refreshedItem) : { ...draft, id: parseInt(newId) };
           completionDraft.id = parseInt(newId);
+          completionDraft.assigned_photos = freshPhotos; // Always use freshly uploaded photo IDs
           const completeResp = await vintedFetch(session, `/api/v2/item_upload/drafts/${newId}/completion`, {
             method: 'POST', body: { draft: completionDraft, feedback_id: null, parcel: null, push_up: false, upload_session_id: completionDraft.temp_uuid || uuid }
           });
 
+          // Unhide the new listing
           if (completeResp.ok) {
+            try { await vintedFetch(session, `/api/v2/items/${newId}/is_hidden`, { method:'PUT', body:{ is_hidden:false } }); } catch(_) {}
             console.log(`[RP-cron] Reposted ${itemId} → ${newId}`);
             await logAction(userId, 'repost', { itemId, newItemId: newId, itemTitle: item.title, status: 'success', details: { source: 'server-schedule', scheduleId: row.id } });
             // Update item in DB — transfer old to new ID
@@ -1272,6 +1372,12 @@ const initTelegram = require('./telegram');
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[RelistPro] v3.0.0 on port ${PORT} | db:${db.hasDb()} | stripe:${!!stripe}`);
+
+    // Server-side schedule executor — runs every 5 minutes, works even when browser is closed
+    if (db.hasDb()) {
+      setInterval(checkAllSchedules, 5 * 60 * 1000);
+      console.log('[RP-cron] Schedule executor started (every 5 min)');
+    }
 
     // Start Telegram bot AFTER server is listening (webhook needs Express ready)
     try {
