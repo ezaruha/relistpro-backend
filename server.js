@@ -104,6 +104,13 @@ const store = {
     const found = Object.entries(users).find(([,u]) => u.token === token);
     return found ? { id:found[0], username:found[0], plan:'free', ...found[1] } : null;
   },
+  async getUserById(id) {
+    if (db.hasDb()) {
+      const r = await db.query('SELECT * FROM rp_users WHERE id=$1', [id]);
+      return r.rows[0] || null;
+    }
+    return null;
+  },
   async createUser(username, hash, token, email) {
     if (db.hasDb()) {
       const r = await db.query(
@@ -428,9 +435,9 @@ app.post('/api/sync', auth, async (req, res) => {
       for (const s of schedules) {
         const id = s.id || crypto.randomUUID();
         await db.query(`
-          INSERT INTO rp_schedules (id,user_id,name,active,freq,hour_of_day,start_hour,end_hour,item_ids,next_run,last_run)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (id,user_id) DO NOTHING
-        `, [id, userId, s.name||'Schedule', s.active!==false, s.freq||1, s.hour||12, s.start||9, s.end||21, s.items||[], s.nextRun||null, s.lastRun||null]);
+          INSERT INTO rp_schedules (id,user_id,name,active,freq,hour_of_day,start_hour,end_hour,item_ids,next_run,last_run,date,slot,executed)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT (id,user_id) DO NOTHING
+        `, [id, userId, s.name||'Schedule', s.active!==false, s.freq||1, s.hour||12, s.start||9, s.end||21, s.items||[], s.nextRun||null, s.lastRun||null, s.date||null, s.slot||null, s.executed||false]);
       }
     }
     // Save settings
@@ -543,7 +550,8 @@ app.get('/api/dashboard', auth, async (req, res) => {
     }));
     const schedules = schedulesR.rows.map(row => ({
       id:row.id, name:row.name, active:row.active, freq:row.freq, hour:row.hour_of_day,
-      start:row.start_hour, end:row.end_hour, items:row.item_ids, nextRun:row.next_run, lastRun:row.last_run
+      start:row.start_hour, end:row.end_hour, items:row.item_ids, nextRun:row.next_run, lastRun:row.last_run,
+      date:row.date||null, slot:row.slot||null, executed:row.executed||false
     }));
     const actions = actionsR.rows.map(row => ({
       id:row.id, type:row.type, itemId:row.item_id, newItemId:row.new_item_id,
@@ -836,10 +844,27 @@ app.post('/api/vinted/items/:itemId/repost', auth, async (req, res) => {
   const { itemId } = req.params;
   const { freshPhotos:browserPhotos } = req.body || {};
   try {
+    let item = null;
     const getResp = await vintedFetch(session, `/api/v2/item_upload/items/${itemId}`);
-    if (!getResp.ok) return res.status(getResp.status).json({ error:`Item fetch failed: ${getResp.status}` });
-    const item = (await getResp.json()).item;
-    if (!item) return res.status(404).json({ error:'Item not found' });
+    if (getResp.ok) {
+      item = (await getResp.json()).item;
+    }
+    // If item not found on Vinted, try to recover from backend backup
+    if (!item) {
+      console.log(`[RP] Item ${itemId} not found on Vinted (${getResp.status}), trying backup...`);
+      if (db.hasDb()) {
+        const bk = await db.query(
+          'SELECT raw_data FROM rp_item_backups WHERE user_id=$1 AND item_id=$2 ORDER BY backed_up_at DESC LIMIT 1',
+          [req.user.id, itemId]
+        );
+        if (bk.rows[0] && bk.rows[0].raw_data) {
+          item = bk.rows[0].raw_data;
+          if (!item.id) item.id = itemId;
+          console.log(`[RP] Recovered item ${itemId} from backup — title: ${item.title}`);
+        }
+      }
+      if (!item) return res.status(404).json({ error:'Item not found on Vinted and no backup available' });
+    }
     let freshPhotos;
     if (browserPhotos && browserPhotos.length > 0) {
       freshPhotos = browserPhotos;
@@ -1070,6 +1095,171 @@ app.get('/api/vinted/package-sizes', auth, async (req, res) => {
     res.json(data);
   } catch(e) { res.status(502).json({ error:e.message }); }
 });
+
+// ═══ SERVER-SIDE SCHEDULE EXECUTOR ═══
+// Runs every 5 minutes — checks all users' schedules and executes due reposts.
+// This is what makes 24/7 operation possible without the browser extension running.
+async function checkAllSchedules() {
+  if (!db.hasDb()) return;
+  try {
+    const now = new Date();
+    const rows = (await db.query('SELECT * FROM rp_schedules WHERE active=true')).rows;
+    for (const row of rows) {
+      const userId = row.user_id;
+      const items = row.item_ids || [];
+      if (!items.length) continue;
+
+      // Determine if schedule is due
+      let isDue = false;
+      if (row.date && row.slot) {
+        // One-shot: date+slot model
+        if (row.executed) continue;
+        const fireAt = new Date(row.date + 'T' + row.slot + ':00');
+        if (isNaN(fireAt.getTime()) || fireAt > now) continue;
+        isDue = true;
+      } else {
+        // Legacy recurring model
+        if (!row.next_run) continue;
+        const hour = now.getHours();
+        if (hour < (row.start_hour || 9) || hour > (row.end_hour || 21)) continue;
+        if (new Date(row.next_run) > now) continue;
+        isDue = true;
+      }
+      if (!isDue) continue;
+
+      // Get user session
+      const session = await store.getSession(userId);
+      if (!session) {
+        console.log(`[RP-cron] Schedule ${row.id}: no session for user ${userId}, skipping`);
+        continue;
+      }
+
+      // Quota check
+      const user = await store.getUserById(userId);
+      const planInfo = PLANS[(user && user.plan) || 'free'] || PLANS.free;
+      if (planInfo.repostsPerMonth != null) {
+        const usage = await getUserUsage(userId);
+        if (usage.repostsThisMonth >= planInfo.repostsPerMonth) {
+          console.log(`[RP-cron] Schedule ${row.id}: user ${userId} hit repost quota, skipping`);
+          continue;
+        }
+      }
+
+      console.log(`[RP-cron] Executing schedule ${row.id} for user ${userId} — ${items.length} items`);
+
+      for (let j = 0; j < items.length; j++) {
+        const itemId = items[j];
+        try {
+          // Fetch item from Vinted, fall back to backup
+          let item = null;
+          const getResp = await vintedFetch(session, `/api/v2/item_upload/items/${itemId}`);
+          if (getResp.ok) {
+            item = (await getResp.json()).item;
+          }
+          if (!item) {
+            // Try backup
+            const bk = await db.query(
+              'SELECT raw_data FROM rp_item_backups WHERE user_id=$1 AND item_id=$2 ORDER BY backed_up_at DESC LIMIT 1',
+              [userId, itemId]
+            );
+            if (bk.rows[0] && bk.rows[0].raw_data) {
+              item = bk.rows[0].raw_data;
+              if (!item.id) item.id = itemId;
+              console.log(`[RP-cron] Recovered item ${itemId} from backup`);
+            }
+          }
+          if (!item) {
+            console.log(`[RP-cron] Item ${itemId} not found, no backup — skipping`);
+            await logAction(userId, 'repost', { itemId, itemTitle: null, status: 'failed', details: { source: 'server-schedule', scheduleId: row.id, error: 'Item not found and no backup' } });
+            continue;
+          }
+
+          // Re-upload photos
+          const freshPhotos = await reuploadPhotos(session, item.photos || []);
+          const draft = buildDraftPayload(item);
+          draft.assigned_photos = freshPhotos;
+          const uuid = draft.temp_uuid;
+
+          // Create draft
+          const createResp = await vintedFetch(session, '/api/v2/item_upload/drafts', {
+            method: 'POST', body: { draft, feedback_id: null, parcel: null, upload_session_id: uuid }
+          });
+          if (!createResp.ok) {
+            const err = await createResp.json().catch(() => ({}));
+            console.log(`[RP-cron] Draft creation failed for ${itemId}:`, JSON.stringify(err));
+            await logAction(userId, 'repost', { itemId, itemTitle: item.title, status: 'failed', details: { source: 'server-schedule', scheduleId: row.id, error: 'Draft creation failed' } });
+            continue;
+          }
+          const newDraft = (await createResp.json()).draft;
+          const newId = String(newDraft?.id || '');
+
+          // Hide & delete original (only if it still exists on Vinted)
+          if (getResp.ok) {
+            await vintedFetch(session, `/api/v2/items/${itemId}/is_hidden`, { method: 'PUT', body: { is_hidden: true } });
+            await new Promise(r => setTimeout(r, 400 + Math.random() * 400));
+            await vintedFetch(session, `/api/v2/items/${itemId}/delete`, { method: 'POST' });
+          }
+
+          // Refresh & complete
+          await new Promise(r => setTimeout(r, 800 + Math.random() * 400));
+          const refreshResp = await vintedFetch(session, `/api/v2/item_upload/items/${newId}`);
+          const refreshedItem = refreshResp.ok ? (await refreshResp.json()).item : null;
+          await new Promise(r => setTimeout(r, 1500 + Math.random() * 1000));
+          const completionDraft = refreshedItem ? buildDraftPayload(refreshedItem) : { ...draft, id: parseInt(newId) };
+          completionDraft.id = parseInt(newId);
+          const completeResp = await vintedFetch(session, `/api/v2/item_upload/drafts/${newId}/completion`, {
+            method: 'POST', body: { draft: completionDraft, feedback_id: null, parcel: null, push_up: false, upload_session_id: completionDraft.temp_uuid || uuid }
+          });
+
+          if (completeResp.ok) {
+            console.log(`[RP-cron] Reposted ${itemId} → ${newId}`);
+            await logAction(userId, 'repost', { itemId, newItemId: newId, itemTitle: item.title, status: 'success', details: { source: 'server-schedule', scheduleId: row.id } });
+            // Update item in DB — transfer old to new ID
+            if (db.hasDb()) {
+              try {
+                await db.query(`UPDATE rp_items SET item_id=$1, repost_count=repost_count+1, last_repost=NOW() WHERE item_id=$2 AND user_id=$3`, [newId, itemId, userId]);
+              } catch (_) {}
+            }
+          } else {
+            console.log(`[RP-cron] Publish failed for ${itemId} → ${newId}: ${completeResp.status}`);
+            await logAction(userId, 'repost', { itemId, itemTitle: item.title, status: 'failed', details: { source: 'server-schedule', scheduleId: row.id, error: `Publish failed (${completeResp.status})` } });
+          }
+
+          // Stagger between items
+          if (j < items.length - 1) {
+            await new Promise(r => setTimeout(r, 60000 + Math.random() * 60000));
+          }
+        } catch (e) {
+          console.error(`[RP-cron] Repost error for item ${itemId}:`, e.message);
+          await logAction(userId, 'repost', { itemId, itemTitle: null, status: 'failed', details: { source: 'server-schedule', scheduleId: row.id, error: e.message } });
+        }
+      }
+
+      // Mark schedule as executed / advance to next
+      if (row.date && row.slot) {
+        await db.query('UPDATE rp_schedules SET executed=true WHERE id=$1 AND user_id=$2', [row.id, userId]);
+      } else {
+        const next = new Date();
+        next.setDate(next.getDate() + (row.freq || 1));
+        next.setHours(row.hour_of_day || 12, Math.floor(Math.random() * 60), 0);
+        await db.query('UPDATE rp_schedules SET last_run=NOW(), next_run=$1 WHERE id=$2 AND user_id=$3', [next.toISOString(), row.id, userId]);
+      }
+    }
+  } catch (e) {
+    console.error('[RP-cron] checkAllSchedules error:', e.message);
+  }
+}
+
+// Helper: log action for server-side operations
+async function logAction(userId, type, data) {
+  if (!db.hasDb()) return;
+  try {
+    await db.query(
+      `INSERT INTO rp_actions(user_id,type,item_id,new_item_id,item_title,status,details) VALUES($1,$2,$3,$4,$5,$6,$7)`,
+      [userId, type, data.itemId || null, data.newItemId || null, data.itemTitle || null, data.status || 'success', JSON.stringify(data.details || {})]
+    );
+  } catch (e) { console.error('[RP-cron] logAction error:', e.message); }
+}
 
 // ═══ TELEGRAM BOT ═══
 const initTelegram = require('./telegram');

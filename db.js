@@ -114,8 +114,17 @@ async function initSchema() {
         item_ids TEXT[] DEFAULT '{}',
         next_run TIMESTAMPTZ,
         last_run TIMESTAMPTZ,
+        date TEXT,
+        slot TEXT,
+        executed BOOLEAN DEFAULT false,
         PRIMARY KEY (id, user_id)
       );
+      DO $$ BEGIN
+        ALTER TABLE rp_schedules ADD COLUMN IF NOT EXISTS date TEXT;
+        ALTER TABLE rp_schedules ADD COLUMN IF NOT EXISTS slot TEXT;
+        ALTER TABLE rp_schedules ADD COLUMN IF NOT EXISTS executed BOOLEAN DEFAULT false;
+      EXCEPTION WHEN OTHERS THEN NULL;
+      END $$;
 
       CREATE TABLE IF NOT EXISTS rp_pending_activations (
         item_id TEXT NOT NULL,

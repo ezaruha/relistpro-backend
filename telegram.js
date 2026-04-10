@@ -644,13 +644,14 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     // Download highest-res version
     const photo = msg.photo[msg.photo.length - 1];
     try {
-      const fileLink = await bot.getFileLink(photo.file_id);
-      console.log(`[TG] Downloading photo: ${fileLink}`);
-      const resp = await fetch(fileLink, {
-        headers: { 'User-Agent': 'RelistPro/1.0' }
-      });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const buffer = Buffer.from(await resp.arrayBuffer());
+      console.log(`[TG] Downloading photo file_id=${photo.file_id}`);
+      // Use bot.downloadFile which uses the library's built-in HTTP client
+      // (fetch() fails on Railway for Telegram file URLs)
+      const os = require('os');
+      const fs = require('fs');
+      const filePath = await bot.downloadFile(photo.file_id, os.tmpdir());
+      const buffer = fs.readFileSync(filePath);
+      try { fs.unlinkSync(filePath); } catch (_) {}
       if (!buffer.length) throw new Error('Empty file');
       c.photos.push({ base64: buffer.toString('base64'), fileId: photo.file_id });
       console.log(`[TG] Photo downloaded: ${buffer.length} bytes`);
@@ -1768,6 +1769,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       });
 
       // ── Step 2: Create draft ──
+      console.log(`[TG] Draft values: catalog_id=${L.catalog_id}, status_id=${L.status_id}, color1_id=${L.color1_id}, package_size_id=${L.package_size_id}, brand_id=${L.brand_id}, size_id=${L.size_id}, price=${L.price}`);
       const uuid = crypto.randomBytes(16).toString('hex');
       const draft = {
         id: null,
@@ -1823,25 +1825,31 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       if (refreshResp.ok) {
         const refreshed = (await refreshResp.json()).item;
         if (refreshed) {
-          completionDraft = buildCompletionDraft(refreshed, photoIds);
+          // Use server's canonical photo list for completion (matches DOTB)
+          const refreshedPhotos = (refreshed.photos || []).map(p => ({ id: p.id, orientation: p.orientation || 0 }));
+          completionDraft = buildCompletionDraft(refreshed, refreshedPhotos.length ? refreshedPhotos : photoIds);
           // Re-apply user's chosen values — server refresh can override them with defaults
           completionDraft.title = L.title;
           completionDraft.description = L.description;
-          completionDraft.catalog_id = L.catalog_id;
-          completionDraft.status_id = L.status_id;
+          completionDraft.catalog_id = L.catalog_id || refreshed.catalog_id || null;
+          completionDraft.status_id = L.status_id || refreshed.status_id || null;
           completionDraft.price = L.price;
-          completionDraft.package_size_id = L.package_size_id || null;
-          completionDraft.color_ids = L.color1_id ? [L.color1_id] : [];
-          completionDraft.brand_id = L.brand_id || null;
-          completionDraft.brand = L.brand || null;
-          completionDraft.size_id = L.size_id || null;
+          completionDraft.package_size_id = L.package_size_id || refreshed.package_size_id || null;
+          completionDraft.color_ids = L.color1_id
+            ? [L.color1_id, L.color2_id].filter(Boolean)
+            : [refreshed.color1_id, refreshed.color2_id].filter(Boolean);
+          completionDraft.brand_id = L.brand_id || refreshed.brand_id || null;
+          completionDraft.brand = L.brand || refreshed.brand || null;
+          completionDraft.size_id = L.size_id || refreshed.size_id || null;
         }
       }
-      completionDraft.id = parseInt(draftId);
+      completionDraft.id = draftId; // String, matching DOTB
+
+      console.log(`[TG] Completion payload: id=${completionDraft.id}, catalog_id=${completionDraft.catalog_id}, color_ids=${JSON.stringify(completionDraft.color_ids)}, photos=${completionDraft.assigned_photos?.length}, temp_uuid=${completionDraft.temp_uuid?.slice(0,8)}...`);
 
       const completeResp = await vintedFetch(session, `/api/v2/item_upload/drafts/${draftId}/completion`, {
         method: 'POST',
-        body: { draft: completionDraft, feedback_id: null, parcel: null, push_up: false, upload_session_id: uuid }
+        body: { draft: completionDraft, feedback_id: null, parcel: null, push_up: false, upload_session_id: completionDraft.temp_uuid }
       });
 
       if (!completeResp.ok) {
