@@ -668,7 +668,11 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     if (!c) return;
     try {
       const accts = JSON.stringify(c.accounts || []);
-      console.log(`[TG] Saving state: chat=${chatId} accounts=${c.accounts?.length || 0} idx=${c.activeIdx} step=${c.step}`);
+      // Save only fileIds for photos (not base64 — too large for JSONB, causes save to fail)
+      const photoRefs = c.photos?.length
+        ? JSON.stringify(c.photos.map(p => ({ fileId: p.fileId })))
+        : null;
+      console.log(`[TG] Saving state: chat=${chatId} accounts=${c.accounts?.length || 0} idx=${c.activeIdx} step=${c.step} photos=${c.photos?.length || 0}`);
       await db.query(
         `INSERT INTO rp_telegram_chats (chat_id, accounts, active_idx, listing, photos, wizard_idx, step)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -680,7 +684,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
           accts,
           c.activeIdx ?? -1,
           c.listing ? JSON.stringify(c.listing) : null,
-          c.photos?.length ? JSON.stringify(c.photos) : null,
+          photoRefs,
           c.wizardIdx ?? 0,
           c.step || 'idle'
         ]
@@ -773,10 +777,32 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     }
     if (saved.listing && !c.listing) {
       c.listing = saved.listing;
-      c.photos = saved.photos || [];
       c.wizardIdx = saved.wizardIdx ?? 0;
       c.step = saved.step || 'idle';
-      console.log(`[TG] Restored listing + ${(c.photos||[]).length} photo(s) for chat ${chatId}`);
+      // Re-download photos from Telegram using saved fileIds
+      const photoRefs = saved.photos || [];
+      if (photoRefs.length && photoRefs[0].fileId) {
+        console.log(`[TG] Re-downloading ${photoRefs.length} photo(s) from Telegram...`);
+        c.photos = [];
+        const os = require('os');
+        const fs = require('fs');
+        for (const ref of photoRefs) {
+          try {
+            const filePath = await bot.downloadFile(ref.fileId, os.tmpdir());
+            const buffer = fs.readFileSync(filePath);
+            try { fs.unlinkSync(filePath); } catch (_) {}
+            if (buffer.length) {
+              c.photos.push({ base64: buffer.toString('base64'), fileId: ref.fileId });
+            }
+          } catch (e) {
+            console.error(`[TG] Re-download failed for ${ref.fileId}: ${e.message}`);
+          }
+        }
+        console.log(`[TG] Restored ${c.photos.length}/${photoRefs.length} photo(s) for chat ${chatId}`);
+      } else {
+        c.photos = [];
+      }
+      console.log(`[TG] Restored listing for chat ${chatId} (step=${c.step})`);
     }
   }
   let TelegramBot;
