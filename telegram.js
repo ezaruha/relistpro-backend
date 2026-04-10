@@ -747,6 +747,10 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
   async function askWizardStep(chatId) {
     const c = getChat(chatId);
     const L = c.listing;
+    if (!L) {
+      c.step = 'idle';
+      return bot.sendMessage(chatId, 'Listing data lost. Send photos to start a new listing.');
+    }
     const stepName = WIZARD_STEPS[c.wizardIdx];
 
     if (stepName === 'title') {
@@ -1444,18 +1448,18 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
   }
 
   // Flatten Vinted catalog tree into searchable leaf nodes
-  function flattenCatalogs(catalogs, parentPath = '') {
+  function flattenCatalogs(catalogs, parentPath = '', depth = 0) {
+    if (!Array.isArray(catalogs) || depth > 10) return [];
     const results = [];
     for (const cat of catalogs) {
-      const path = parentPath ? `${parentPath} > ${cat.title}` : cat.title;
+      if (!cat || !cat.id) continue;
+      const path = parentPath ? `${parentPath} > ${cat.title || ''}` : (cat.title || '');
       const children = cat.catalogs || cat.children || [];
-      if (children.length === 0) {
-        // Leaf category — these are the ones Vinted accepts
+      if (!Array.isArray(children) || children.length === 0) {
         results.push({ id: cat.id, title: path, path });
       } else {
-        // Also include parent if it has an ID (some parents are selectable)
         results.push({ id: cat.id, title: path, path, hasChildren: true });
-        results.push(...flattenCatalogs(children, path));
+        results.push(...flattenCatalogs(children, path, depth + 1));
       }
     }
     return results;
@@ -1622,12 +1626,6 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
     const data = await resp.json();
     const groups = data.size_groups || data.catalog_sizes || data.sizes || [];
 
-    if (!groups.length) {
-      c.listing.size_id = null;
-      c.listing.size_name = 'N/A';
-      return bot.sendMessage(chatId, 'No sizes available for this category. Continuing without size.');
-    }
-
     // Flatten size groups
     const allSizes = [];
     for (const group of groups) {
@@ -1636,10 +1634,25 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
         if (s.id && s.title) allSizes.push({ id: s.id, title: s.title });
       }
     }
+
+    if (!allSizes.length) {
+      // Default to "One size" — Vinted's universal fallback
+      // Look for it in groups, or use well-known Vinted "One size" ID
+      const oneSize = groups.find(g => /one\s*size/i.test(g.title || ''));
+      if (oneSize) {
+        c.listing.size_id = oneSize.id;
+        c.listing.size_name = oneSize.title;
+      } else {
+        c.listing.size_id = null;
+        c.listing.size_name = 'N/A';
+      }
+      console.log(`[TG] No sizes for catalog_id=${c.listing.catalog_id}, defaulting to: ${c.listing.size_name} (id=${c.listing.size_id})`);
+      if (c.step.startsWith('wiz_')) return wizardNext(chatId);
+      return bot.sendMessage(chatId, `No sizes for this category — using "${c.listing.size_name}".`);
+    }
+
     // Cache for title lookup when user selects
     c.sizeCache = allSizes;
-
-    if (!allSizes.length) return bot.sendMessage(chatId, 'No sizes found for this category.');
 
     // Show as rows of 4
     const rows = [];
