@@ -1488,18 +1488,31 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
 
       const q = keyword.toLowerCase().trim();
       if (!q) return [];
+      const qWords = q.split(/\s+/).filter(w => w.length >= 2);
+      // Strip common plural/suffix for fuzzy matching
+      const stem = w => w.replace(/(s|es|ing|er|ies)$/, '');
+      const qStems = qWords.map(stem);
 
       // Score each catalog entry
       const scored = [];
       for (const cat of cachedCatalogs) {
         let score = 0;
         const titleLower = cat.title.toLowerCase();
-        if (titleLower.includes(q)) score += 10;
-        // Exact segment match (e.g. "stroller" matches "Strollers & car seats")
-        const segments = titleLower.split(/[\s>]+/);
-        for (const seg of segments) {
-          if (seg.startsWith(q) || q.startsWith(seg)) score += 5;
+        const titleWords = titleLower.split(/[\s>&,\-/]+/).filter(w => w.length >= 2);
+        const titleStems = titleWords.map(stem);
+
+        // Full query appears in title
+        if (titleLower.includes(q)) score += 15;
+
+        // Each query word matching a title word
+        for (const qs of qStems) {
+          for (const ts of titleStems) {
+            if (ts === qs) score += 8;           // exact stem match
+            else if (ts.startsWith(qs) || qs.startsWith(ts)) score += 5; // prefix match
+            else if (ts.includes(qs) || qs.includes(ts)) score += 3;     // substring
+          }
         }
+
         // Penalize parent categories (prefer leaf nodes)
         if (cat.hasChildren) score -= 3;
         if (score > 0) scored.push({ ...cat, score });
@@ -1550,16 +1563,25 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
     let matches = await searchVintedCatalogs(chatId, query);
     console.log(`[TG] Category search "${query}": ${matches.length} live API matches`);
 
-    // 2. If API fails/no results, try each part of category_hint
+    // 2. Try individual words from the query
+    if (!matches.length && query.includes(' ')) {
+      const words = query.split(/\s+/).filter(w => w.length >= 3);
+      for (const word of words) {
+        matches = await searchVintedCatalogs(chatId, word);
+        if (matches.length) { console.log(`[TG] Found via word "${word}"`); break; }
+      }
+    }
+
+    // 3. If API fails/no results, try each part of category_hint
     if (!matches.length && c.listing?.category_hint) {
-      const parts = c.listing.category_hint.split('/').filter(p => p && p !== query);
+      const parts = c.listing.category_hint.split(/[\/>,]+/).map(p => p.trim()).filter(p => p && p !== query);
       for (const part of parts) {
         matches = await searchVintedCatalogs(chatId, part);
         if (matches.length) { console.log(`[TG] Found via hint part "${part}"`); break; }
       }
     }
 
-    // 3. If still nothing, ask AI for alternative terms
+    // 4. Ask AI for alternative/similar terms and search live catalog
     if (!matches.length) {
       const itemDesc = c.listing ? `${c.listing.title || ''} ${query}`.trim() : query;
       const altTerms = await aiCategoryTerms(itemDesc);
@@ -1570,7 +1592,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       }
     }
 
-    // 4. Fallback to hardcoded categories if API unavailable
+    // 5. Fallback to hardcoded categories if API unavailable
     if (!matches.length) {
       matches = searchCategoriesByKeyword(query);
       if (matches.length) console.log(`[TG] Using ${matches.length} hardcoded fallback matches`);
