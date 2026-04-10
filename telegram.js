@@ -1723,6 +1723,16 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
     if (data === 'pick:pkg') {
       return showPackageSizePicker(chatId);
     }
+    if (data === 'pkg:custom') {
+      c.step = c.step.startsWith('wiz_') ? 'wiz_custom_parcel' : 'custom_parcel';
+      return bot.sendMessage(chatId,
+        '📐 Enter custom parcel dimensions:\n\n' +
+        'Format: `weight length width height`\n' +
+        'Example: `2 30 20 15` (2kg, 30×20×15 cm)\n\n' +
+        'Or just type the weight in kg (e.g. `3`)',
+        { parse_mode: 'Markdown' }
+      );
+    }
     if (data.startsWith('pkg:')) {
       const id = parseInt(data.split(':')[1]);
       return selectPackageSize(chatId, id);
@@ -1887,6 +1897,31 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
 
     if (c.step === 'searching_cat' || c.step === 'wiz_category') {
       return searchCategories(chatId, msg.text);
+    }
+
+    if (c.step === 'wiz_custom_parcel' || c.step === 'custom_parcel') {
+      const parts = msg.text.trim().split(/[\s,x×]+/).map(Number).filter(n => !isNaN(n) && n > 0);
+      if (!parts.length) return bot.sendMessage(chatId, 'Enter at least a weight in kg (e.g. "2") or full dimensions "2 30 20 15"');
+      c.listing.custom_parcel = {
+        weight: parts[0],
+        length: parts[1] || null,
+        width: parts[2] || null,
+        height: parts[3] || null,
+      };
+      // Pick the closest standard package size by weight
+      const w = parts[0];
+      let bestPkg = null;
+      if (w <= 2) bestPkg = 1;       // Small
+      else if (w <= 5) bestPkg = 2;   // Medium
+      else bestPkg = 3;               // Large
+      c.listing.package_size_id = bestPkg;
+      const pkg = PACKAGE_SIZES.find(p => p.id === bestPkg);
+      c.listing.package_size_name = pkg ? `${pkg.title} (custom: ${w}kg)` : `Custom: ${w}kg`;
+      const dimStr = parts.length >= 4 ? ` ${parts[1]}×${parts[2]}×${parts[3]}cm` : '';
+      bot.sendMessage(chatId, `📦 Custom parcel: ${w}kg${dimStr} → mapped to "${pkg?.title || 'Size ' + bestPkg}"`);
+      if (c.step === 'wiz_custom_parcel') return wizardNext(chatId);
+      c.step = 'review';
+      return showSummary(chatId);
     }
 
     // ── Catch-all: guide the user on what to do next ──
@@ -2133,14 +2168,46 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
   // PACKAGE SIZE PICKER
   // ──────────────────────────────────────────
 
-  function showPackageSizePicker(chatId) {
+  async function showPackageSizePicker(chatId) {
     const c = getChat(chatId);
     const inWiz = c.step.startsWith('wiz_');
     const header = inWiz ? '📮 Step 9/9 — Parcel Size\n\n' : '';
 
-    const rows = PACKAGE_SIZES.map(s => [{
-      text: `${s.title} — ${s.desc}`, callback_data: `pkg:${s.id}`
+    // Try fetching live package sizes from Vinted
+    let sizes = PACKAGE_SIZES;
+    try {
+      const acct = activeAccount(c);
+      if (acct) {
+        const session = await store.getSession(acct.userId);
+        if (session) {
+          const resp = await vintedFetch(session, '/api/v2/package_sizes');
+          if (resp.ok) {
+            const data = await resp.json();
+            const live = data.package_sizes || data;
+            if (Array.isArray(live) && live.length) {
+              sizes = live.map(s => ({
+                id: s.id,
+                title: s.title || s.name || `Size ${s.id}`,
+                desc: s.description || s.custom_title || ''
+              }));
+              console.log(`[TG] Loaded ${sizes.length} package sizes from Vinted`);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.log('[TG] Package size fetch failed, using hardcoded:', e.message);
+    }
+
+    c.packageSizeCache = sizes;
+
+    const rows = sizes.map(s => [{
+      text: s.desc ? `${s.title} — ${s.desc}` : s.title,
+      callback_data: `pkg:${s.id}`
     }]);
+    // Allow entering custom dimensions if Vinted needs them
+    rows.push([{ text: '📐 Enter custom dimensions', callback_data: 'pkg:custom' }]);
+    rows.push([{ text: '⏭️ Skip', callback_data: 'pkg:0' }]);
 
     bot.sendMessage(chatId, header + 'Select parcel size:', {
       reply_markup: { inline_keyboard: rows }
@@ -2153,7 +2220,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       c.listing.package_size_id = null;
       c.listing.package_size_name = 'N/A';
     } else {
-      const pkg = PACKAGE_SIZES.find(p => p.id === pkgId);
+      const pkg = (c.packageSizeCache || PACKAGE_SIZES).find(p => p.id === pkgId);
       c.listing.package_size_id = pkgId;
       c.listing.package_size_name = pkg ? pkg.title : `ID: ${pkgId}`;
     }
@@ -2317,9 +2384,17 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
         manufacturer: null,
       };
 
+      // Include custom parcel dimensions if user entered them
+      const parcel = L.custom_parcel ? {
+        weight: L.custom_parcel.weight || null,
+        length: L.custom_parcel.length || null,
+        width: L.custom_parcel.width || null,
+        height: L.custom_parcel.height || null,
+      } : null;
+
       const createResp = await vintedFetch(session, '/api/v2/item_upload/drafts', {
         method: 'POST',
-        body: { draft, feedback_id: null, parcel: null, upload_session_id: uuid }
+        body: { draft, feedback_id: null, parcel, upload_session_id: uuid }
       });
 
       if (!createResp.ok) {
@@ -2370,7 +2445,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
 
       const completeResp = await vintedFetch(session, `/api/v2/item_upload/drafts/${draftId}/completion`, {
         method: 'POST',
-        body: { draft: completionDraft, feedback_id: null, parcel: null, push_up: false, upload_session_id: completionDraft.temp_uuid }
+        body: { draft: completionDraft, feedback_id: null, parcel: parcel || null, push_up: false, upload_session_id: completionDraft.temp_uuid }
       });
 
       if (!completeResp.ok) {
