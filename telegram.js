@@ -1180,7 +1180,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
     if (data.startsWith('color:')) {
       const id = parseInt(data.split(':')[1]);
       const col = COLORS.find(x => x.id === id);
-      if (col) { c.listing.color1_id = col.id; c.listing.color = col.label; }
+      if (col) { c.listing.color1_id = col.id; c.listing.color = col.label; console.log(`[TG] Color selected: ${col.label} (id=${col.id})`); }
       if (c.step.startsWith('wiz_')) return wizardNext(chatId);
       c.step = 'review';
       return showSummary(chatId);
@@ -1443,6 +1443,71 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
     return scored.slice(0, 8);
   }
 
+  // Flatten Vinted catalog tree into searchable leaf nodes
+  function flattenCatalogs(catalogs, parentPath = '') {
+    const results = [];
+    for (const cat of catalogs) {
+      const path = parentPath ? `${parentPath} > ${cat.title}` : cat.title;
+      const children = cat.catalogs || cat.children || [];
+      if (children.length === 0) {
+        // Leaf category — these are the ones Vinted accepts
+        results.push({ id: cat.id, title: path, path });
+      } else {
+        // Also include parent if it has an ID (some parents are selectable)
+        results.push({ id: cat.id, title: path, path, hasChildren: true });
+        results.push(...flattenCatalogs(children, path));
+      }
+    }
+    return results;
+  }
+
+  // Search Vinted's live catalog API
+  let cachedCatalogs = null;
+  let catalogCacheTime = 0;
+  async function searchVintedCatalogs(chatId, keyword) {
+    const c = getChat(chatId);
+    const acct = activeAccount(c);
+    if (!acct) return [];
+
+    try {
+      // Cache catalogs for 1 hour
+      if (!cachedCatalogs || Date.now() - catalogCacheTime > 3600000) {
+        const session = await store.getSession(acct.userId);
+        if (!session) return [];
+        const resp = await vintedFetch(session, '/api/v2/catalogs');
+        if (!resp.ok) throw new Error(`Catalog API ${resp.status}`);
+        const data = await resp.json();
+        cachedCatalogs = flattenCatalogs(data.catalogs || []);
+        catalogCacheTime = Date.now();
+        console.log(`[TG] Cached ${cachedCatalogs.length} catalog entries from Vinted`);
+      }
+
+      const q = keyword.toLowerCase().trim();
+      if (!q) return [];
+
+      // Score each catalog entry
+      const scored = [];
+      for (const cat of cachedCatalogs) {
+        let score = 0;
+        const titleLower = cat.title.toLowerCase();
+        if (titleLower.includes(q)) score += 10;
+        // Exact segment match (e.g. "stroller" matches "Strollers & car seats")
+        const segments = titleLower.split(/[\s>]+/);
+        for (const seg of segments) {
+          if (seg.startsWith(q) || q.startsWith(seg)) score += 5;
+        }
+        // Penalize parent categories (prefer leaf nodes)
+        if (cat.hasChildren) score -= 3;
+        if (score > 0) scored.push({ ...cat, score });
+      }
+      scored.sort((a, b) => b.score - a.score);
+      return scored.slice(0, 8);
+    } catch (e) {
+      console.error('[TG] Vinted catalog search error:', e.message);
+      return [];
+    }
+  }
+
   // Use AI to suggest alternative category search terms
   async function aiCategoryTerms(itemDescription) {
     const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -1477,37 +1542,39 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
     const inWiz = c.step.startsWith('wiz_');
     const header = inWiz ? '📂 Step 4/9 — Category\n\n' : '';
 
-    // 1. Search hardcoded categories first (always works, no API needed)
-    let matches = searchCategoriesByKeyword(query);
-    console.log(`[TG] Category search "${query}": ${matches.length} local matches`);
+    // 1. Search Vinted's LIVE catalog API first (correct IDs guaranteed)
+    let matches = await searchVintedCatalogs(chatId, query);
+    console.log(`[TG] Category search "${query}": ${matches.length} live API matches`);
 
-    // 2. If no matches, try each part of category_hint
+    // 2. If API fails/no results, try each part of category_hint
     if (!matches.length && c.listing?.category_hint) {
       const parts = c.listing.category_hint.split('/').filter(p => p && p !== query);
       for (const part of parts) {
-        matches = searchCategoriesByKeyword(part);
+        matches = await searchVintedCatalogs(chatId, part);
         if (matches.length) { console.log(`[TG] Found via hint part "${part}"`); break; }
       }
     }
 
-    // 3. If still nothing, ask AI for alternative terms (cheap haiku call)
+    // 3. If still nothing, ask AI for alternative terms
     if (!matches.length) {
       const itemDesc = c.listing ? `${c.listing.title || ''} ${query}`.trim() : query;
       const altTerms = await aiCategoryTerms(itemDesc);
       console.log(`[TG] AI category terms: ${altTerms.join(', ')}`);
       for (const term of altTerms) {
-        matches = searchCategoriesByKeyword(term);
+        matches = await searchVintedCatalogs(chatId, term);
         if (matches.length) { console.log(`[TG] Found via AI term "${term}"`); break; }
       }
     }
 
+    // 4. Fallback to hardcoded categories if API unavailable
     if (!matches.length) {
-      // Last resort: show top-level categories to pick from
-      const topCats = CATEGORIES.filter((_, i) => i % 3 === 0).slice(0, 10);
-      const rows = topCats.map(m => [{ text: m.title, callback_data: `cat:${m.id}` }]);
-      rows.push([{ text: '🔍 Search different term', callback_data: 'cat:search' }]);
-      return bot.sendMessage(chatId, header + `No exact match for "${query}". Pick the closest category or search again:`, {
-        reply_markup: { inline_keyboard: rows }
+      matches = searchCategoriesByKeyword(query);
+      if (matches.length) console.log(`[TG] Using ${matches.length} hardcoded fallback matches`);
+    }
+
+    if (!matches.length) {
+      return bot.sendMessage(chatId, header + `No match for "${query}". Try a different term (e.g. "hoodie", "stroller", "trainers"):`, {
+        reply_markup: { inline_keyboard: [[{ text: '🔍 Search again', callback_data: 'cat:search' }]] }
       });
     }
 
@@ -1524,10 +1591,12 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
 
   async function selectCategory(chatId, catId) {
     const c = getChat(chatId);
-    // Look up name from hardcoded list
-    const match = CATEGORIES.find(x => x.id === catId);
+    // Look up name from live catalog cache first, then hardcoded list
+    const liveMatch = cachedCatalogs?.find(x => x.id === catId);
+    const match = liveMatch || CATEGORIES.find(x => x.id === catId);
     c.listing.catalog_id = catId;
     c.listing.category_name = match ? match.title : `ID: ${catId}`;
+    console.log(`[TG] Category selected: ${c.listing.category_name} (catalog_id=${catId}, source=${liveMatch ? 'live' : 'hardcoded'})`);
     c.listing.size_id = null;
     c.listing.size_name = '';
     if (c.step.startsWith('wiz_')) return wizardNext(chatId);
