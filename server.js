@@ -671,6 +671,24 @@ async function deleteVintedItem(session, itemId, label) {
   return false;
 }
 
+// Save a backup of an item after successful repost so future reposts have data
+async function saveItemBackup(userId, item) {
+  if (!db.hasDb() || !item || !item.id) return;
+  try {
+    const price = typeof item.price === 'object' ? parseFloat(item.price?.amount||0) : parseFloat(item.price||0);
+    const photos = Array.isArray(item.photos) ? item.photos.map(p => ({ id: p.id, url: p.url || p.full_size_url || null })) : [];
+    await db.query(`
+      INSERT INTO rp_item_backups (user_id,item_id,title,description,price,currency,brand,size,photos,raw_data)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+    `, [userId, String(item.id), item.title||'', item.description||'', price, item.currency||'GBP',
+        item.brand||'', item.size||'', JSON.stringify(photos), JSON.stringify(item)]);
+    await db.query(`
+      DELETE FROM rp_item_backups WHERE user_id=$1 AND item_id=$2
+        AND id NOT IN (SELECT id FROM rp_item_backups WHERE user_id=$1 AND item_id=$2 ORDER BY backed_up_at DESC LIMIT 5)
+    `, [userId, String(item.id)]);
+  } catch (e) { console.warn('[RP] Backup save failed:', e.message); }
+}
+
 // ═══ VINTED PROXY ═══
 async function vintedFetch(session, urlPath, options = {}) {
   const domain = session.domain || 'www.vinted.co.uk';
@@ -933,6 +951,9 @@ app.post('/api/vinted/items/:itemId/repost', auth, async (req, res) => {
       if (db.hasDb()) {
         try { await db.query('UPDATE rp_items SET item_id=$1, repost_count=repost_count+1, last_repost=NOW() WHERE item_id=$2 AND user_id=$3', [newId, itemId, req.user.id]); } catch(_) {}
       }
+      // Backup the new item so future reposts have data
+      const newItem = Object.assign({}, item, { id: newId });
+      await saveItemBackup(req.user.id, newItem);
     }
     console.log(`[RP] Reposted ${itemId} → ${newId} (${completeResp.status})`);
     res.json({ ok:completeResp.ok, oldId:itemId, newId, published:completeResp.ok, details:completeBody });
@@ -1013,6 +1034,8 @@ app.post('/api/repost-queue', auth, async (req, res) => {
           if (db.hasDb()) {
             try { await db.query('UPDATE rp_items SET item_id=$1, repost_count=repost_count+1, last_repost=NOW() WHERE item_id=$2 AND user_id=$3', [newId, itemId, userId]); } catch(_) {}
           }
+          const newItem = Object.assign({}, item, { id: newId });
+          await saveItemBackup(userId, newItem);
         } else {
           await logAction(userId, 'repost', { itemId, itemTitle:item.title, status:'failed', details:{ source:'backend-queue', error:`Publish failed (${completeResp.status})` } });
         }
@@ -1345,6 +1368,8 @@ async function checkAllSchedules() {
                 await db.query(`UPDATE rp_items SET item_id=$1, repost_count=repost_count+1, last_repost=NOW() WHERE item_id=$2 AND user_id=$3`, [newId, itemId, userId]);
               } catch (_) {}
             }
+            const newItem = Object.assign({}, item, { id: newId });
+            await saveItemBackup(userId, newItem);
           } else {
             console.log(`[RP-cron] Publish failed for ${itemId} → ${newId}: ${completeResp.status}`);
             await logAction(userId, 'repost', { itemId, itemTitle: item.title, status: 'failed', details: { source: 'server-schedule', scheduleId: row.id, error: `Publish failed (${completeResp.status})` } });
