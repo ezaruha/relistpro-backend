@@ -195,6 +195,8 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     const c = chats.get(chatId);
     if (!c) return;
     try {
+      const accts = JSON.stringify(c.accounts || []);
+      console.log(`[TG] Saving state: chat=${chatId} accounts=${c.accounts?.length || 0} idx=${c.activeIdx} step=${c.step}`);
       await db.query(
         `INSERT INTO rp_telegram_chats (chat_id, accounts, active_idx, listing, photos, wizard_idx, step)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -203,7 +205,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
            wizard_idx=$6, step=$7, updated_at=NOW()`,
         [
           String(chatId),
-          JSON.stringify(c.accounts || []),
+          accts,
           c.activeIdx ?? -1,
           c.listing ? JSON.stringify(c.listing) : null,
           c.photos?.length ? JSON.stringify(c.photos) : null,
@@ -211,6 +213,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
           c.step || 'idle'
         ]
       );
+      console.log(`[TG] State saved OK for chat ${chatId}`);
     } catch (e) { console.error('[TG] Save state error:', e.message); }
   }
 
@@ -236,15 +239,24 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       );
       if (r.rows[0]) {
         const row = r.rows[0];
-        return {
-          accounts: typeof row.accounts === 'string' ? JSON.parse(row.accounts) : (row.accounts || []),
+        // pg returns JSONB as parsed objects, but handle string fallback too
+        const parseJsonb = (val, fallback) => {
+          if (!val) return fallback;
+          if (typeof val === 'string') { try { return JSON.parse(val); } catch { return fallback; } }
+          return val;
+        };
+        const result = {
+          accounts: parseJsonb(row.accounts, []),
           activeIdx: row.active_idx,
-          listing: row.listing ? (typeof row.listing === 'string' ? JSON.parse(row.listing) : row.listing) : null,
-          photos: row.photos ? (typeof row.photos === 'string' ? JSON.parse(row.photos) : row.photos) : null,
+          listing: parseJsonb(row.listing, null),
+          photos: parseJsonb(row.photos, null),
           wizardIdx: row.wizard_idx ?? 0,
           step: row.step || 'idle'
         };
+        console.log(`[TG] Loaded state: chat=${chatId} accounts=${result.accounts.length} idx=${result.activeIdx} step=${result.step}`);
+        return result;
       }
+      console.log(`[TG] No saved state for chat ${chatId}`);
     } catch (e) { console.error('[TG] Load state error:', e.message); }
     return null;
   }
@@ -490,7 +502,8 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         c.activeIdx = c.accounts.length - 1;
       }
       c.step = 'idle';
-      saveChatState(chatId);
+      await saveChatState(chatId);
+      console.log(`[TG] Login complete: chat=${chatId} accounts=${c.accounts.length} idx=${c.activeIdx} user=${username}`);
 
       const vintedLabel = vintedName || username;
       const countMsg = c.accounts.length > 1 ? `\n${c.accounts.length} accounts linked\\. Use /switch to change\\.` : '';
@@ -590,6 +603,13 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     await ensureLoaded(chatId);
     const c = getChat(chatId);
     ensureMulti(c);
+    console.log(`[TG] Photo received: chat=${chatId} accounts=${c.accounts?.length} idx=${c.activeIdx} step=${c.step}`);
+    // If no account in memory, force a fresh DB load (in case save was delayed)
+    if (!activeAccount(c) && db && db.hasDb()) {
+      loadedFromDb.delete(chatId);
+      await ensureLoaded(chatId);
+      console.log(`[TG] Force reload: accounts=${c.accounts?.length} idx=${c.activeIdx}`);
+    }
     if (!activeAccount(c)) return bot.sendMessage(chatId, 'Not connected. Use /login first.');
 
     // If in review with no photos, accept photos for the current listing
