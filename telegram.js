@@ -1456,9 +1456,9 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       const path = parentPath ? `${parentPath} > ${cat.title || ''}` : (cat.title || '');
       const children = cat.catalogs || cat.children || [];
       if (!Array.isArray(children) || children.length === 0) {
+        // Only leaf categories — Vinted rejects parent IDs at completion
         results.push({ id: cat.id, title: path, path });
       } else {
-        results.push({ id: cat.id, title: path, path, hasChildren: true });
         results.push(...flattenCatalogs(children, path, depth + 1));
       }
     }
@@ -1513,8 +1513,6 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
           }
         }
 
-        // Penalize parent categories (prefer leaf nodes)
-        if (cat.hasChildren) score -= 3;
         if (score > 0) scored.push({ ...cat, score });
       }
       scored.sort((a, b) => b.score - a.score);
