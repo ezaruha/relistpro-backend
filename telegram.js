@@ -880,30 +880,52 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
   bot.onText(/\/start(?:@\S+)?/, async (msg) => {
     await ensureLoaded(msg.chat.id);
+    const c = getChat(msg.chat.id);
+    ensureMulti(c);
+    const connected = activeAccount(c);
+
+    if (connected) {
+      // Already logged in — show quick guide
+      const name = esc(connected.vintedName || connected.username);
+      return bot.sendMessage(msg.chat.id,
+        `Welcome back\\! ✅ Connected as *${name}*\n\n` +
+        `📸 *Send photos* of an item to list it on Vinted\n` +
+        `Add a caption with details like "Nike hoodie size M £25"\n\n` +
+        `*Commands:*\n` +
+        `/status — check your Vinted session\n` +
+        `/switch — switch between accounts\n` +
+        `/cancel — abort current listing\n` +
+        `/logout — disconnect account\n` +
+        `/help — show all commands`,
+        { parse_mode: 'MarkdownV2' }
+      );
+    }
+
+    // Not logged in — full setup guide
     bot.sendMessage(msg.chat.id,
       `Welcome to *RelistPro Bot* 🛍️\n\n` +
       `List items on Vinted in seconds — just send photos\\!\n\n` +
       `━━━━━━━━━━━━━━━━━━━━━━\n` +
-      `*How it works:*\n\n` +
-      `1️⃣ *Connect your account*\n` +
-      `Tap /login — I'll ask for your username and password step by step\n` +
-      `\\(Use your RelistPro account — register via the Chrome extension first\\)\n\n` +
-      `2️⃣ *Send photos*\n` +
-      `Take photos of your item and send them here \\(up to 20 photos\\)\\.  You can add a caption like "Nike hoodie size M £25"\n\n` +
-      `3️⃣ *AI generates your listing*\n` +
-      `Title, description, price, brand, condition — all auto\\-generated\\. You review and edit anything you want\\.\n\n` +
-      `4️⃣ *Pick category \\& post*\n` +
-      `Choose the Vinted category, size, parcel size, then hit *POST TO VINTED*\\.\n` +
+      `*Setup \\(one\\-time\\):*\n\n` +
+      `1️⃣ *Install the Chrome extension*\n` +
+      `Download RelistPro from the Chrome Web Store and install it\n\n` +
+      `2️⃣ *Create your account*\n` +
+      `Click the extension icon → Register with a username \\& password\n\n` +
+      `3️⃣ *Sync your Vinted session*\n` +
+      `Log into vinted\\.co\\.uk in Chrome\n` +
+      `Click the RelistPro extension → hit *Sync*\n` +
+      `This shares your Vinted login cookies with the bot\n\n` +
+      `4️⃣ *Connect here*\n` +
+      `Tap /login → enter your RelistPro username \\& password\n` +
       `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
-      `*Commands:*\n` +
-      `/login — connect your account\n` +
-      `/switch — switch between accounts\n` +
-      `/status — check connection\n` +
-      `/cancel — abort current listing\n` +
-      `/logout — disconnect account\n` +
-      `/help — show this again\n\n` +
+      `*Once connected:*\n` +
+      `📸 Send photos of your item\n` +
+      `🤖 AI generates title, description, price, brand\n` +
+      `✏️ Review \\& edit anything you want\n` +
+      `🚀 Hit POST TO VINTED — done\\!\n\n` +
       `*Multiple Vinted accounts?*\n` +
-      `Just /login with each RelistPro account \\(one per Vinted account\\), then use /switch to pick which one to post to\\.`,
+      `/login with each account, then /switch between them\n\n` +
+      `*Need help?* Tap /help anytime`,
       { parse_mode: 'MarkdownV2' }
     );
   });
@@ -1029,20 +1051,47 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     await ensureLoaded(msg.chat.id);
     const c = getChat(msg.chat.id);
     ensureMulti(c);
-    if (!c.accounts.length) return bot.sendMessage(msg.chat.id, 'Not connected. Use /login first.');
+    if (!c.accounts.length) return bot.sendMessage(msg.chat.id, 'Not connected yet.\n\nFollow these steps:\n1. Install RelistPro Chrome extension\n2. Register an account in the extension\n3. Log into vinted.co.uk → click extension → Sync\n4. Come back here and tap /login');
+
+    const statusMsg = await bot.sendMessage(msg.chat.id, 'Checking connection...');
 
     const lines = [];
     for (let i = 0; i < c.accounts.length; i++) {
       const a = c.accounts[i];
       const session = await store.getSession(a.userId);
       const active = i === c.activeIdx ? ' [active]' : '';
-      const vintedLabel = a.vintedName || session?.memberId || '?';
-      const vinted = session
-        ? `Vinted: ${vintedLabel} (${session.domain})`
-        : 'NO SESSION — sync from Chrome';
-      lines.push(`${i + 1}. ${a.username}${active}\n   ${vinted}`);
+      const vintedLabel = a.vintedName || a.username;
+
+      if (!session) {
+        lines.push(`${i + 1}. ${vintedLabel}${active}\n   ❌ No Vinted session — open Chrome → RelistPro extension → Sync`);
+        continue;
+      }
+
+      // Test if session is actually alive by making a lightweight API call
+      let sessionAlive = false;
+      try {
+        const testResp = await vintedFetch(session, '/api/v2/users/' + (session.memberId || 'self'));
+        sessionAlive = testResp.ok;
+        if (!sessionAlive && testResp.status === 401) {
+          // Try refreshing
+          try {
+            await refreshVintedSession(session, a.userId);
+            const retryResp = await vintedFetch(session, '/api/v2/users/' + (session.memberId || 'self'));
+            sessionAlive = retryResp.ok;
+          } catch {}
+        }
+      } catch {}
+
+      if (sessionAlive) {
+        lines.push(`${i + 1}. ${vintedLabel}${active}\n   ✅ Vinted session active (${session.domain})`);
+      } else {
+        lines.push(`${i + 1}. ${vintedLabel}${active}\n   ⚠️ Vinted session expired — open Chrome → RelistPro extension → Sync`);
+      }
     }
-    bot.sendMessage(msg.chat.id, `Linked accounts:\n\n${lines.join('\n\n')}`);
+
+    bot.editMessageText(`*Account Status*\n\n${lines.join('\n\n')}\n\n📸 Send photos to list an item`, {
+      chat_id: msg.chat.id, message_id: statusMsg.message_id, parse_mode: 'Markdown'
+    });
   });
 
   bot.onText(/\/switch(?:@\S+)?/, async (msg) => {
@@ -1115,7 +1164,29 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       await ensureLoaded(chatId);
       console.log(`[TG] Force reload: accounts=${c.accounts?.length} idx=${c.activeIdx}`);
     }
-    if (!activeAccount(c)) return bot.sendMessage(chatId, 'Not connected. Use /login first.');
+    if (!activeAccount(c)) return bot.sendMessage(chatId,
+      'Not connected yet.\n\n' +
+      'To get started:\n' +
+      '1. Install the RelistPro Chrome extension\n' +
+      '2. Register an account in the extension\n' +
+      '3. Log into vinted.co.uk → click extension → Sync\n' +
+      '4. Come back here → /login with your username & password');
+
+    // Pre-flight: check if Vinted session exists before user goes through wizard
+    if (c.step === 'idle') {
+      const acct = activeAccount(c);
+      try {
+        const sess = await store.getSession(acct.userId);
+        if (!sess) {
+          return bot.sendMessage(chatId,
+            '⚠️ No Vinted session found for ' + (acct.vintedName || acct.username) + '.\n\n' +
+            'To fix:\n' +
+            '1. Open vinted.co.uk in Chrome\n' +
+            '2. Click the RelistPro extension → Sync\n' +
+            '3. Come back here and send your photos again');
+        }
+      } catch {}
+    }
 
     // If in review with no photos, accept photos for the current listing
     if (c.step === 'review' && (!c.photos || !c.photos.length)) {
@@ -1928,7 +1999,13 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
     if (c.step === 'idle') {
       ensureMulti(c);
       if (!activeAccount(c)) {
-        return bot.sendMessage(chatId, 'To get started, connect your account with /login\n\nOnce logged in, send photos of an item to create a listing.');
+        return bot.sendMessage(chatId,
+          'To get started:\n' +
+          '1. Install RelistPro Chrome extension\n' +
+          '2. Register an account in the extension\n' +
+          '3. Log into vinted.co.uk → click extension → Sync\n' +
+          '4. Come back here → /login with your username & password\n\n' +
+          'Once logged in, send photos of an item to create a listing.');
       }
       const acctName = activeAccount(c)?.vintedName || activeAccount(c)?.username || 'Vinted';
       return bot.sendMessage(chatId, `📸 Send me photos of an item to list on ${acctName}!\n\nYou can also add a caption with details like "Nike hoodie size M £25".`);
@@ -2304,7 +2381,15 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
 
     if (!session) {
       c.step = 'review';
-      return bot.sendMessage(chatId, 'Vinted session expired. Sync from Chrome extension, then come back and tap POST again.');
+      return bot.sendMessage(chatId, '⚠️ No Vinted session found.\n\nTo fix:\n1. Open vinted.co.uk in Chrome\n2. Click RelistPro extension → Sync\n3. Come back here and tap POST again');
+    }
+
+    // Refresh session before posting to ensure cookies are fresh
+    try {
+      session = await refreshVintedSession(session, acct.userId);
+      console.log('[TG] Session refreshed before posting');
+    } catch (e) {
+      console.log('[TG] Pre-post session refresh failed:', e.message);
     }
 
     console.log(`[TG] Posting for ${acct.username}, domain=${session.domain}, csrf=${session.csrf?.slice(0,12)}..., cookies=${session.cookies?.length} chars`);
@@ -2500,6 +2585,9 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
 
       console.log(`[TG] Listed item ${draftId} for user ${activeAccount(c).username}`);
 
+      // Refresh session after posting so it stays alive for next listing
+      try { await refreshVintedSession(session, acct.userId); } catch {}
+
       // Reset state
       c.step = 'idle';
       c.photos = [];
@@ -2507,13 +2595,36 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       c.summaryMsgId = null;
       c.catalogCache = null;
       delete c._lastDraftId;
+      delete c._retried;
       saveChatState(chatId);
 
     } catch (e) {
       console.error('[TG] Listing error:', e.message);
 
-      // Vinted session expired — clear photos, keep listing, guide user
+      // Vinted session expired — try auto-refresh, then guide user
       if (e.message === 'SESSION_EXPIRED') {
+        // Try refreshing the session automatically
+        let refreshed = false;
+        try {
+          if (session) {
+            await refreshVintedSession(session, acct.userId);
+            // Quick test if refresh worked
+            const testResp = await vintedFetch(session, '/api/v2/users/' + (session.memberId || 'self'));
+            if (testResp.ok) {
+              refreshed = true;
+              console.log('[TG] Auto-refresh after SESSION_EXPIRED succeeded');
+            }
+          }
+        } catch {}
+
+        if (refreshed && !c._retried) {
+          // Retry posting with refreshed session (once only)
+          c._retried = true;
+          bot.sendMessage(chatId, '🔄 Session refreshed automatically. Retrying...');
+          return createListing(chatId);
+        }
+        delete c._retried;
+
         c.photos = [];
         c.step = 'review';
         saveChatState(chatId);
@@ -2521,8 +2632,8 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
         return bot.sendMessage(chatId,
           `⚠️ Vinted session expired for ${acctName}.\n\n` +
           `To fix this:\n` +
-          `1. Open Vinted in Chrome on your computer\n` +
-          `2. Click the RelistPro extension and sync\n` +
+          `1. Open vinted.co.uk in Chrome\n` +
+          `2. Click RelistPro extension → Sync\n` +
           `3. Come back here, send your photos again, and tap POST\n\n` +
           `Your listing details are saved — you only need to re-upload photos.`
         );
