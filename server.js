@@ -435,9 +435,9 @@ app.post('/api/sync', auth, async (req, res) => {
       for (const s of schedules) {
         const id = s.id || crypto.randomUUID();
         await db.query(`
-          INSERT INTO rp_schedules (id,user_id,name,active,freq,hour_of_day,start_hour,end_hour,item_ids,next_run,last_run,date,slot,executed)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT (id,user_id) DO NOTHING
-        `, [id, userId, s.name||'Schedule', s.active!==false, s.freq||1, s.hour||12, s.start||9, s.end||21, s.items||[], s.nextRun||null, s.lastRun||null, s.date||null, s.slot||null, s.executed||false]);
+          INSERT INTO rp_schedules (id,user_id,name,active,freq,hour_of_day,start_hour,end_hour,item_ids,next_run,last_run,date,slot,executed,tz_offset)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT (id,user_id) DO NOTHING
+        `, [id, userId, s.name||'Schedule', s.active!==false, s.freq||1, s.hour||12, s.start||9, s.end||21, s.items||[], s.nextRun||null, s.lastRun||null, s.date||null, s.slot||null, s.executed||false, s.tz_offset!=null?s.tz_offset:0]);
       }
     }
     // Save settings
@@ -551,7 +551,7 @@ app.get('/api/dashboard', auth, async (req, res) => {
     const schedules = schedulesR.rows.map(row => ({
       id:row.id, name:row.name, active:row.active, freq:row.freq, hour:row.hour_of_day,
       start:row.start_hour, end:row.end_hour, items:row.item_ids, nextRun:row.next_run, lastRun:row.last_run,
-      date:row.date||null, slot:row.slot||null, executed:row.executed||false
+      date:row.date||null, slot:row.slot||null, executed:row.executed||false, tz_offset:row.tz_offset||0
     }));
     const actions = actionsR.rows.map(row => ({
       id:row.id, type:row.type, itemId:row.item_id, newItemId:row.new_item_id,
@@ -1201,6 +1201,7 @@ async function checkAllSchedules() {
   try {
     const now = new Date();
     const rows = (await db.query('SELECT * FROM rp_schedules WHERE active=true')).rows;
+    console.log(`[RP-cron] Checking ${rows.length} active schedule(s) at ${now.toISOString()}`);
     for (const row of rows) {
       const userId = row.user_id;
       const items = row.item_ids || [];
@@ -1211,7 +1212,13 @@ async function checkAllSchedules() {
       if (row.date && row.slot) {
         // One-shot: date+slot model
         if (row.executed) continue;
-        const fireAt = new Date(row.date + 'T' + row.slot + ':00');
+        // Parse as UTC then adjust for user's timezone offset
+        // tz_offset is from getTimezoneOffset(): positive = west of UTC, negative = east
+        // e.g. BST (UTC+1) = -60. To convert user local time to UTC: add tz_offset minutes
+        const fireAt = new Date(row.date + 'T' + row.slot + ':00Z');
+        const tzOffset = row.tz_offset || 0;
+        fireAt.setMinutes(fireAt.getMinutes() + tzOffset);
+        console.log(`[RP-cron] Schedule ${row.id}: fireAt=${fireAt.toISOString()} (tz_offset=${tzOffset}), now=${now.toISOString()}, due=${fireAt <= now}`);
         if (isNaN(fireAt.getTime()) || fireAt > now) continue;
         isDue = true;
       } else {
@@ -1375,6 +1382,7 @@ const initTelegram = require('./telegram');
 
     // Server-side schedule executor — runs every 5 minutes, works even when browser is closed
     if (db.hasDb()) {
+      setTimeout(checkAllSchedules, 10000); // Run once 10s after startup
       setInterval(checkAllSchedules, 5 * 60 * 1000);
       console.log('[RP-cron] Schedule executor started (every 5 min)');
     }

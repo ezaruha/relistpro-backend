@@ -123,6 +123,7 @@ async function initSchema() {
         ALTER TABLE rp_schedules ADD COLUMN IF NOT EXISTS date TEXT;
         ALTER TABLE rp_schedules ADD COLUMN IF NOT EXISTS slot TEXT;
         ALTER TABLE rp_schedules ADD COLUMN IF NOT EXISTS executed BOOLEAN DEFAULT false;
+        ALTER TABLE rp_schedules ADD COLUMN IF NOT EXISTS tz_offset INTEGER DEFAULT 0;
       EXCEPTION WHEN OTHERS THEN NULL;
       END $$;
 
