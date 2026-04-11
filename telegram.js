@@ -2498,18 +2498,24 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
     // immediately sees the field buttons instead of having to tap "Edit".
     const editMode = c._summaryEditOpen || errFields.size > 0;
 
-    // If an edit just finished, always confirm it and show the edit grid
-    // for this render so the user can edit another field or tap POST.
-    let forceEditView = false;
+    // If an edit just finished, confirm it. In the error-walkthrough path
+    // we keep the field grid visible so the user can chew through each
+    // broken field; otherwise we show a clear two-button prompt asking
+    // whether to POST now or edit more.
+    let justEditedPrompt = false;
     if (c._justEdited) {
       const fieldLabel = c._justEdited;
-      text = `✅ Updated ${esc(fieldLabel)}\\. Post now or edit something else?\n\n` + text;
-      forceEditView = true;
+      text = `✅ Updated ${esc(fieldLabel)}\\.\n\n🚀 *Post to Vinted now, or edit more?*\n\n` + text;
+      if (errFields.size === 0) justEditedPrompt = true;
     }
     delete c._justEdited;
 
     let keyboard;
-    if (editMode || forceEditView) {
+    if (justEditedPrompt) {
+      keyboard = [];
+      if (ready) keyboard.push([{ text: '🚀 POST TO VINTED NOW', callback_data: 'post' }]);
+      keyboard.push([{ text: '✏️ Edit more', callback_data: 'edit:picker' }]);
+    } else if (editMode) {
       keyboard = [
         [{ text: warn('title', '✏️ Title'), callback_data: 'edit:title' }, { text: warn('description', '✏️ Description'), callback_data: 'edit:desc' }, { text: warn('price', '💰 Price'), callback_data: 'edit:price' }],
         [{ text: warn('category', '📂 Category'), callback_data: 'pick:cat' }, { text: warn('size', '📏 Size'), callback_data: 'pick:size' }, { text: warn('brand', '🏷️ Brand'), callback_data: 'edit:brand' }],
