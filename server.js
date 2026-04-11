@@ -1725,7 +1725,7 @@ app.get('/api/telegram/user-status', auth, async (req, res) => {
 
 app.post('/api/telegram/test', auth, async (req, res) => {
   const chatId = req.user.telegram_chat_id;
-  if (!chatId) return res.status(400).json({ error:'Telegram not linked. Send /login to @RelistProBot first.' });
+  if (!chatId) return res.status(400).json({ error:'Telegram not linked. Send /login to @vintedpostingbot first.' });
   try {
     const TelegramBot = require('node-telegram-bot-api');
     const token = process.env.TELEGRAM_BOT_TOKEN;

@@ -147,6 +147,68 @@ input{font-family:inherit}
 #toast.err{background:var(--red)}
 #toast.info{background:#1d1d1f}
 
+/* ── Dashboard ── */
+.dash{display:none;max-width:var(--max);margin:0 auto;padding:48px 24px;min-height:80vh}
+.dash-grid{display:grid;grid-template-columns:200px 1fr;gap:32px}
+.dash-side{position:sticky;top:80px;align-self:start}
+.dash-side a{display:block;padding:9px 14px;border-radius:8px;font-size:13px;font-weight:500;color:var(--sub);text-decoration:none;margin-bottom:2px;border-left:3px solid transparent;transition:.15s}
+.dash-side a:hover{color:var(--text);background:var(--card)}
+.dash-side a.active{color:var(--accent2);background:var(--card);border-left-color:var(--accent)}
+.dash-section{margin-bottom:40px}
+.dash-section h3{font-size:18px;font-weight:700;margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+.dcard{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin-bottom:12px}
+.dcard-t{font-size:13px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.dfield{margin-bottom:12px}
+.dfield label{display:block;font-size:11px;font-weight:500;color:var(--sub);margin-bottom:5px;text-transform:uppercase;letter-spacing:.05em}
+.dfield input{width:100%;background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;color:var(--text);font-size:13px;outline:none}
+.dfield input:focus{border-color:var(--accent)}
+.dfield input[readonly]{opacity:.6;cursor:default}
+.dbtn{display:inline-block;padding:9px 20px;border-radius:8px;font-size:13px;font-weight:600;border:none;cursor:pointer;transition:.15s}
+.dbtn-p{background:var(--accent);color:#fff}.dbtn-p:hover{background:var(--accent2)}
+.dbtn-s{background:var(--card2);color:var(--text);border:1px solid var(--border)}.dbtn-s:hover{border-color:var(--accent)}
+.dbtn-r{background:transparent;color:var(--red);border:1px solid var(--red)}.dbtn-r:hover{background:var(--red);color:#fff}
+.dbtn+.dbtn{margin-left:8px}
+.usage-row{display:flex;align-items:center;gap:12px;margin-bottom:10px}
+.usage-lbl{font-size:12px;color:var(--sub);width:100px;flex-shrink:0}
+.usage-bar{flex:1;height:6px;background:var(--card2);border-radius:3px;overflow:hidden}
+.usage-fill{height:100%;border-radius:3px;transition:width .4s}
+.usage-val{font-size:11px;color:var(--sub);width:60px;text-align:right;flex-shrink:0}
+.plan-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-top:16px}
+.plan-c{background:var(--card2);border:1px solid var(--border);border-radius:var(--radius);padding:18px;text-align:center}
+.plan-c.current{border-color:var(--accent);box-shadow:0 0 12px rgba(99,102,241,.1)}
+.plan-c .pname{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px}
+.plan-c .pprice{font-size:24px;font-weight:800;margin-bottom:8px}
+.plan-c .pfeats{font-size:11px;color:var(--sub);line-height:1.8;margin-bottom:12px}
+.conn-card{display:flex;align-items:center;gap:12px;padding:14px;background:var(--card2);border-radius:10px;margin-bottom:8px}
+.conn-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.conn-dot.on{background:var(--green)}.conn-dot.off{background:var(--red)}
+.conn-info{flex:1;min-width:0}
+.conn-name{font-size:13px;font-weight:600}
+.conn-detail{font-size:11px;color:var(--sub)}
+.ref-box{display:flex;align-items:center;gap:8px;background:var(--card2);border:2px dashed var(--border);border-radius:10px;padding:14px 18px;margin-bottom:12px}
+.ref-code{font-size:20px;font-weight:800;letter-spacing:4px;flex:1;color:var(--accent2)}
+.bill-table{width:100%;border-collapse:collapse;font-size:12px}
+.bill-table th,.bill-table td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--border)}
+.bill-table th{color:var(--sub);font-weight:600;text-transform:uppercase;letter-spacing:.05em;font-size:10px}
+.danger-card{border:1px solid var(--red)!important}
+.confirm-overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.7);z-index:3000;align-items:center;justify-content:center}
+.confirm-overlay.show{display:flex}
+.confirm-box{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:28px;width:380px;max-width:92vw}
+.confirm-box h3{font-size:16px;font-weight:700;margin-bottom:8px}
+.confirm-box p{font-size:13px;color:var(--sub);margin-bottom:16px;line-height:1.6}
+.confirm-box input{width:100%;background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--text);font-size:13px;margin-bottom:12px;outline:none}
+.confirm-btns{display:flex;gap:8px;justify-content:flex-end}
+#nav-marketing,#nav-account{display:contents}
+#nav-account{display:none}
+.nav-user{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--accent2);font-weight:600}
+.nav-avatar{width:28px;height:28px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700}
+
+@media(max-width:768px){
+  .dash-grid{grid-template-columns:1fr}
+  .dash-side{position:static;display:flex;overflow-x:auto;gap:4px;padding-bottom:8px;border-bottom:1px solid var(--border);margin-bottom:16px}
+  .dash-side a{white-space:nowrap;border-left:none;border-bottom:3px solid transparent;padding:8px 12px}
+  .dash-side a.active{border-left-color:transparent;border-bottom-color:var(--accent)}
+}
 @media(max-width:600px){
   .nav{padding:0 12px}
   .nav-inner{gap:12px}
@@ -154,6 +216,7 @@ input{font-family:inherit}
   .hero{padding:60px 16px 48px}
   .section{padding:48px 16px}
   .stats-inner{gap:24px}
+  .dash{padding:24px 12px}
 }
 </style>
 </head>
@@ -162,15 +225,25 @@ input{font-family:inherit}
 <!-- ── NAV ── -->
 <nav class="nav">
   <div class="nav-inner">
-    <div class="nav-logo">RelistPro</div>
-    <a href="#features" class="desk">Features</a>
-    <a href="#how" class="desk">How it Works</a>
-    <a href="#pricing" class="desk">Pricing</a>
-    <a href="#faq" class="desk">FAQ</a>
-    <a href="#" onclick="openAuth('login');return false" class="nav-cta">Sign In</a>
+    <div class="nav-logo" style="cursor:pointer" onclick="goHome()">RelistPro</div>
+    <span id="nav-marketing">
+      <a href="#features" class="desk">Features</a>
+      <a href="#how" class="desk">How it Works</a>
+      <a href="#pricing" class="desk">Pricing</a>
+      <a href="#faq" class="desk">FAQ</a>
+      <a href="#" onclick="openAuth('login');return false" class="nav-cta">Sign In</a>
+    </span>
+    <span id="nav-account">
+      <a href="#" onclick="scrollDash('dash-profile');return false" class="desk">My Account</a>
+      <a href="#" onclick="scrollDash('dash-subscription');return false" class="desk">Subscription</a>
+      <a href="#" onclick="scrollDash('dash-referral');return false" class="desk">Referral</a>
+      <span class="nav-user"><span class="nav-avatar" id="nav-initial">?</span><span id="nav-username"></span></span>
+      <a href="#" onclick="doSignOut();return false" class="nav-cta" style="background:var(--card2);border:1px solid var(--border);color:var(--text)">Sign Out</a>
+    </span>
   </div>
 </nav>
 
+<div id="marketing-view">
 <!-- ── HERO ── -->
 <section class="hero">
   <h1>Sell Faster on Vinted</h1>
@@ -226,11 +299,11 @@ input{font-family:inherit}
       <h2 style="font-size:32px;font-weight:800;margin-bottom:12px">Repost From Your Phone</h2>
       <p style="color:var(--sub);font-size:15px;line-height:1.7;margin-bottom:24px">The RelistPro Telegram Bot lets you list and repost items without touching your computer. Just send photos and the AI handles the rest.</p>
       <div style="margin-bottom:20px">
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px"><span style="background:var(--accent);color:#fff;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0">1</span><span style="font-size:14px">Open <strong>@RelistProBot</strong> on Telegram</span></div>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px"><span style="background:var(--accent);color:#fff;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0">1</span><span style="font-size:14px">Open <strong>@vintedpostingbot</strong> on Telegram</span></div>
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px"><span style="background:var(--accent);color:#fff;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0">2</span><span style="font-size:14px">Send <code style="background:var(--card2);padding:2px 8px;border-radius:4px;font-size:13px">/login username password</code></span></div>
         <div style="display:flex;align-items:center;gap:10px"><span style="background:var(--accent);color:#fff;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0">3</span><span style="font-size:14px">Send photos to create listings instantly</span></div>
       </div>
-      <a href="https://t.me/RelistProBot" target="_blank" style="display:inline-block;padding:12px 28px;background:var(--accent);color:#fff;border-radius:10px;font-weight:700;font-size:14px;text-decoration:none">Open Telegram Bot</a>
+      <a href="https://t.me/vintedpostingbot" target="_blank" style="display:inline-block;padding:12px 28px;background:var(--accent);color:#fff;border-radius:10px;font-weight:700;font-size:14px;text-decoration:none">Open Telegram Bot</a>
     </div>
     <div class="tg-chat">
       <div class="tg-msg">&#128247; <em>You sent 3 photos</em></div>
@@ -339,6 +412,141 @@ input{font-family:inherit}
   </div>
 </section>
 
+</div><!-- /marketing-view -->
+
+<!-- ── ACCOUNT DASHBOARD ── -->
+<div class="dash" id="account-view">
+  <div class="dash-grid">
+    <nav class="dash-side">
+      <a href="#dash-profile" class="active" onclick="scrollDash('dash-profile');return false">Profile</a>
+      <a href="#dash-subscription" onclick="scrollDash('dash-subscription');return false">Subscription</a>
+      <a href="#dash-connected" onclick="scrollDash('dash-connected');return false">Connected</a>
+      <a href="#dash-referral" onclick="scrollDash('dash-referral');return false">Referral</a>
+      <a href="#dash-billing" onclick="scrollDash('dash-billing');return false">Billing</a>
+      <a href="#dash-danger" onclick="scrollDash('dash-danger');return false">Danger Zone</a>
+    </nav>
+    <div>
+      <!-- Profile -->
+      <div class="dash-section" id="dash-profile">
+        <h3>Profile</h3>
+        <div class="dcard">
+          <div class="dfield"><label>Username</label><input id="d-username" readonly></div>
+          <div class="dfield"><label>Email</label><input id="d-email" placeholder="your@email.com"></div>
+          <button class="dbtn dbtn-p" onclick="dashSaveEmail()">Save Email</button>
+        </div>
+        <div class="dcard">
+          <div class="dcard-t">Change Password</div>
+          <div class="dfield"><label>Current Password</label><input id="d-curpw" type="password" placeholder="&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;"></div>
+          <div class="dfield"><label>New Password</label><input id="d-newpw" type="password" placeholder="min 8 characters"></div>
+          <div class="dfield"><label>Confirm New Password</label><input id="d-cfmpw" type="password" placeholder="confirm password"></div>
+          <button class="dbtn dbtn-p" onclick="dashChangePw()">Update Password</button>
+        </div>
+        <div style="font-size:11px;color:var(--sub);margin-top:8px">Member since <span id="d-since">—</span></div>
+      </div>
+
+      <!-- Subscription -->
+      <div class="dash-section" id="dash-subscription">
+        <h3>Subscription</h3>
+        <div class="dcard">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+            <span style="font-size:14px;font-weight:700">Current Plan:</span>
+            <span id="d-plan-badge" style="padding:3px 14px;border-radius:20px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;background:var(--card2);color:var(--sub)">Free</span>
+            <span id="d-plan-expiry" style="font-size:12px;color:var(--sub)"></span>
+          </div>
+          <div id="d-usage">
+            <div class="usage-row"><span class="usage-lbl">Reposts</span><div class="usage-bar"><div class="usage-fill" id="u-reposts" style="width:0%;background:var(--green)"></div></div><span class="usage-val" id="u-reposts-txt">0/0</span></div>
+            <div class="usage-row"><span class="usage-lbl">Active Items</span><div class="usage-bar"><div class="usage-fill" id="u-items" style="width:0%;background:var(--accent)"></div></div><span class="usage-val" id="u-items-txt">0/0</span></div>
+            <div class="usage-row"><span class="usage-lbl">Schedules</span><div class="usage-bar"><div class="usage-fill" id="u-schedules" style="width:0%;background:#f59e0b"></div></div><span class="usage-val" id="u-schedules-txt">0/0</span></div>
+          </div>
+        </div>
+        <div class="plan-cards" id="d-plan-cards">
+          <div class="plan-c" id="pc-free"><div class="pname" style="color:var(--sub)">Free</div><div class="pprice">&#163;0</div><div class="pfeats">10 items &#183; 5 reposts/mo<br>Basic photo editing<br>1 month analytics</div><button class="dbtn dbtn-s" id="pcb-free" disabled>Current</button></div>
+          <div class="plan-c" id="pc-starter"><div class="pname" style="color:var(--accent2)">Starter</div><div class="pprice">&#163;4.99<span style="font-size:13px;font-weight:400;color:var(--sub)">/mo</span></div><div class="pfeats">50 items &#183; 30 reposts/mo<br>2 schedules &#183; Full photos<br>3 months analytics</div><button class="dbtn dbtn-p" id="pcb-starter" onclick="dashUpgrade('starter')">Upgrade</button></div>
+          <div class="plan-c" id="pc-pro"><div class="pname" style="color:#f59e0b">Pro</div><div class="pprice">&#163;9.99<span style="font-size:13px;font-weight:400;color:var(--sub)">/mo</span></div><div class="pfeats">Unlimited everything<br>Auto-reply &#183; Telegram<br>Priority support</div><button class="dbtn dbtn-p" id="pcb-pro" onclick="dashUpgrade('pro')">Upgrade</button></div>
+        </div>
+        <div style="margin-top:16px;display:flex;gap:8px" id="d-sub-actions">
+          <button class="dbtn dbtn-s" onclick="dashPortal()" id="d-btn-portal" style="display:none">Manage Billing</button>
+          <button class="dbtn dbtn-r" onclick="dashCancel()" id="d-btn-cancel" style="display:none">Cancel Subscription</button>
+        </div>
+      </div>
+
+      <!-- Connected Accounts -->
+      <div class="dash-section" id="dash-connected">
+        <h3>Connected Accounts</h3>
+        <div class="dcard">
+          <div class="dcard-t">Vinted</div>
+          <div class="conn-card">
+            <div class="conn-dot off" id="d-vinted-dot"></div>
+            <div class="conn-info"><div class="conn-name" id="d-vinted-domain">Not connected</div><div class="conn-detail" id="d-vinted-detail">Install the Chrome extension and sync to connect</div></div>
+          </div>
+        </div>
+        <div class="dcard">
+          <div class="dcard-t">Telegram</div>
+          <div class="conn-card">
+            <div class="conn-dot off" id="d-tg-dot"></div>
+            <div class="conn-info"><div class="conn-name" id="d-tg-name">Not connected</div><div class="conn-detail" id="d-tg-detail">Open @RelistProBot and send /login username password</div></div>
+          </div>
+          <div style="margin-top:8px;display:flex;gap:8px">
+            <button class="dbtn dbtn-s" onclick="dashTgTest()" id="d-tg-test" style="display:none">Send Test</button>
+            <button class="dbtn dbtn-r" onclick="dashTgUnlink()" id="d-tg-unlink" style="display:none">Unlink</button>
+            <a href="https://t.me/RelistProBot" target="_blank" class="dbtn dbtn-s" style="text-decoration:none">Open Bot</a>
+          </div>
+        </div>
+      </div>
+
+      <!-- Referral -->
+      <div class="dash-section" id="dash-referral">
+        <h3>Referral Programme</h3>
+        <div class="dcard">
+          <p style="font-size:13px;color:var(--sub);margin-bottom:14px">Share your code — both you and your friend get 1 free month of Starter.</p>
+          <div class="ref-box">
+            <span class="ref-code" id="d-ref-code">———</span>
+            <button class="dbtn dbtn-p" onclick="dashCopyRef()">Copy</button>
+          </div>
+          <div style="display:flex;gap:24px;margin-top:12px">
+            <div><span style="font-size:20px;font-weight:800;color:var(--accent2)" id="d-ref-count">0</span><br><span style="font-size:11px;color:var(--sub)">Friends Referred</span></div>
+            <div><span style="font-size:20px;font-weight:800;color:var(--green)" id="d-ref-rewards">0</span><br><span style="font-size:11px;color:var(--sub)">Months Earned</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Billing History -->
+      <div class="dash-section" id="dash-billing">
+        <h3>Billing History</h3>
+        <div class="dcard">
+          <table class="bill-table">
+            <thead><tr><th>Date</th><th>Amount</th><th>Status</th><th></th></tr></thead>
+            <tbody id="d-bill-body"><tr><td colspan="4" style="text-align:center;color:var(--sub);padding:24px">No payments yet</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Danger Zone -->
+      <div class="dash-section" id="dash-danger">
+        <h3>Danger Zone</h3>
+        <div class="dcard danger-card">
+          <div class="dcard-t" style="color:var(--red)">Delete Account</div>
+          <p style="font-size:12px;color:var(--sub);margin-bottom:12px">This permanently deletes your account, all data, and cancels any active subscription. This action cannot be undone.</p>
+          <button class="dbtn dbtn-r" onclick="dashDeleteAccount()">Delete My Account</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── CONFIRM MODAL ── -->
+<div class="confirm-overlay" id="confirmOverlay">
+  <div class="confirm-box">
+    <h3 id="confirm-title">Confirm</h3>
+    <p id="confirm-msg">Are you sure?</p>
+    <input id="confirm-input" style="display:none" placeholder="">
+    <div class="confirm-btns">
+      <button class="dbtn dbtn-s" onclick="closeConfirm()">Cancel</button>
+      <button class="dbtn dbtn-r" id="confirm-ok" onclick="">Confirm</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── FOOTER ── -->
 <footer class="footer">
   <div class="footer-inner">
@@ -350,8 +558,8 @@ input{font-family:inherit}
       <a href="#features">Features</a>
       <a href="#pricing">Pricing</a>
       <a href="#faq">FAQ</a>
-      <a href="https://t.me/RelistProBot" target="_blank">Telegram Bot</a>
-      <a href="#" onclick="openAuth('login');return false">Sign In</a>
+      <a href="https://t.me/vintedpostingbot" target="_blank">Telegram Bot</a>
+      <a href="#" onclick="token?checkAuthState():openAuth('login');return false" id="footer-signin">Sign In</a>
     </div>
   </div>
 </footer>
@@ -398,6 +606,7 @@ input{font-family:inherit}
 <script>
 const API = '';
 let token = localStorage.getItem('rp_token') || '';
+let _profileData = null;
 
 function toast(msg, type) {
   const el = document.getElementById('toast');
@@ -407,14 +616,22 @@ function toast(msg, type) {
   el._t = setTimeout(() => el.className = '', type === 'err' ? 5000 : 3000);
 }
 
-// Auth modal
+// ── API helper ──
+async function apiFetch(url, opts = {}) {
+  if (!opts.headers) opts.headers = {};
+  if (token) opts.headers['Authorization'] = 'Bearer ' + token;
+  if (opts.body && !opts.headers['Content-Type']) opts.headers['Content-Type'] = 'application/json';
+  const r = await fetch(API + url, opts);
+  if (r.status === 401) { doSignOut(); throw new Error('Session expired'); }
+  return r;
+}
+
+// ── Auth modal ──
 function openAuth(tab) {
   document.getElementById('authOverlay').classList.add('show');
   showAuthTab(tab || 'login');
 }
-function closeAuth() {
-  document.getElementById('authOverlay').classList.remove('show');
-}
+function closeAuth() { document.getElementById('authOverlay').classList.remove('show'); }
 function showAuthTab(t) {
   document.getElementById('tabLogin').classList.toggle('on', t === 'login');
   document.getElementById('tabReg').classList.toggle('on', t === 'register');
@@ -429,11 +646,9 @@ function showForgot() {
   document.getElementById('loginForm').style.display = 'none';
   document.getElementById('regForm').style.display = 'none';
 }
-
 function showErr(msg) {
   const el = document.getElementById('auth-err');
-  el.textContent = msg;
-  el.style.display = 'block';
+  el.textContent = msg; el.style.display = 'block';
 }
 
 async function doLogin() {
@@ -447,7 +662,7 @@ async function doLogin() {
     token = d.token;
     localStorage.setItem('rp_token', token);
     closeAuth();
-    toast('Signed in! Install the Chrome extension to start reposting.', 'ok');
+    checkAuthState();
   } catch(e) { showErr('Network error'); }
 }
 
@@ -464,18 +679,11 @@ async function doRegister() {
     if (!r.ok) { showErr(d.error || 'Registration failed'); return; }
     token = d.token;
     localStorage.setItem('rp_token', token);
-    // Apply referral code if provided
     if (ref) {
-      try {
-        const profR = await fetch(API + '/api/user/profile', { headers: { 'Authorization': 'Bearer ' + token } });
-        const prof = await profR.json();
-        if (prof.ok) {
-          await fetch(API + '/api/referral/apply', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: ref, userId: prof.username }) });
-        }
-      } catch(e) {}
+      try { await apiFetch('/api/referral/apply', { method: 'POST', body: JSON.stringify({ code: ref }) }); } catch(e) {}
     }
     closeAuth();
-    toast('Account created! Install the Chrome extension to get started.', 'ok');
+    checkAuthState();
   } catch(e) { showErr('Network error'); }
 }
 
@@ -507,25 +715,341 @@ async function doReset() {
   } catch(e) { showErr('Network error'); }
 }
 
-// Enter key for auth
+// ── View switching ──
+function showMarketing() {
+  document.getElementById('marketing-view').style.display = '';
+  document.getElementById('account-view').style.display = 'none';
+  document.getElementById('nav-marketing').style.display = 'contents';
+  document.getElementById('nav-account').style.display = 'none';
+}
+
+function showDashboard(username) {
+  document.getElementById('marketing-view').style.display = 'none';
+  document.getElementById('account-view').style.display = 'block';
+  document.getElementById('nav-marketing').style.display = 'none';
+  document.getElementById('nav-account').style.display = 'contents';
+  document.getElementById('nav-username').textContent = username || '';
+  document.getElementById('nav-initial').textContent = (username || '?')[0].toUpperCase();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function goHome() {
+  if (token) {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  } else {
+    showMarketing();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+}
+
+function doSignOut() {
+  token = '';
+  localStorage.removeItem('rp_token');
+  _profileData = null;
+  showMarketing();
+  toast('Signed out', 'info');
+}
+
+async function checkAuthState() {
+  if (!token) { showMarketing(); return; }
+  try {
+    const r = await fetch(API + '/api/user/profile', { headers: { 'Authorization': 'Bearer ' + token } });
+    if (r.status === 401) { doSignOut(); return; }
+    if (!r.ok) { showMarketing(); return; }
+    const prof = await r.json();
+    _profileData = prof;
+    showDashboard(prof.username);
+    loadDashboard(prof);
+  } catch(e) {
+    console.error('checkAuthState error:', e);
+    showMarketing();
+  }
+}
+
+// ── Dashboard data loading ──
+async function loadDashboard(prof) {
+  populateProfile(prof);
+  populateSubscription(prof);
+  // Load remaining data in parallel
+  Promise.allSettled([
+    apiFetch('/api/telegram/user-status').then(r => r.json()).then(d => populateTelegram(d)),
+    apiFetch('/api/referral/stats').then(r => r.json()).then(d => populateReferral(d)),
+    apiFetch('/api/user/billing-history').then(r => r.json()).then(d => populateBilling(d))
+  ]);
+}
+
+function populateProfile(prof) {
+  document.getElementById('d-username').value = prof.username || '';
+  document.getElementById('d-email').value = prof.email || '';
+  document.getElementById('d-since').textContent = prof.createdAt ? new Date(prof.createdAt).toLocaleDateString() : '—';
+}
+
+function populateSubscription(prof) {
+  const plan = prof.plan || 'free';
+  const badge = document.getElementById('d-plan-badge');
+  badge.textContent = plan.charAt(0).toUpperCase() + plan.slice(1);
+  const colors = { free: 'var(--card2)', starter: '#dbeafe', pro: '#fef3c7' };
+  const textColors = { free: 'var(--sub)', starter: '#1d4ed8', pro: '#92400e' };
+  badge.style.background = colors[plan] || colors.free;
+  badge.style.color = textColors[plan] || textColors.free;
+
+  // Expiry
+  const expiry = document.getElementById('d-plan-expiry');
+  if (prof.planExpires) {
+    expiry.textContent = 'Expires: ' + new Date(prof.planExpires).toLocaleDateString();
+  } else {
+    expiry.textContent = '';
+  }
+
+  // Usage bars
+  const usage = prof.usage || {};
+  const limits = prof.limits || {};
+  setUsageBar('reposts', usage.repostsThisMonth || 0, limits.reposts);
+  setUsageBar('items', usage.itemsTotal || 0, limits.items);
+  setUsageBar('schedules', usage.schedulesActive || 0, limits.schedules);
+
+  // Plan cards — highlight current
+  ['free', 'starter', 'pro'].forEach(p => {
+    const card = document.getElementById('pc-' + p);
+    const btn = document.getElementById('pcb-' + p);
+    if (p === plan) {
+      card.classList.add('current');
+      btn.textContent = 'Current';
+      btn.disabled = true;
+      btn.className = 'dbtn dbtn-s';
+    } else {
+      card.classList.remove('current');
+      btn.disabled = false;
+      if (p === 'free') {
+        btn.textContent = 'Downgrade';
+        btn.className = 'dbtn dbtn-s';
+      } else {
+        btn.textContent = 'Upgrade';
+        btn.className = 'dbtn dbtn-p';
+      }
+    }
+  });
+
+  // Show manage/cancel for paid plans
+  const isPaid = plan !== 'free';
+  document.getElementById('d-btn-portal').style.display = isPaid ? '' : 'none';
+  document.getElementById('d-btn-cancel').style.display = isPaid ? '' : 'none';
+}
+
+function setUsageBar(key, used, limit) {
+  const fill = document.getElementById('u-' + key);
+  const txt = document.getElementById('u-' + key + '-txt');
+  if (limit == null) {
+    txt.textContent = used + ' / \u221e';
+    fill.style.width = '0%';
+  } else {
+    const pct = limit ? Math.min(100, Math.round(used / limit * 100)) : 0;
+    txt.textContent = used + ' / ' + limit;
+    fill.style.width = pct + '%';
+    fill.style.background = pct >= 90 ? 'var(--red)' : pct >= 70 ? '#f59e0b' : 'var(--green)';
+  }
+}
+
+function populateTelegram(d) {
+  const dot = document.getElementById('d-tg-dot');
+  const name = document.getElementById('d-tg-name');
+  const detail = document.getElementById('d-tg-detail');
+  if (d && d.connected) {
+    dot.className = 'conn-dot on';
+    name.textContent = 'Connected' + (d.username ? ' as @' + d.username : '');
+    detail.textContent = 'Chat ID: ' + (d.chatId || '—');
+    document.getElementById('d-tg-test').style.display = '';
+    document.getElementById('d-tg-unlink').style.display = '';
+  } else {
+    dot.className = 'conn-dot off';
+    name.textContent = 'Not connected';
+    detail.textContent = 'Open @RelistProBot and send /login username password';
+    document.getElementById('d-tg-test').style.display = 'none';
+    document.getElementById('d-tg-unlink').style.display = 'none';
+  }
+}
+
+function populateReferral(d) {
+  if (d && d.code) {
+    document.getElementById('d-ref-code').textContent = d.code;
+    document.getElementById('d-ref-count').textContent = d.referralCount || 0;
+    document.getElementById('d-ref-rewards').textContent = d.rewardsEarned || 0;
+  }
+}
+
+function populateBilling(d) {
+  const tbody = document.getElementById('d-bill-body');
+  if (!d || !d.invoices || !d.invoices.length) {
+    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--sub);padding:24px">No payments yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = d.invoices.map(inv => {
+    const date = new Date(inv.date * 1000).toLocaleDateString();
+    const amt = inv.currency ? (inv.amount / 100).toFixed(2) + ' ' + inv.currency.toUpperCase() : '—';
+    const status = inv.status || '—';
+    const pdf = inv.pdf ? '<a href="' + inv.pdf + '" target="_blank" style="color:var(--accent2);font-size:11px">PDF</a>' : '';
+    return '<tr><td>' + date + '</td><td>' + amt + '</td><td>' + status + '</td><td>' + pdf + '</td></tr>';
+  }).join('');
+}
+
+// ── Dashboard actions ──
+async function dashSaveEmail() {
+  const email = document.getElementById('d-email').value.trim();
+  try {
+    const r = await apiFetch('/api/user/profile', { method: 'PATCH', body: JSON.stringify({ email }) });
+    const d = await r.json();
+    if (r.ok) { toast('Email updated', 'ok'); }
+    else { toast(d.error || 'Failed', 'err'); }
+  } catch(e) { toast('Network error', 'err'); }
+}
+
+async function dashChangePw() {
+  const cur = document.getElementById('d-curpw').value;
+  const nw = document.getElementById('d-newpw').value;
+  const cfm = document.getElementById('d-cfmpw').value;
+  if (!cur || !nw) { toast('Fill in all password fields', 'err'); return; }
+  if (nw.length < 8) { toast('New password must be at least 8 characters', 'err'); return; }
+  if (nw !== cfm) { toast('Passwords do not match', 'err'); return; }
+  try {
+    const r = await apiFetch('/api/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword: cur, newPassword: nw }) });
+    const d = await r.json();
+    if (r.ok) {
+      toast('Password changed', 'ok');
+      document.getElementById('d-curpw').value = '';
+      document.getElementById('d-newpw').value = '';
+      document.getElementById('d-cfmpw').value = '';
+    } else { toast(d.error || 'Failed', 'err'); }
+  } catch(e) { toast('Network error', 'err'); }
+}
+
+async function dashUpgrade(plan) {
+  try {
+    const r = await apiFetch('/api/subscriptions/checkout', { method: 'POST', body: JSON.stringify({ plan }) });
+    const d = await r.json();
+    if (d.url) { window.location.href = d.url; }
+    else { toast(d.error || 'Could not start checkout', 'err'); }
+  } catch(e) { toast('Network error', 'err'); }
+}
+
+async function dashCancel() {
+  showConfirm('Cancel Subscription', 'Your plan will downgrade to Free at the end of your billing period. Continue?', null, async () => {
+    try {
+      const r = await apiFetch('/api/subscriptions/cancel', { method: 'POST' });
+      const d = await r.json();
+      if (r.ok) { toast('Subscription cancelled', 'ok'); checkAuthState(); }
+      else { toast(d.error || 'Failed', 'err'); }
+    } catch(e) { toast('Network error', 'err'); }
+  });
+}
+
+async function dashPortal() {
+  try {
+    const r = await apiFetch('/api/subscriptions/portal', { method: 'POST' });
+    const d = await r.json();
+    if (d.url) { window.open(d.url, '_blank'); }
+    else { toast(d.error || 'Could not open portal', 'err'); }
+  } catch(e) { toast('Network error', 'err'); }
+}
+
+async function dashTgTest() {
+  try {
+    const r = await apiFetch('/api/telegram/test', { method: 'POST' });
+    const d = await r.json();
+    toast(d.ok ? 'Test message sent!' : (d.error || 'Failed'), d.ok ? 'ok' : 'err');
+  } catch(e) { toast('Network error', 'err'); }
+}
+
+async function dashTgUnlink() {
+  showConfirm('Unlink Telegram', 'This will disconnect your Telegram account. You can reconnect anytime.', null, async () => {
+    try {
+      const r = await apiFetch('/api/telegram/unlink', { method: 'POST' });
+      if (r.ok) { toast('Telegram unlinked', 'ok'); checkAuthState(); }
+      else { toast('Failed to unlink', 'err'); }
+    } catch(e) { toast('Network error', 'err'); }
+  });
+}
+
+function dashCopyRef() {
+  const code = document.getElementById('d-ref-code').textContent;
+  if (!code || code === '———') return;
+  navigator.clipboard.writeText(code).then(() => toast('Referral code copied!', 'ok')).catch(() => toast('Could not copy', 'err'));
+}
+
+function dashDeleteAccount() {
+  showConfirm('Delete Account', 'This will permanently delete your account and all data. Type "delete" to confirm.', 'delete', async () => {
+    try {
+      const r = await apiFetch('/api/user/account', { method: 'DELETE' });
+      if (r.ok) {
+        token = '';
+        localStorage.removeItem('rp_token');
+        _profileData = null;
+        showMarketing();
+        toast('Account deleted', 'info');
+      } else {
+        const d = await r.json();
+        toast(d.error || 'Failed', 'err');
+      }
+    } catch(e) { toast('Network error', 'err'); }
+  });
+}
+
+// ── Confirm modal ──
+let _confirmCb = null;
+function showConfirm(title, msg, requireInput, onConfirm) {
+  document.getElementById('confirm-title').textContent = title;
+  document.getElementById('confirm-msg').textContent = msg;
+  const inp = document.getElementById('confirm-input');
+  if (requireInput) {
+    inp.style.display = '';
+    inp.value = '';
+    inp.placeholder = 'Type "' + requireInput + '" to confirm';
+  } else {
+    inp.style.display = 'none';
+  }
+  _confirmCb = { fn: onConfirm, req: requireInput };
+  document.getElementById('confirm-ok').onclick = doConfirm;
+  document.getElementById('confirmOverlay').classList.add('show');
+}
+function closeConfirm() {
+  document.getElementById('confirmOverlay').classList.remove('show');
+  _confirmCb = null;
+}
+function doConfirm() {
+  if (!_confirmCb) return;
+  if (_confirmCb.req) {
+    const val = document.getElementById('confirm-input').value.trim().toLowerCase();
+    if (val !== _confirmCb.req) { toast('Type "' + _confirmCb.req + '" to confirm', 'err'); return; }
+  }
+  closeConfirm();
+  _confirmCb.fn();
+}
+
+// ── Dashboard sidebar scroll ──
+function scrollDash(id) {
+  const el = document.getElementById(id);
+  if (el) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    document.querySelectorAll('.dash-side a').forEach(a => a.classList.remove('active'));
+    const link = document.querySelector('.dash-side a[href="#' + id + '"]');
+    if (link) link.classList.add('active');
+  }
+}
+
+// ── Enter key + overlay dismiss ──
 document.getElementById('l-pw').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
 document.getElementById('r-pw').addEventListener('keydown', e => { if (e.key === 'Enter') doRegister(); });
 document.getElementById('authOverlay').addEventListener('click', e => { if (e.target === document.getElementById('authOverlay')) closeAuth(); });
+document.getElementById('confirmOverlay').addEventListener('click', e => { if (e.target === document.getElementById('confirmOverlay')) closeConfirm(); });
 
-// Load public stats
+// ── Public stats ──
 fetch(API + '/api/stats/public').then(r => r.json()).then(d => {
   if (d.totalReposts) document.getElementById('st-reposts').textContent = d.totalReposts.toLocaleString();
   if (d.totalUsers) document.getElementById('st-users').textContent = d.totalUsers.toLocaleString();
   if (d.totalItems) document.getElementById('st-items').textContent = d.totalItems.toLocaleString();
 }).catch(() => {});
 
-// Smooth scroll for anchor links
-document.querySelectorAll('a[href^="#"]').forEach(a => {
-  a.addEventListener('click', e => {
-    const target = document.querySelector(a.getAttribute('href'));
-    if (target) { e.preventDefault(); target.scrollIntoView({ behavior: 'smooth' }); }
-  });
-});
+// ── Boot ──
+checkAuthState();
 </script>
 </body>
 </html>
