@@ -562,6 +562,49 @@ const COLORS = [
   { id: 20, label: 'Coral' }, { id: 24, label: 'Light blue' },
 ];
 
+// Fuzzy color alias map — maps common AI descriptions to COLORS labels
+const COLOR_ALIASES = {
+  'dark blue': 'Navy', 'indigo': 'Navy', 'midnight': 'Navy', 'navy blue': 'Navy',
+  'royal blue': 'Blue', 'cobalt': 'Blue', 'electric blue': 'Blue',
+  'baby blue': 'Light blue', 'sky blue': 'Light blue', 'pale blue': 'Light blue', 'powder blue': 'Light blue',
+  'off white': 'Cream', 'off-white': 'Cream', 'ivory': 'Cream', 'ecru': 'Cream', 'nude': 'Cream', 'bone': 'Cream',
+  'hot pink': 'Pink', 'magenta': 'Pink', 'fuchsia': 'Pink', 'rose': 'Pink', 'salmon': 'Pink', 'blush': 'Pink',
+  'dark red': 'Burgundy', 'wine': 'Burgundy', 'maroon': 'Burgundy', 'oxblood': 'Burgundy', 'bordeaux': 'Burgundy', 'crimson': 'Burgundy',
+  'olive': 'Khaki', 'army green': 'Khaki', 'military green': 'Khaki', 'sage': 'Khaki',
+  'forest green': 'Green', 'dark green': 'Green', 'emerald': 'Green', 'mint': 'Green', 'lime': 'Green', 'moss': 'Green',
+  'lilac': 'Purple', 'lavender': 'Purple', 'violet': 'Purple', 'plum': 'Purple', 'mauve': 'Purple',
+  'camel': 'Brown', 'tan': 'Brown', 'chocolate': 'Brown', 'tobacco': 'Brown', 'rust': 'Brown', 'caramel': 'Brown', 'mocha': 'Brown',
+  'teal': 'Turquoise', 'aqua': 'Turquoise', 'cyan': 'Turquoise',
+  'charcoal': 'Grey', 'light grey': 'Grey', 'dark grey': 'Grey', 'gray': 'Grey', 'silver grey': 'Grey', 'slate': 'Grey',
+  'rose gold': 'Gold', 'champagne': 'Gold', 'bronze': 'Gold',
+  'multicolor': 'Multicolour', 'multi': 'Multicolour', 'multi-color': 'Multicolour', 'multicoloured': 'Multicolour', 'patterned': 'Multicolour', 'floral': 'Multicolour', 'striped': 'Multicolour', 'printed': 'Multicolour',
+  'coral pink': 'Coral', 'peach': 'Coral',
+  'mustard': 'Yellow', 'lemon': 'Yellow',
+  'tangerine': 'Orange', 'amber': 'Orange',
+  'jet black': 'Black', 'noir': 'Black',
+  'pure white': 'White', 'snow': 'White',
+  'beige': 'Beige',
+};
+
+// Clothing category IDs — used to decide when to append size to title
+// Built from CATEGORIES: Women/Men/Kids, excluding shoes/bags/accessories/etc.
+const CLOTHING_CATEGORY_IDS = new Set(
+  CATEGORIES
+    .filter(c => {
+      const title = (c.title || '').toLowerCase();
+      const isWMK = /^(women|men|kids) > /i.test(c.title || '');
+      const isNonClothing = /(shoes|bags|jewellery|accessories|beauty|grooming|toys|pushchairs|nursing|bathing|sleep)/i.test(title);
+      return isWMK && !isNonClothing;
+    })
+    .map(c => c.id)
+);
+
+// Live Vinted category tree cache (filled lazily on first category search)
+let _liveCatalogCache = null;
+let _catalogFetchPromise = null;
+let _catalogFetchedAt = 0;
+const CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
+
 // ── Chat sessions (in-memory, keyed by chatId) ──
 const chats = new Map();
 
@@ -1271,8 +1314,8 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     );
 
     try {
-      // Send up to 5 photos to AI (balances detection quality vs cost)
-      const photosForAI = c.photos.slice(0, 5).map(p => p.base64);
+      // Send up to 20 photos to AI (Anthropic limit) — more photos = better label detection
+      const photosForAI = c.photos.slice(0, 20).map(p => p.base64);
       const analysis = await analyzeWithAI(photosForAI, c.caption);
 
       // Map condition text to status_id
@@ -1280,11 +1323,21 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         x.label.toLowerCase() === (analysis.condition || '').toLowerCase()
       );
 
-      // Auto-match color
-      let colorId = null, colorName = analysis.color || '';
-      if (analysis.color) {
-        const colorMatch = COLORS.find(x => x.label.toLowerCase() === analysis.color.toLowerCase());
-        if (colorMatch) { colorId = colorMatch.id; colorName = colorMatch.label; }
+      // Auto-match primary color (fuzzy — aliases + partial)
+      const c1Match = matchColor(analysis.color);
+      let colorId = c1Match?.id || null;
+      let colorName = c1Match?.label || analysis.color || '';
+
+      // Auto-match secondary color (fuzzy)
+      const c2Match = matchColor(analysis.color2);
+      let color2Id = c2Match?.id || null;
+      let color2Name = c2Match?.label || '';
+
+      // Auto-match parcel size from AI recommendation
+      let pkgId = null, pkgName = '';
+      if (analysis.parcel_size) {
+        const pkgMatch = PACKAGE_SIZES.find(p => p.title.toLowerCase() === analysis.parcel_size.toLowerCase());
+        if (pkgMatch) { pkgId = pkgMatch.id; pkgName = pkgMatch.title; }
       }
 
       c.listing = {
@@ -1303,10 +1356,16 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         size_hint: analysis.size_hint || '',
         color: colorName,
         color1_id: colorId,
+        color2: color2Name,
+        color2_id: color2Id,
         material: analysis.material || '',
-        package_size_id: null,
-        package_size_name: '',
+        gender: analysis.gender || '',
+        package_size_id: pkgId,
+        package_size_name: pkgName,
+        aiConfidence: analysis.confidence || { brand: 'medium', size: 'medium', color: 'medium' },
       };
+
+      console.log(`[TG] AI analysis: brand=${analysis.brand}, size=${analysis.size_hint}, color=${analysis.color}/${analysis.color2}, material=${analysis.material}, parcel=${analysis.parcel_size}, gender=${analysis.gender}`);
 
       // Start wizard at step 0 (title)
       c.wizardIdx = 0;
@@ -1331,12 +1390,17 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
     if (stepName === 'title') {
       c.step = 'wiz_title';
+      const conf = L.aiConfidence || {};
+      const warnTag = (key) => conf[key] === 'low' ? ' ⚠️ (low confidence — verify)' : '';
       let detected = '';
-      if (L.brand) detected += `  Brand: ${L.brand}\n`;
-      if (L.size_hint) detected += `  Size: ${L.size_hint}\n`;
+      if (L.brand) detected += `  Brand: ${L.brand}${warnTag('brand')}\n`;
+      if (L.size_hint) detected += `  Size: ${L.size_hint}${warnTag('size')}\n`;
       if (L.material) detected += `  Material: ${L.material}\n`;
-      if (L.color) detected += `  Colour: ${L.color}\n`;
-      if (detected) detected = `\nDetected:\n${detected}`;
+      if (L.color) detected += `  Colour: ${L.color}${L.color2 ? ' / ' + L.color2 : ''}${warnTag('color')}\n`;
+      if (L.condition) detected += `  Condition: ${L.condition}\n`;
+      if (L.gender) detected += `  Gender: ${L.gender}\n`;
+      if (L.package_size_name) detected += `  Parcel: ${L.package_size_name}\n`;
+      if (detected) detected = `\nAI detected from photos:\n${detected}`;
       return bot.sendMessage(chatId,
         `📝 Step 1/9 — Title\n\n` +
         `AI suggestion:\n"${L.title}"${detected}\n\n` +
@@ -1413,15 +1477,19 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       const rows = [];
       for (let i = 0; i < COLORS.length; i += 3) {
         rows.push(COLORS.slice(i, i + 3).map(x => ({
-          text: x.label + (x.id === L.color1_id ? ' ✓' : ''), callback_data: `color:${x.id}`
+          text: x.label + (x.id === L.color1_id ? ' ✓' : (x.id === L.color2_id ? ' ✓2' : '')),
+          callback_data: `color:${x.id}`
         })));
       }
-      if (L.color1_id) rows.push([{ text: '✅ Keep: ' + L.color, callback_data: 'wiz:accept' }]);
-      rows.push([{ text: '⏭️ Skip', callback_data: 'wiz:accept' }]);
-      return bot.sendMessage(chatId,
-        `🎨 Step 7/9 — Colour\n\nAI detected: ${L.color || 'Not set'}\n\nTap a colour below, or skip:`,
-        { reply_markup: { inline_keyboard: rows } }
-      );
+      const colorDisplay = L.color ? (L.color2 ? `${L.color} / ${L.color2}` : L.color) : 'Not detected';
+      const lowConf = L.aiConfidence?.color === 'low';
+      const forcePick = !L.color1_id || lowConf;
+      if (L.color1_id && !forcePick) rows.push([{ text: '✅ Keep: ' + colorDisplay, callback_data: 'wiz:accept' }]);
+      rows.push([{ text: '⏭️ Skip (may stay as draft on Vinted)', callback_data: 'wiz:accept' }]);
+      const prompt = forcePick
+        ? `🎨 Step 7/9 — Colour\n\n⚠️ Color ${!L.color1_id ? 'not detected' : 'low confidence'}${L.color ? ` (AI said "${L.color}")` : ''}.\nPlease pick one — items without a colour often stay as drafts on Vinted.`
+        : `🎨 Step 7/9 — Colour\n\nAI detected: ${colorDisplay}\n\nTap a colour below, or skip:`;
+      return bot.sendMessage(chatId, prompt, { reply_markup: { inline_keyboard: rows } });
     }
 
     if (stepName === 'brand') {
@@ -1468,20 +1536,36 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
     const captionCtx = caption ? `\n\nThe seller provided this info: "${caption}"  — use it to fill in details like brand, size, price, etc. Trust the seller's info over visual guesses.` : '';
 
-    const imageBlocks = photos.slice(0, 5).map(p => ({
+    const imageBlocks = photos.slice(0, 20).map(p => ({
       type: 'image',
       source: { type: 'base64', media_type: 'image/jpeg', data: typeof p === 'string' ? p : p.base64 || p }
     }));
 
-    const systemPrompt = `Expert Vinted UK reseller. Create listings that sell fast.
+    const systemPrompt = `Expert Vinted UK reseller. Analyze every detail from photos to create perfect listings.
 
-TITLE: Max 60 chars. Format: [Brand] [Item] [Detail] [Size]. Search-friendly words only. Brand first if visible.
-DESCRIPTION: 3-5 lines. Hook, details (material/fit), condition, hashtags. No filler. No "This is a...".
+CRITICAL: You have ${imageBlocks.length} photo(s). Check EVERY photo — don't rely on photo 1 alone. Labels, tags, and size info often appear only on photos 2+. If you can't find info in photo 1, keep looking in photos 2, 3, 4... Front of item, back, inside label, care label, size label, and detail shots may each be separate photos.
+
+PHOTOS: Examine ALL photos carefully. Look at:
+- Labels, tags, care labels, size labels (front AND back of garment)
+- Logos, branding, embroidery, prints
+- Material texture and composition
+- Stitching quality, wear marks, stains, damage
+- Zips, buttons, hardware details
+- Wash care symbols for material clues
+
+TITLE: Max 60 chars. Format: [Brand] [Item] [Detail]. Search-friendly words only. Brand first if visible. Don't shout in ALL CAPS.
+DESCRIPTION: 4-6 lines. Hook, key details (material/fit/style), measurements if visible, condition notes, hashtags. No filler. No "This is a...". Don't shout in ALL CAPS.
 PRICE: Vinted UK used prices, NOT retail. Fast fashion £3-12, mid-range £8-20, premium £15-40, sportswear £10-35, designer £40-200+. NWT=60-70% retail, very good=30-50%, good=20-35%.
-CONDITION: Check photos for wear. NWT=visible tags only, NwoT=unworn, Very good=minimal wear, Good=some wear, Satisfactory=visible damage.
-BRAND: Check labels, logos, tags in ALL photos. Guess if partial logo visible. null if unidentifiable.
-CATEGORY: Vinted path like "women/clothing/tops" or "kids/strollers". Be specific.
-COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,Beige,Cream,Multicolour,Khaki,Turquoise,Silver,Gold,Navy,Burgundy,Coral,Light blue.`;
+CONDITION: Check ALL photos for wear/damage. NWT=visible tags attached, NwoT=unworn no tags, Very good=minimal wear, Good=some wear, Satisfactory=visible damage.
+BRAND: Check labels, logos, tags in ALL photos. Read text on labels carefully. Guess if partial logo visible. null if truly unidentifiable.
+CATEGORY: Return a structured path like "Women > Dresses > Midi dresses" or "Men > Jumpers > Hoodies" or "Kids > Girls > Tops" — use > as separator. Be as specific as possible to the leaf level.
+COLOR: Primary color. One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,Beige,Cream,Multicolour,Khaki,Turquoise,Silver,Gold,Navy,Burgundy,Coral,Light blue. If item has a pattern/print, use Multicolour.
+COLOR2: Secondary color if item is two-tone. null if single color.
+SIZE: Read size labels/tags carefully. Return EXACTLY what the label says (e.g. "M", "UK 10", "EU 38", "S/M", "6-8", "XL", "One size"). This is critical — check ALL photos for size tags (inside garment, waistband, neck label).
+MATERIAL: Read care labels. Return composition (e.g. "100% cotton", "80% polyester 20% elastane", "faux leather"). null if not visible.
+PARCEL: Estimate weight category. "Small" (under 2kg, fits large letter), "Medium" (2-5kg, shoebox), "Large" (5-10kg, large box).
+GENDER: "women", "men", "kids", "unisex" based on the item style and any labels.
+CONFIDENCE: For each of brand, size, color — return "high" if you're sure from a clear label/logo, "medium" if inferring from context, "low" if not visible in any photo.`;
 
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -1492,25 +1576,30 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       },
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 800,
+        max_tokens: 1200,
         system: systemPrompt,
         messages: [{
           role: 'user',
           content: [
             ...imageBlocks,
             { type: 'text', text:
-              `Analyze ${imageBlocks.length > 1 ? 'these photos' : 'this photo'} and create a Vinted listing.${captionCtx}\n\n` +
+              `Analyze ${imageBlocks.length > 1 ? `these ${imageBlocks.length} photos` : 'this photo'} thoroughly and create a Vinted listing. Check EVERY photo for labels, tags, size info, brand logos, damage, etc.${captionCtx}\n\n` +
               `Return ONLY valid JSON (no markdown, no backticks, no explanation):\n` +
               `{\n` +
-              `  "title": "searchable title following the rules above",\n` +
-              `  "description": "4-6 line description with hashtags, following the rules above",\n` +
-              `  "suggested_price": <realistic used price in GBP as a number>,\n` +
-              `  "brand": "detected brand name or null",\n` +
+              `  "title": "searchable title max 60 chars (no ALL CAPS)",\n` +
+              `  "description": "4-6 line description with hashtags (no ALL CAPS)",\n` +
+              `  "suggested_price": <realistic used price in GBP as number>,\n` +
+              `  "brand": "detected brand or null",\n` +
               `  "condition": "New with tags|New without tags|Very good|Good|Satisfactory",\n` +
-              `  "category_hint": "vinted/category/path",\n` +
-              `  "color": "one of the allowed colors",\n` +
-              `  "material": "fabric/material if identifiable or null",\n` +
-              `  "size_hint": "detected size from tags/labels or null"\n` +
+              `  "category_hint": "Section > Category > Subcategory (e.g. Women > Tops > T-shirts)",\n` +
+              `  "color": "primary color from allowed list",\n` +
+              `  "color2": "secondary color or null",\n` +
+              `  "material": "fabric composition or null",\n` +
+              `  "size_hint": "EXACTLY what size label says or null",\n` +
+              `  "gender": "women|men|kids|unisex",\n` +
+              `  "parcel_size": "Small|Medium|Large",\n` +
+              `  "confidence": { "brand": "high|medium|low", "size": "high|medium|low", "color": "high|medium|low" },\n` +
+              `  "style_tags": ["up to 5 relevant style keywords for description"]\n` +
               `}`
             }
           ]
@@ -1608,10 +1697,16 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       text += `\n🟢 *All fields complete\\!* Tap POST TO VINTED to list your item, or edit any field below\\.`;
     }
 
+    const errFields = new Set(L._errorFields || []);
+    if (errFields.size) {
+      text += `\n\n⚠️ *Last publish failed on:* ${esc(Array.from(errFields).join(', '))}`;
+    }
+    const warn = (f, base) => errFields.has(f) ? '⚠️ ' + base : base;
+
     const keyboard = [
-      [{ text: '✏️ Title', callback_data: 'edit:title' }, { text: '✏️ Description', callback_data: 'edit:desc' }, { text: '💰 Price', callback_data: 'edit:price' }],
-      [{ text: '📂 Category', callback_data: 'pick:cat' }, { text: '📏 Size', callback_data: 'pick:size' }, { text: '🏷️ Brand', callback_data: 'edit:brand' }],
-      [{ text: '🎨 Colour', callback_data: 'pick:color' }, { text: '📦 Condition', callback_data: 'pick:cond' }, { text: '📮 Parcel size', callback_data: 'pick:pkg' }],
+      [{ text: warn('title', '✏️ Title'), callback_data: 'edit:title' }, { text: warn('description', '✏️ Description'), callback_data: 'edit:desc' }, { text: warn('price', '💰 Price'), callback_data: 'edit:price' }],
+      [{ text: warn('category', '📂 Category'), callback_data: 'pick:cat' }, { text: warn('size', '📏 Size'), callback_data: 'pick:size' }, { text: warn('brand', '🏷️ Brand'), callback_data: 'edit:brand' }],
+      [{ text: warn('color', '🎨 Colour'), callback_data: 'pick:color' }, { text: warn('condition', '📦 Condition'), callback_data: 'pick:cond' }, { text: warn('parcel', '📮 Parcel size'), callback_data: 'pick:pkg' }],
     ];
 
     if (ready) {
@@ -1741,6 +1836,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       const id = parseInt(data.split(':')[1]);
       const cond = CONDITIONS.find(x => x.id === id);
       if (cond) { c.listing.status_id = cond.id; c.listing.condition = cond.label; }
+      clearErrorField(c, 'condition');
       // If in wizard, advance; if in review, go back to summary
       if (c.step.startsWith('wiz_')) return wizardNext(chatId);
       c.step = 'review';
@@ -1761,6 +1857,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       const id = parseInt(data.split(':')[1]);
       const col = COLORS.find(x => x.id === id);
       if (col) { c.listing.color1_id = col.id; c.listing.color = col.label; console.log(`[TG] Color selected: ${col.label} (id=${col.id})`); }
+      clearErrorField(c, 'color');
       if (c.step.startsWith('wiz_')) return wizardNext(chatId);
       c.step = 'review';
       return showSummary(chatId);
@@ -1809,11 +1906,47 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       return selectPackageSize(chatId, id);
     }
 
+    // ── Sync accept/reject ──
+    if (data === 'sync:accept') {
+      if (c.step === 'confirm_desc_sync' && c.pendingSyncDesc) {
+        c.listing.description = c.pendingSyncDesc;
+        clearErrorField(c, 'description');
+      } else if (c.step === 'confirm_title_sync' && c.pendingSyncTitle) {
+        c.listing.title = c.pendingSyncTitle;
+        clearErrorField(c, 'title');
+      }
+      delete c.pendingSyncDesc;
+      delete c.pendingSyncTitle;
+      c.step = 'review';
+      c.summaryMsgId = null;
+      saveChatState(chatId);
+      return showSummary(chatId);
+    }
+    if (data === 'sync:reject') {
+      delete c.pendingSyncDesc;
+      delete c.pendingSyncTitle;
+      c.step = 'review';
+      c.summaryMsgId = null;
+      saveChatState(chatId);
+      return showSummary(chatId);
+    }
+
+    // ── Brand: search again prompt ──
+    if (data === 'brand:search') {
+      c.step = c.step.startsWith('wiz_') ? 'wiz_brand' : 'editing_brand';
+      return bot.sendMessage(chatId, 'Type a brand name to search:');
+    }
+
     // ── Brand search results ──
     if (data.startsWith('brand:')) {
       const parts = data.split(':');
-      c.listing.brand_id = parseInt(parts[1]);
-      c.listing.brand = parts.slice(2).join(':');
+      const bid = parseInt(parts[1]);
+      c.listing.brand_id = bid > 0 ? bid : null;
+      // Keep existing text-only brand if user chose "continue without tag"
+      const textName = parts.slice(2).join(':');
+      if (textName) c.listing.brand = textName;
+      else if (bid === 0 && !c.listing.brand) c.listing.brand = '';
+      clearErrorField(c, 'brand');
       if (c.step.startsWith('wiz_')) return wizardNext(chatId);
       c.step = 'review';
       return showSummary(chatId);
@@ -1937,14 +2070,53 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
 
     // ── Review edit inputs (from final summary) ──
     if (c.step === 'editing_title') {
-      c.listing.title = msg.text.slice(0, 60);
+      const newTitle = msg.text.slice(0, 60);
+      c.listing.title = newTitle;
+      clearErrorField(c, 'title');
+      const syncMsg = await bot.sendMessage(chatId, '🔄 Updating description to match...');
+      try {
+        const synced = await aiSyncCompanion('title', newTitle, 'description', c.listing.description || '', c.listing);
+        if (synced && synced.length > 10) {
+          c.pendingSyncDesc = synced;
+          c.step = 'confirm_desc_sync';
+          saveChatState(chatId);
+          bot.deleteMessage(chatId, syncMsg.message_id).catch(() => {});
+          return bot.sendMessage(chatId,
+            `📝 Updated description:\n\n${synced}\n\nUse this update?`,
+            { reply_markup: { inline_keyboard: [
+              [{ text: '✅ Accept', callback_data: 'sync:accept' }, { text: '❌ Keep old', callback_data: 'sync:reject' }]
+            ]}}
+          );
+        }
+      } catch (e) { console.log('[TG] sync desc failed:', e.message); }
+      bot.deleteMessage(chatId, syncMsg.message_id).catch(() => {});
       c.step = 'review';
+      c.summaryMsgId = null;
       return showSummary(chatId);
     }
 
     if (c.step === 'editing_desc') {
       c.listing.description = msg.text;
+      clearErrorField(c, 'description');
+      const syncMsg = await bot.sendMessage(chatId, '🔄 Updating title to match...');
+      try {
+        const synced = await aiSyncCompanion('description', msg.text, 'title', c.listing.title || '', c.listing);
+        if (synced && synced.length > 3) {
+          c.pendingSyncTitle = synced.slice(0, 60);
+          c.step = 'confirm_title_sync';
+          saveChatState(chatId);
+          bot.deleteMessage(chatId, syncMsg.message_id).catch(() => {});
+          return bot.sendMessage(chatId,
+            `📝 Updated title:\n\n"${c.pendingSyncTitle}"\n\nUse this update?`,
+            { reply_markup: { inline_keyboard: [
+              [{ text: '✅ Accept', callback_data: 'sync:accept' }, { text: '❌ Keep old', callback_data: 'sync:reject' }]
+            ]}}
+          );
+        }
+      } catch (e) { console.log('[TG] sync title failed:', e.message); }
+      bot.deleteMessage(chatId, syncMsg.message_id).catch(() => {});
       c.step = 'review';
+      c.summaryMsgId = null;
       return showSummary(chatId);
     }
 
@@ -1952,6 +2124,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       const price = parseFloat(msg.text.replace(/[^0-9.]/g, ''));
       if (isNaN(price) || price <= 0) return bot.sendMessage(chatId, 'Enter a valid price (e.g. 25 or 14.50):');
       c.listing.price = Math.round(price * 100) / 100;
+      clearErrorField(c, 'price');
       c.step = 'review';
       return showSummary(chatId);
     }
@@ -2041,14 +2214,18 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
     const q = keyword.toLowerCase().trim();
     if (!q) return [];
 
+    const cats = getCategories();
     // Score each category by keyword match
     const scored = [];
-    for (const cat of CATEGORIES) {
+    for (const cat of cats) {
       let score = 0;
+      const catTitle = cat.title || '';
+      const catPath = cat.path || catTitle;
       // Check title match
-      if (cat.title.toLowerCase().includes(q)) score += 10;
-      // Check keyword matches
-      for (const kw of cat.keywords) {
+      if (catTitle.toLowerCase().includes(q) || catPath.toLowerCase().includes(q)) score += 10;
+      // Check keyword matches (live catalog has keywords too; hardcoded always has them)
+      const kws = cat.keywords || [catTitle.toLowerCase(), ...catTitle.toLowerCase().split(/\s+/)];
+      for (const kw of kws) {
         if (kw.includes(q) || q.includes(kw)) score += 5;
         // Partial word match
         const words = q.split(/\s+/);
@@ -2056,7 +2233,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
           if (w.length >= 3 && kw.includes(w)) score += 2;
         }
       }
-      if (score > 0) scored.push({ ...cat, score, path: cat.title, hasChildren: false });
+      if (score > 0) scored.push({ id: cat.id, title: catTitle, score, path: catPath, hasChildren: false });
     }
 
     // Sort by score descending
@@ -2069,7 +2246,9 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) return [];
     try {
-      const catList = CATEGORIES.map(c => `${c.id}: ${c.title}`).join('\n');
+      const cats = getCategories();
+      // Cap at 400 to keep prompt small; prefer live catalog when present
+      const catList = cats.slice(0, 400).map(c => `${c.id}: ${c.path || c.title}`).join('\n');
       const resp = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
@@ -2088,7 +2267,12 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       const text = data.content?.[0]?.text?.trim() || '';
       const arr = JSON.parse(text.match(/\[[\s\S]*\]/)?.[0] || '[]');
       const ids = arr.filter(id => typeof id === 'number');
-      return ids.map(id => CATEGORIES.find(c => c.id === id)).filter(Boolean);
+      const allCats = getCategories();
+      return ids.map(id => {
+        const found = allCats.find(c => c.id === id);
+        if (!found) return null;
+        return { id: found.id, title: found.title, path: found.path || found.title };
+      }).filter(Boolean);
     } catch (e) {
       console.error('[TG] AI category pick error:', e.message);
       return [];
@@ -2100,9 +2284,44 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
     const inWiz = c.step.startsWith('wiz_');
     const header = inWiz ? '📂 Step 4/9 — Category\n\n' : '';
 
-    // 1. Search hardcoded categories by keyword
-    let matches = searchCategoriesByKeyword(query);
-    console.log(`[TG] Category search "${query}": ${matches.length} keyword matches`);
+    // Lazy-load live Vinted catalog (cached 24h) — falls back to CATEGORIES silently
+    const acct = activeAccount(c);
+    if (acct) {
+      try {
+        const session = await store.getSession(acct.userId);
+        if (session) await ensureLiveCatalog(session);
+      } catch {}
+    }
+
+    // 0. If category_hint is a structured path (e.g. "Women > Tops > T-shirts"), use it first
+    let matches = [];
+    if (c.listing?.category_hint) {
+      const pathParts = c.listing.category_hint.split(/\s*[>\/]\s*/).map(p => p.trim()).filter(Boolean);
+      if (pathParts.length >= 2) {
+        for (let i = pathParts.length - 1; i >= 0; i--) {
+          const partMatches = searchCategoriesByKeyword(pathParts[i]);
+          if (partMatches.length) {
+            matches = partMatches
+              .map(m => {
+                const mTitle = (m.path || m.title || '').toLowerCase();
+                const score = pathParts.reduce((acc, part) =>
+                  acc + (mTitle.includes(part.toLowerCase()) ? 1 : 0), 0);
+                return { ...m, _score: score };
+              })
+              .sort((a, b) => b._score - a._score)
+              .slice(0, 8);
+            console.log(`[TG] Structured path match via "${pathParts[i]}": ${matches.length}`);
+            break;
+          }
+        }
+      }
+    }
+
+    // 1. Search by keyword
+    if (!matches.length) {
+      matches = searchCategoriesByKeyword(query);
+      console.log(`[TG] Category search "${query}": ${matches.length} keyword matches`);
+    }
 
     // 2. Try individual words from the query
     if (!matches.length && query.includes(' ')) {
@@ -2113,7 +2332,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       }
     }
 
-    // 3. Try each part of category_hint
+    // 3. Try each part of category_hint (legacy slash-separated)
     if (!matches.length && c.listing?.category_hint) {
       const parts = c.listing.category_hint.split(/[\/>,]+/).map(p => p.trim()).filter(p => p && p !== query);
       for (const part of parts) {
@@ -2148,9 +2367,10 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
 
   async function selectCategory(chatId, catId) {
     const c = getChat(chatId);
-    const match = CATEGORIES.find(x => x.id === catId);
+    const match = getCategories().find(x => x.id === catId);
     c.listing.catalog_id = catId;
-    c.listing.category_name = match ? match.title : `ID: ${catId}`;
+    c.listing.category_name = match ? (match.title || match.path || `ID: ${catId}`) : `ID: ${catId}`;
+    clearErrorField(c, 'category');
     console.log(`[TG] Category selected: ${c.listing.category_name} (catalog_id=${catId})`);
     c.listing.size_id = null;
     c.listing.size_name = '';
@@ -2205,16 +2425,37 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
     // Cache for title lookup when user selects
     c.sizeCache = allSizes;
 
+    // Try to auto-match AI-detected size — but only if confidence is not low
+    const hint = (c.listing.size_hint || '').trim().toUpperCase();
+    const sizeConfLow = c.listing.aiConfidence?.size === 'low';
+    let autoMatched = null;
+    if (hint && !sizeConfLow) {
+      // Try exact match first, then partial
+      autoMatched = allSizes.find(s => s.title.toUpperCase() === hint);
+      if (!autoMatched) autoMatched = allSizes.find(s => s.title.toUpperCase().includes(hint));
+      if (!autoMatched) autoMatched = allSizes.find(s => hint.includes(s.title.toUpperCase()) && s.title.length > 1);
+      if (autoMatched) {
+        console.log(`[TG] Auto-matched size: "${hint}" → "${autoMatched.title}" (id=${autoMatched.id})`);
+      }
+    }
+
     // Show as rows of 4
     const rows = [];
     for (let i = 0; i < Math.min(allSizes.length, 32); i += 4) {
       rows.push(allSizes.slice(i, i + 4).map(s => ({
-        text: s.title, callback_data: `size:${s.id}`
+        text: s.title + (autoMatched && s.id === autoMatched.id ? ' ✓' : ''),
+        callback_data: `size:${s.id}`
       })));
+    }
+    // If AI detected a size, show accept button
+    if (autoMatched) {
+      rows.unshift([{ text: `✅ Use detected: ${autoMatched.title}`, callback_data: `size:${autoMatched.id}` }]);
     }
     rows.push([{ text: '⏭️ Skip (no size)', callback_data: 'size:0' }]);
 
-    const header = c.step.startsWith('wiz_') ? '📏 Step 5/9 — Size\n\nSelect size:' : 'Select size:';
+    const sizeWarn = sizeConfLow ? ' ⚠️ (low confidence — verify)' : '';
+    const sizeInfo = hint ? `\nAI detected: ${c.listing.size_hint}${sizeWarn}` : '';
+    const header = c.step.startsWith('wiz_') ? `📏 Step 5/9 — Size${sizeInfo}\n\nSelect size:` : `Select size:${sizeInfo}`;
     bot.sendMessage(chatId, header, { reply_markup: { inline_keyboard: rows } });
     } catch (e) {
       console.error('[TG] Size picker error:', e.message);
@@ -2236,6 +2477,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       const cached = c.sizeCache?.find(s => s.id === sizeId);
       c.listing.size_name = cached?.title || `ID: ${sizeId}`;
     }
+    clearErrorField(c, 'size');
     if (c.step.startsWith('wiz_')) return wizardNext(chatId);
     c.step = 'review';
     return showSummary(chatId);
@@ -2301,6 +2543,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       c.listing.package_size_id = pkgId;
       c.listing.package_size_name = pkg ? pkg.title : `ID: ${pkgId}`;
     }
+    clearErrorField(c, 'parcel');
     if (c.step.startsWith('wiz_')) return wizardNext(chatId);
     c.step = 'review';
     return showSummary(chatId);
@@ -2312,17 +2555,52 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
 
   async function searchBrands(chatId, query) {
     const c = getChat(chatId);
-    const session = await store.getSession(activeAccount(c).userId);
+    const acct = activeAccount(c);
+    if (!acct) return bot.sendMessage(chatId, 'No account.');
+    const session = await store.getSession(acct.userId);
     if (!session) return bot.sendMessage(chatId, 'No Vinted session.');
 
-    const resp = await vintedFetch(session, `/api/v2/brands?q=${encodeURIComponent(query)}&per_page=10`);
-    if (!resp.ok) return bot.sendMessage(chatId, 'Brand search failed.');
+    const tried = new Set();
+    const tryQuery = async (q) => {
+      if (!q || tried.has(q.toLowerCase())) return [];
+      tried.add(q.toLowerCase());
+      try {
+        const resp = await vintedFetch(session, `/api/v2/brands?q=${encodeURIComponent(q)}&per_page=10`);
+        if (!resp.ok) return [];
+        const data = await resp.json();
+        return data.brands || [];
+      } catch { return []; }
+    };
 
-    const data = await resp.json();
-    const brands = data.brands || [];
+    // Strategy 1: as-typed
+    let brands = await tryQuery(query);
+    // Strategy 2: remove spaces
+    if (!brands.length) brands = await tryQuery(query.replace(/\s+/g, ''));
+    // Strategy 3: remove special chars
+    if (!brands.length) brands = await tryQuery(query.replace(/[^a-zA-Z0-9\s]/g, '').trim());
+    // Strategy 4: first word only
+    if (!brands.length && query.includes(' ')) brands = await tryQuery(query.split(/\s+/)[0]);
+    // Strategy 5: last word only
+    if (!brands.length && query.includes(' ')) {
+      const parts = query.split(/\s+/);
+      brands = await tryQuery(parts[parts.length - 1]);
+    }
 
     if (!brands.length) {
-      return bot.sendMessage(chatId, `No brands found for "${query}". Try a different name, or type "none" to skip.`);
+      // Persist the queried brand as plain text so it still appears in the listing
+      if (c.listing) {
+        c.listing.brand = normalizeText(query, 'title');
+        c.listing.brand_id = null;
+        saveChatState(chatId);
+      }
+      const displayBrand = (c.listing?.brand || query);
+      return bot.sendMessage(chatId,
+        `🏷️ Brand "${query}" not found in Vinted's database.\n\nYour listing will be posted with "${displayBrand}" as text (no brand tag). You can search again with a different spelling.`,
+        { reply_markup: { inline_keyboard: [
+          [{ text: '✅ Continue without tag', callback_data: 'brand:0:' + displayBrand.slice(0, 30) }],
+          [{ text: '🔍 Search again', callback_data: 'brand:search' }]
+        ]}}
+      );
     }
 
     const rows = brands.slice(0, 8).map(b => [{
@@ -2448,10 +2726,10 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
         id: null,
         currency: 'GBP',
         temp_uuid: uuid,
-        title: normalizeTitle(L.title),
-        description: L.description,
+        title: titleWithSize(L),
+        description: normalizeText(L.description, 'sentence'),
         brand_id: L.brand_id || null,
-        brand: L.brand || null,
+        brand: L.brand ? normalizeText(L.brand, 'title') : null,
         size_id: L.size_id || null,
         catalog_id: L.catalog_id,
         status_id: L.status_id,
@@ -2506,12 +2784,17 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       if (refreshResp.ok) {
         const refreshed = (await refreshResp.json()).item;
         if (refreshed) {
-          // Use server's canonical photo list for completion (matches DOTB)
-          const refreshedPhotos = (refreshed.photos || []).map(p => ({ id: p.id, orientation: p.orientation || 0 }));
-          completionDraft = buildCompletionDraft(refreshed, refreshedPhotos.length ? refreshedPhotos : photoIds);
+          const serverPhotos = (refreshed.photos || []).map(p => ({ id: p.id, orientation: p.orientation || 0 }));
+          // Reorder server photos to match our original upload order
+          const uploadOrderIds = photoIds.map(p => p.id);
+          const byId = new Map(serverPhotos.map(p => [p.id, p]));
+          const reordered = uploadOrderIds.filter(id => byId.has(id)).map(id => byId.get(id));
+          for (const p of serverPhotos) if (!uploadOrderIds.includes(p.id)) reordered.push(p);
+          const finalPhotos = reordered.length ? reordered : photoIds;
+          completionDraft = buildCompletionDraft(refreshed, finalPhotos);
           // Re-apply user's chosen values — server refresh can override them with defaults
-          completionDraft.title = normalizeTitle(L.title);
-          completionDraft.description = L.description;
+          completionDraft.title = titleWithSize(L);
+          completionDraft.description = normalizeText(L.description, 'sentence');
           completionDraft.catalog_id = L.catalog_id || refreshed.catalog_id || null;
           completionDraft.status_id = L.status_id || refreshed.status_id || null;
           completionDraft.price = L.price;
@@ -2520,7 +2803,7 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
             ? [L.color1_id, L.color2_id].filter(Boolean)
             : [refreshed.color1_id, refreshed.color2_id].filter(Boolean);
           completionDraft.brand_id = L.brand_id || refreshed.brand_id || null;
-          completionDraft.brand = L.brand || refreshed.brand || null;
+          completionDraft.brand = L.brand ? normalizeText(L.brand, 'title') : (refreshed.brand || null);
           completionDraft.size_id = L.size_id || refreshed.size_id || null;
         }
       }
@@ -2536,38 +2819,48 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
       if (!completeResp.ok) {
         const errBody = await completeResp.json().catch(() => ({}));
         const errors = errBody.errors || errBody.message_errors || {};
-        let errorLines;
-        if (Array.isArray(errors)) {
-          // Vinted code 99 format: [{ field: "title", value: "...", message: "..." }, ...]
-          errorLines = errors.map(e => {
-            const field = e.field || 'unknown';
-            const msg = e.message || e.value || JSON.stringify(e);
-            return `${field}: ${msg}`;
-          });
-        } else {
-          errorLines = Object.entries(errors).map(([k, v]) =>
-            `${k}: ${Array.isArray(v) ? v.join(', ') : (typeof v === 'object' ? JSON.stringify(v) : v)}`
-          );
-        }
-        const draftUrl = `https://${domain}/items/${draftId}/edit`;
+        const errorLines = [];
+        const errorFields = new Set();
 
-        // Draft exists on Vinted — tell user to finish there
-        c.step = 'idle';
-        c.photos = [];
-        c.listing = null;
+        const addError = (field, msg) => {
+          errorLines.push(`• ${field}: ${msg}`);
+          const f = String(field).toLowerCase();
+          if (/color|colour/.test(f)) errorFields.add('color');
+          else if (/catalog|category/.test(f)) errorFields.add('category');
+          else if (/size/.test(f)) errorFields.add('size');
+          else if (/brand/.test(f)) errorFields.add('brand');
+          else if (/price/.test(f)) errorFields.add('price');
+          else if (/title/.test(f)) errorFields.add('title');
+          else if (/description/.test(f)) errorFields.add('description');
+          else if (/package|parcel|shipping/.test(f)) errorFields.add('parcel');
+          else if (/status|condition/.test(f)) errorFields.add('condition');
+          else if (/photo/.test(f)) errorFields.add('photos');
+        };
+
+        if (Array.isArray(errors)) {
+          errors.forEach(e => addError(e.field || 'unknown', e.message || e.value || 'invalid'));
+        } else {
+          Object.entries(errors).forEach(([k, v]) => {
+            const msg = Array.isArray(v) ? v.join(', ') : (typeof v === 'object' ? JSON.stringify(v) : v);
+            addError(k, msg);
+          });
+        }
+
+        console.error(`[TG] Publish failed for draft ${draftId}:`, errorLines.join('; ') || completeResp.status);
+
+        // PRESERVE state — let user fix and retry from bot
+        c.listing._failedDraftId = draftId;
+        c.listing._errorFields = Array.from(errorFields);
+        c.step = 'review';
         c.summaryMsgId = null;
         saveChatState(chatId);
 
-        const acctName = activeAccount(c)?.vintedName || activeAccount(c)?.username || 'your account';
-        let errMsg = `Publishing failed but your draft is saved on Vinted (${acctName}).\n\n`;
-        if (errorLines.length) {
-          errMsg += `Issues:\n${errorLines.join('\n')}\n\n`;
-        }
-        errMsg += `Open your draft to fix and publish:\n${draftUrl}\n\n`;
-        errMsg += 'Send new photos to create another listing.';
+        await bot.editMessageText(
+          `❌ Publishing failed. Fix the issues below and tap POST again:\n\n${errorLines.join('\n') || 'Unknown error'}`,
+          { chat_id: chatId, message_id: statusMsg.message_id }
+        ).catch(() => {});
 
-        console.error(`[TG] Publish failed for draft ${draftId}:`, errorLines.join('; ') || completeResp.status);
-        return bot.sendMessage(chatId, errMsg);
+        return showSummary(chatId);
       }
 
       // ── Success! ──
@@ -2578,6 +2871,12 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
         `*${esc(L.title)}* — £${L.price}\n\n` +
         `[View on Vinted](${esc(itemUrl)})`,
         { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'MarkdownV2' }
+      );
+
+      // Check-listing reminder
+      bot.sendMessage(chatId,
+        `✅ Please open your listing on Vinted and check that photos, description, price and details look right!\n\n${itemUrl}`,
+        { disable_web_page_preview: true }
       );
 
       // Follow-up message with next action
@@ -2714,17 +3013,175 @@ COLOR: One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,B
   // UTILS
   // ──────────────────────────────────────────
 
-  // Normalize title for Vinted — sentence case, no ALL CAPS
-  function normalizeTitle(title) {
-    if (!title) return '';
-    const t = String(title);
-    // If more than half the letters are uppercase, convert to sentence case
+  // Normalize text for Vinted — sentence/title case, no ALL CAPS
+  function normalizeText(text, mode = 'sentence') {
+    if (!text) return '';
+    const t = String(text);
     const letters = t.replace(/[^a-zA-Z]/g, '');
     const upperCount = (t.match(/[A-Z]/g) || []).length;
-    if (letters.length > 3 && upperCount > letters.length * 0.5) {
-      return t.toLowerCase().replace(/(^|\.\s+|!\s+|\?\s+)([a-z])/g, (_, pre, c) => pre + c.toUpperCase());
+    const isShouty = letters.length > 3 && upperCount > letters.length * 0.5;
+
+    if (mode === 'title') {
+      const smallWords = new Set(['and', 'of', 'the', 'for', 'in', 'on', 'at', 'to', 'a', 'an', '&']);
+      return t.toLowerCase().split(/(\s+|-)/).map((word, i) => {
+        if (!word.trim() || word === '-') return word;
+        if (i > 0 && smallWords.has(word.toLowerCase())) return word.toLowerCase();
+        return word.charAt(0).toUpperCase() + word.slice(1);
+      }).join('');
+    }
+
+    if (isShouty) {
+      return t.toLowerCase().replace(/(^|\.\s+|!\s+|\?\s+|\n+)([a-z])/g, (_, pre, c) => pre + c.toUpperCase());
     }
     return t;
+  }
+
+  // Fuzzy color matching against COLORS + COLOR_ALIASES
+  function matchColor(colorStr) {
+    if (!colorStr) return null;
+    const s = String(colorStr).trim().toLowerCase();
+    if (!s) return null;
+    let hit = COLORS.find(x => x.label.toLowerCase() === s);
+    if (hit) return { id: hit.id, label: hit.label };
+    const alias = COLOR_ALIASES[s];
+    if (alias) {
+      hit = COLORS.find(x => x.label.toLowerCase() === alias.toLowerCase());
+      if (hit) return { id: hit.id, label: hit.label };
+    }
+    for (const [aliasKey, canon] of Object.entries(COLOR_ALIASES)) {
+      if (s.includes(aliasKey)) {
+        hit = COLORS.find(x => x.label.toLowerCase() === canon.toLowerCase());
+        if (hit) return { id: hit.id, label: hit.label };
+      }
+    }
+    for (const col of COLORS) {
+      const lab = col.label.toLowerCase();
+      const re = new RegExp(`\\b${lab.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+      if (re.test(s)) return { id: col.id, label: col.label };
+    }
+    return null;
+  }
+
+  // Returns true if a category ID represents clothing (not shoes/bags/accessories)
+  function isClothingCategory(catalogId) {
+    if (!catalogId) return false;
+    if (CLOTHING_CATEGORY_IDS.has(catalogId)) return true;
+    if (_liveCatalogCache) {
+      const entry = _liveCatalogCache.find(c => c.id === catalogId);
+      if (entry) {
+        const path = (entry.path || '').toLowerCase();
+        const isWMK = /^(women|men|kids)\b/.test(path);
+        const isNonClothing = /(shoes|bags|jewellery|accessories|beauty|grooming|toys|pushchairs|nursing|bathing|sleep)/.test(path);
+        return isWMK && !isNonClothing;
+      }
+    }
+    return false;
+  }
+
+  // Build title for posting — append size for clothing, normalize case
+  function titleWithSize(L) {
+    let t = normalizeText(L.title, 'sentence');
+    const sz = L.size_name;
+    const hasValidSize = sz && sz !== 'N/A' && sz !== 'Not set' && sz !== '';
+    if (hasValidSize && isClothingCategory(L.catalog_id)) {
+      const sizeInTitle = new RegExp(`\\b(size\\s+)?${sz.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+      if (!sizeInTitle.test(t)) {
+        const suffix = ` - Size ${sz}`;
+        if ((t + suffix).length <= 80) t += suffix;
+        else t = t.slice(0, 80 - suffix.length).trim() + suffix;
+      }
+    }
+    return t;
+  }
+
+  // Clear a field from the _errorFields list (after user edits it)
+  function clearErrorField(c, field) {
+    if (c.listing?._errorFields) {
+      c.listing._errorFields = c.listing._errorFields.filter(f => f !== field);
+    }
+  }
+
+  // Get category list (live if fetched, fallback to hardcoded)
+  function getCategories() {
+    return _liveCatalogCache || CATEGORIES;
+  }
+
+  // Fetch live Vinted catalog tree (lazy, cached with TTL)
+  async function fetchLiveCatalog(session) {
+    if (!session) return null;
+    if (_liveCatalogCache && (Date.now() - _catalogFetchedAt) < CATALOG_TTL_MS) return _liveCatalogCache;
+    try {
+      const resp = await vintedFetch(session, '/api/v2/catalogs');
+      if (!resp.ok) {
+        console.log(`[TG] Live catalog fetch failed: ${resp.status}`);
+        return null;
+      }
+      const data = await resp.json();
+      const tree = data.catalogs || data.catalog || data || [];
+      const flat = [];
+      const walk = (nodes, parentPath) => {
+        if (!Array.isArray(nodes)) return;
+        for (const n of nodes) {
+          const title = n.title || n.name || '';
+          const path = parentPath ? `${parentPath} > ${title}` : title;
+          const kids = n.catalogs || n.children || [];
+          if ((!kids || !kids.length) && n.id) {
+            flat.push({
+              id: n.id,
+              title: path,
+              path,
+              keywords: [title.toLowerCase(), ...title.toLowerCase().split(/\s+/)].filter(Boolean)
+            });
+          }
+          if (kids && kids.length) walk(kids, path);
+        }
+      };
+      walk(Array.isArray(tree) ? tree : [tree], '');
+      if (flat.length >= 50) {
+        _liveCatalogCache = flat;
+        _catalogFetchedAt = Date.now();
+        console.log(`[TG] Live catalog loaded: ${flat.length} leaf categories`);
+        return flat;
+      }
+      console.log(`[TG] Live catalog too small (${flat.length}), using hardcoded`);
+      return null;
+    } catch (e) {
+      console.log(`[TG] Live catalog fetch error: ${e.message}`);
+      return null;
+    }
+  }
+
+  async function ensureLiveCatalog(session) {
+    if (_liveCatalogCache) return _liveCatalogCache;
+    if (!_catalogFetchPromise) {
+      _catalogFetchPromise = fetchLiveCatalog(session).finally(() => { _catalogFetchPromise = null; });
+    }
+    return _catalogFetchPromise;
+  }
+
+  // AI sync companion: when title edited, update description (and vice versa)
+  async function aiSyncCompanion(sourceField, sourceValue, targetField, targetValue) {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return null;
+    const prompt = sourceField === 'title'
+      ? `The listing title was just changed to: "${sourceValue}"\n\nCurrent description:\n"${targetValue}"\n\nUpdate the description so it's consistent with the new title. Keep it 4-6 lines, keep relevant hashtags, keep the same tone. Return ONLY the updated description, no preamble.`
+      : `The listing description was just changed to:\n"${sourceValue}"\n\nCurrent title: "${targetValue}"\n\nUpdate the title so it matches the description's key details (brand, item type, color, size if mentioned). Max 60 chars. Return ONLY the updated title, no preamble, no quotes.`;
+    try {
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 300,
+          system: 'You update Vinted listing fields to stay consistent. Return only the new value, no quotes, no explanation.',
+          messages: [{ role: 'user', content: prompt }]
+        })
+      });
+      if (!resp.ok) return null;
+      const data = await resp.json();
+      const result = data.content?.[0]?.text?.trim().replace(/^["']|["']$/g, '');
+      return result || null;
+    } catch { return null; }
   }
 
   function esc(text) {

@@ -261,6 +261,12 @@ async function auth(req, res, next) {
   try {
     const user = await store.getUserByToken(token);
     if (!user) return res.status(401).json({ error:'Invalid token' });
+    // Auto-downgrade expired plans
+    if (user.plan !== 'free' && user.plan_expires_at && new Date(user.plan_expires_at) < new Date()) {
+      await store.updateUserPlan(user.id, 'free', null, null, null);
+      user.plan = 'free';
+      user.plan_expires_at = null;
+    }
     req.user = user;
     next();
   } catch(e) { res.status(500).json({ error:e.message }); }
@@ -396,7 +402,7 @@ app.post('/api/sync', auth, async (req, res) => {
             await db.query(`
               DELETE FROM rp_item_backups
               WHERE user_id=$1 AND item_id=$2
-                AND id NOT IN (SELECT id FROM rp_item_backups WHERE user_id=$1 AND item_id=$2 ORDER BY backed_up_at DESC LIMIT 5)
+                AND id NOT IN (SELECT id FROM rp_item_backups WHERE user_id=$1 AND item_id=$2 ORDER BY backed_up_at DESC LIMIT 10)
             `, [userId, itemId]);
           }
         } catch (be) { console.warn('[RP] Backup write failed for', itemId, be.message); }
@@ -429,10 +435,13 @@ app.post('/api/sync', auth, async (req, res) => {
         `, [m.id, userId, m.convId||'', m.type||'question', m.user||'', m.text||'', m.time||null, m.autoReplied||false, m.itemTitle||'']);
       }
     }
-    // Replace schedules
+    // Replace schedules (enforce plan limit)
     if (Array.isArray(schedules)) {
+      const schPlan = PLANS[req.user.plan||'free'] || PLANS.free;
+      const maxSchedules = schPlan.scheduleLimit;
+      const allowedSchedules = (maxSchedules != null) ? schedules.slice(0, maxSchedules) : schedules;
       await db.query('DELETE FROM rp_schedules WHERE user_id=$1', [userId]);
-      for (const s of schedules) {
+      for (const s of allowedSchedules) {
         const id = s.id || crypto.randomUUID();
         await db.query(`
           INSERT INTO rp_schedules (id,user_id,name,active,freq,hour_of_day,start_hour,end_hour,item_ids,next_run,last_run,date,slot,executed,tz_offset)
@@ -498,7 +507,7 @@ app.post('/api/items/backup', auth, async (req, res) => {
     await db.query(`
       DELETE FROM rp_item_backups
       WHERE user_id=$1 AND item_id=$2
-        AND id NOT IN (SELECT id FROM rp_item_backups WHERE user_id=$1 AND item_id=$2 ORDER BY backed_up_at DESC LIMIT 5)
+        AND id NOT IN (SELECT id FROM rp_item_backups WHERE user_id=$1 AND item_id=$2 ORDER BY backed_up_at DESC LIMIT 10)
     `, [req.user.id, String(item.id)]);
     res.json({ ok:true });
   } catch (e) {
@@ -595,7 +604,7 @@ app.post('/api/subscriptions/checkout', auth, async (req, res) => {
   if (!PLANS[plan] || plan === 'free') return res.status(400).json({ error:'Invalid plan' });
   if (!stripe) return res.json({ ok:false, manual:true, message:'To upgrade, contact support at support@relistpro.com', plan, price:PLANS[plan].price });
   try {
-    const priceIds = { pro: process.env.STRIPE_PRICE_PRO, business: process.env.STRIPE_PRICE_BUSINESS };
+    const priceIds = { pro: process.env.STRIPE_PRICE_PRO };
     if (!priceIds[plan]) return res.status(400).json({ error:'Stripe price not configured for this plan' });
     let customerId = req.user.stripe_customer_id;
     if (!customerId) {
@@ -671,10 +680,33 @@ async function deleteVintedItem(session, itemId, label) {
   return false;
 }
 
+// Acquire a repost lock — prevents concurrent reposts of the same item
+async function acquireRepostLock(userId, itemId) {
+  if (!db.hasDb()) return true;
+  try {
+    const r = await db.query('INSERT INTO rp_repost_locks (item_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING *', [itemId, userId]);
+    return r.rows.length > 0;
+  } catch (e) { return true; } // fail open if db issue
+}
+
+async function releaseRepostLock(userId, itemId) {
+  if (!db.hasDb()) return;
+  try { await db.query('DELETE FROM rp_repost_locks WHERE item_id=$1 AND user_id=$2', [itemId, userId]); } catch (_) {}
+}
+
 // Save a backup of an item after successful repost so future reposts have data
-async function saveItemBackup(userId, item) {
+async function saveItemBackup(userId, item, planName) {
   if (!db.hasDb() || !item || !item.id) return;
   try {
+    // Enforce per-plan backup limit (unique items backed up)
+    const plan = PLANS[planName || 'free'] || PLANS.free;
+    if (plan.backupLimit != null) {
+      const countR = await db.query('SELECT COUNT(DISTINCT item_id) AS n FROM rp_item_backups WHERE user_id=$1', [userId]);
+      const uniqueItems = parseInt(countR.rows[0].n, 10) || 0;
+      // Allow backup if this item already has backups, otherwise check limit
+      const existsR = await db.query('SELECT 1 FROM rp_item_backups WHERE user_id=$1 AND item_id=$2 LIMIT 1', [userId, String(item.id)]);
+      if (!existsR.rows.length && uniqueItems >= plan.backupLimit) return;
+    }
     const price = typeof item.price === 'object' ? parseFloat(item.price?.amount||0) : parseFloat(item.price||0);
     const photos = Array.isArray(item.photos) ? item.photos.map(p => ({ id: p.id, url: p.url || p.full_size_url || null })) : [];
     await db.query(`
@@ -684,7 +716,7 @@ async function saveItemBackup(userId, item) {
         item.brand||'', item.size||'', JSON.stringify(photos), JSON.stringify(item)]);
     await db.query(`
       DELETE FROM rp_item_backups WHERE user_id=$1 AND item_id=$2
-        AND id NOT IN (SELECT id FROM rp_item_backups WHERE user_id=$1 AND item_id=$2 ORDER BY backed_up_at DESC LIMIT 5)
+        AND id NOT IN (SELECT id FROM rp_item_backups WHERE user_id=$1 AND item_id=$2 ORDER BY backed_up_at DESC LIMIT 10)
     `, [userId, String(item.id)]);
   } catch (e) { console.warn('[RP] Backup save failed:', e.message); }
 }
@@ -887,13 +919,25 @@ app.post('/api/vinted/items/:itemId/repost', auth, async (req, res) => {
   if (!session) return res.status(401).json({ error:'No session' });
   const { itemId } = req.params;
   const { freshPhotos:browserPhotos } = req.body || {};
+  // Enforce monthly quota
+  const planInfo = PLANS[req.user.plan||'free'] || PLANS.free;
+  if (planInfo.repostsPerMonth != null) {
+    const usage = await getUserUsage(req.user.id);
+    if (usage.repostsThisMonth >= planInfo.repostsPerMonth) {
+      return res.status(429).json({ ok:false, error:`Repost quota reached for ${planInfo.name} plan (${planInfo.repostsPerMonth}/month). Upgrade to continue.`, quotaExceeded:true });
+    }
+  }
+  // Acquire repost lock
+  if (!(await acquireRepostLock(req.user.id, itemId))) {
+    return res.status(409).json({ error:'Item is already being reposted' });
+  }
   try {
     let item = null;
     const getResp = await vintedFetch(session, `/api/v2/item_upload/items/${itemId}`);
     if (getResp.ok) {
       item = (await getResp.json()).item;
       // Pre-repost backup — capture photo URLs while item still exists
-      if (item) await saveItemBackup(req.user.id, item);
+      if (item) await saveItemBackup(req.user.id, item, req.user.plan);
     }
     // If item not found on Vinted, try to recover from backend backup
     if (!item) {
@@ -932,7 +976,9 @@ app.post('/api/vinted/items/:itemId/repost', auth, async (req, res) => {
     const newDraft = (await createResp.json()).draft;
     const newId = String(newDraft?.id || '');
     if (!newId) return res.status(500).json({ error:'No draft id returned' });
-    // Refresh & complete the new draft BEFORE deleting old — so user never loses both
+    // Draft exists — delete old item NOW (backup already saved above)
+    await deleteVintedItem(session, itemId, 'RP');
+    // Refresh & complete the new draft
     await new Promise(r => setTimeout(r, 800 + Math.random() * 400));
     const refreshResp = await vintedFetch(session, `/api/v2/item_upload/items/${newId}`);
     const refreshedItem = refreshResp.ok ? (await refreshResp.json()).item : null;
@@ -946,18 +992,19 @@ app.post('/api/vinted/items/:itemId/repost', auth, async (req, res) => {
     });
     const completeBody = await completeResp.json().catch(() => ({}));
     if (completeResp.ok) {
-      // New listing is live — now delete the old one and unhide the new one
-      await deleteVintedItem(session, itemId, 'RP');
+      // New listing is live — unhide it
       try { await vintedFetch(session, `/api/v2/items/${newId}/is_hidden`, { method:'PUT', body:{ is_hidden:false } }); } catch(_) {}
       if (db.hasDb()) {
-        try { await db.query('UPDATE rp_items SET item_id=$1, repost_count=repost_count+1, last_repost=NOW() WHERE item_id=$2 AND user_id=$3', [newId, itemId, req.user.id]); } catch(_) {}
+        try { await db.query('UPDATE rp_items SET item_id=$1, previous_item_id=$2, repost_count=repost_count+1, last_repost=NOW() WHERE item_id=$2 AND user_id=$3', [newId, itemId, req.user.id]); } catch(_) {}
       }
       const newItem = Object.assign({}, item, { id: newId });
-      await saveItemBackup(req.user.id, newItem);
+      await saveItemBackup(req.user.id, newItem, req.user.plan);
     }
     console.log(`[RP] Reposted ${itemId} → ${newId} (${completeResp.status})`);
+    await releaseRepostLock(req.user.id, itemId);
     res.json({ ok:completeResp.ok, oldId:itemId, newId, published:completeResp.ok, details:completeBody });
   } catch(e) {
+    await releaseRepostLock(req.user.id, itemId);
     console.error('[RP] Repost error:', e.message);
     res.status(502).json({ error:e.message });
   }
@@ -972,8 +1019,9 @@ app.post('/api/repost-queue', auth, async (req, res) => {
   const session = await store.getSession(req.user.id);
   if (!session) return res.status(401).json({ error:'No Vinted session. Sync from Vinted first.' });
   const userId = req.user.id;
+  const userPlan = req.user.plan || 'free';
   // Quota check
-  const planInfo = PLANS[req.user.plan || 'free'] || PLANS.free;
+  const planInfo = PLANS[userPlan] || PLANS.free;
   if (planInfo.repostsPerMonth != null) {
     const usage = await getUserUsage(userId);
     if (usage.repostsThisMonth + itemIds.length > planInfo.repostsPerMonth) {
@@ -986,13 +1034,17 @@ app.post('/api/repost-queue', auth, async (req, res) => {
   (async () => {
     for (let i = 0; i < itemIds.length; i++) {
       const itemId = String(itemIds[i]);
+      if (!(await acquireRepostLock(userId, itemId))) {
+        console.log(`[RP-queue] Item ${itemId} already locked, skipping`);
+        continue;
+      }
       try {
         // Fetch item from Vinted, fall back to backup
         let item = null;
         const getResp = await vintedFetch(session, `/api/v2/item_upload/items/${itemId}`);
         if (getResp.ok) {
           item = (await getResp.json()).item;
-          if (item) await saveItemBackup(userId, item);
+          if (item) await saveItemBackup(userId, item, userPlan);
         }
         if (!item && db.hasDb()) {
           const bk = await db.query('SELECT raw_data FROM rp_item_backups WHERE user_id=$1 AND item_id=$2 ORDER BY backed_up_at DESC LIMIT 1', [userId, itemId]);
@@ -1017,7 +1069,9 @@ app.post('/api/repost-queue', auth, async (req, res) => {
         }
         const newDraft = (await createResp.json()).draft;
         const newId = String(newDraft?.id || '');
-        // Refresh & complete BEFORE deleting old
+        // Draft exists — delete old item NOW (backup already saved above)
+        await deleteVintedItem(session, itemId, 'RP-queue');
+        // Refresh & complete the new draft
         await new Promise(r => setTimeout(r, 800 + Math.random() * 400));
         const refreshResp = await vintedFetch(session, `/api/v2/item_upload/items/${newId}`);
         const refreshedItem = refreshResp.ok ? (await refreshResp.json()).item : null;
@@ -1029,22 +1083,23 @@ app.post('/api/repost-queue', auth, async (req, res) => {
           method:'POST', body:{ draft:completionDraft, feedback_id:null, parcel:null, push_up:false, upload_session_id:completionDraft.temp_uuid || uuid }
         });
         if (completeResp.ok) {
-          // New listing is live — now delete old and unhide new
-          await deleteVintedItem(session, itemId, 'RP-queue');
+          // New listing is live — unhide it
           try { await vintedFetch(session, `/api/v2/items/${newId}/is_hidden`, { method:'PUT', body:{ is_hidden:false } }); } catch(_) {}
           console.log(`[RP-queue] Reposted ${itemId} → ${newId}`);
           await logAction(userId, 'repost', { itemId, newItemId:newId, itemTitle:item.title, status:'success', details:{ source:'backend-queue' } });
           if (db.hasDb()) {
-            try { await db.query('UPDATE rp_items SET item_id=$1, repost_count=repost_count+1, last_repost=NOW() WHERE item_id=$2 AND user_id=$3', [newId, itemId, userId]); } catch(_) {}
+            try { await db.query('UPDATE rp_items SET item_id=$1, previous_item_id=$2, repost_count=repost_count+1, last_repost=NOW() WHERE item_id=$2 AND user_id=$3', [newId, itemId, userId]); } catch(_) {}
           }
           const newItem = Object.assign({}, item, { id: newId });
-          await saveItemBackup(userId, newItem);
+          await saveItemBackup(userId, newItem, userPlan);
         } else {
           await logAction(userId, 'repost', { itemId, itemTitle:item.title, status:'failed', details:{ source:'backend-queue', error:`Publish failed (${completeResp.status})` } });
         }
+        await releaseRepostLock(userId, itemId);
         // Stagger between items
         if (i < itemIds.length - 1) await new Promise(r => setTimeout(r, 60000 + Math.random() * 60000));
       } catch (e) {
+        await releaseRepostLock(userId, itemId);
         console.error(`[RP-queue] Error for ${itemId}:`, e.message);
         await logAction(userId, 'repost', { itemId, status:'failed', details:{ source:'backend-queue', error:e.message } });
       }
@@ -1101,15 +1156,22 @@ app.post('/api/vinted/items/:itemId/repost-log', auth, async (req, res) => {
     if (db.hasDb()) {
       const now = new Date().toISOString();
       if (newId && newId !== req.params.itemId) {
+        // Save backup of old item before updating ID
+        const oldItem = await db.query('SELECT raw_data FROM rp_items WHERE item_id=$1 AND user_id=$2', [req.params.itemId, req.user.id]);
+        if (oldItem.rows[0] && oldItem.rows[0].raw_data) {
+          let backupData = oldItem.rows[0].raw_data;
+          if (typeof backupData === 'string') try { backupData = JSON.parse(backupData); } catch {}
+          if (!backupData.id) backupData.id = req.params.itemId;
+          await saveItemBackup(req.user.id, backupData, req.user.plan);
+        }
         // Fetch current raw_data to merge repostEdits into it
-        const existing = await db.query('SELECT raw_data FROM rp_items WHERE item_id=$1 AND user_id=$2', [req.params.itemId, req.user.id]);
         let raw = {};
-        try { raw = JSON.parse(existing.rows[0]?.raw_data || '{}'); } catch {}
+        try { raw = oldItem.rows[0]?.raw_data || {}; if (typeof raw === 'string') raw = JSON.parse(raw); } catch {}
         const prevEdits = raw.repostEdits || [];
         const newRepostEdits = edits && edits.length ? [edits, ...prevEdits.slice(0,4)] : prevEdits;
         const updatedRaw = JSON.stringify(Object.assign({}, raw, { lastRepost: now, repostEdits: newRepostEdits, repostCount: (raw.repostCount||0)+1 }));
         await db.query(
-          `UPDATE rp_items SET item_id=$1,last_repost=$2,repost_count=repost_count+1,status='active',raw_data=$5
+          `UPDATE rp_items SET item_id=$1,previous_item_id=$3,last_repost=$2,repost_count=repost_count+1,status='active',raw_data=$5
            WHERE item_id=$3 AND user_id=$4`,
           [newId, now, req.params.itemId, req.user.id, updatedRaw]
         );
@@ -1247,6 +1309,8 @@ app.get('/api/vinted/package-sizes', auth, async (req, res) => {
 async function checkAllSchedules() {
   if (!db.hasDb()) return;
   try {
+    // Clean up stale repost locks (>10 min old)
+    await db.query("DELETE FROM rp_repost_locks WHERE locked_at < NOW() - INTERVAL '10 minutes'").catch(() => {});
     const now = new Date();
     const rows = (await db.query('SELECT * FROM rp_schedules WHERE active=true')).rows;
     console.log(`[RP-cron] Checking ${rows.length} active schedule(s) at ${now.toISOString()}`);
@@ -1301,13 +1365,17 @@ async function checkAllSchedules() {
 
       for (let j = 0; j < items.length; j++) {
         const itemId = items[j];
+        if (!(await acquireRepostLock(userId, itemId))) {
+          console.log(`[RP-cron] Item ${itemId} already locked, skipping`);
+          continue;
+        }
         try {
           // Fetch item from Vinted, fall back to backup
           let item = null;
           const getResp = await vintedFetch(session, `/api/v2/item_upload/items/${itemId}`);
           if (getResp.ok) {
             item = (await getResp.json()).item;
-            if (item) await saveItemBackup(userId, item);
+            if (item) await saveItemBackup(userId, item, (user && user.plan) || 'free');
           }
           if (!item) {
             // Try backup
@@ -1346,7 +1414,9 @@ async function checkAllSchedules() {
           const newDraft = (await createResp.json()).draft;
           const newId = String(newDraft?.id || '');
 
-          // Refresh & complete BEFORE deleting old
+          // Draft exists — delete old item NOW (backup already saved above)
+          await deleteVintedItem(session, itemId, 'RP-cron');
+          // Refresh & complete the new draft
           await new Promise(r => setTimeout(r, 800 + Math.random() * 400));
           const refreshResp = await vintedFetch(session, `/api/v2/item_upload/items/${newId}`);
           const refreshedItem = refreshResp.ok ? (await refreshResp.json()).item : null;
@@ -1359,28 +1429,35 @@ async function checkAllSchedules() {
           });
 
           if (completeResp.ok) {
-            // New listing is live — now delete old and unhide new
-            await deleteVintedItem(session, itemId, 'RP-cron');
+            // New listing is live — unhide it
             try { await vintedFetch(session, `/api/v2/items/${newId}/is_hidden`, { method:'PUT', body:{ is_hidden:false } }); } catch(_) {}
             console.log(`[RP-cron] Reposted ${itemId} → ${newId}`);
             await logAction(userId, 'repost', { itemId, newItemId: newId, itemTitle: item.title, status: 'success', details: { source: 'server-schedule', scheduleId: row.id } });
             if (db.hasDb()) {
               try {
-                await db.query(`UPDATE rp_items SET item_id=$1, repost_count=repost_count+1, last_repost=NOW() WHERE item_id=$2 AND user_id=$3`, [newId, itemId, userId]);
+                await db.query(`UPDATE rp_items SET item_id=$1, previous_item_id=$2, repost_count=repost_count+1, last_repost=NOW() WHERE item_id=$2 AND user_id=$3`, [newId, itemId, userId]);
+              } catch (_) {}
+              // Update schedule's item_ids: replace old ID with new ID
+              try {
+                const newItems = items.map(id => id === itemId ? newId : id);
+                await db.query('UPDATE rp_schedules SET item_ids=$1 WHERE id=$2 AND user_id=$3', [newItems, row.id, userId]);
+                items[j] = newId; // Update in-memory too for remaining iterations
               } catch (_) {}
             }
             const newItem = Object.assign({}, item, { id: newId });
-            await saveItemBackup(userId, newItem);
+            await saveItemBackup(userId, newItem, (user && user.plan) || 'free');
           } else {
             console.log(`[RP-cron] Publish failed for ${itemId} → ${newId}: ${completeResp.status}`);
             await logAction(userId, 'repost', { itemId, itemTitle: item.title, status: 'failed', details: { source: 'server-schedule', scheduleId: row.id, error: `Publish failed (${completeResp.status})` } });
           }
 
+          await releaseRepostLock(userId, itemId);
           // Stagger between items
           if (j < items.length - 1) {
             await new Promise(r => setTimeout(r, 60000 + Math.random() * 60000));
           }
         } catch (e) {
+          await releaseRepostLock(userId, itemId);
           console.error(`[RP-cron] Repost error for item ${itemId}:`, e.message);
           await logAction(userId, 'repost', { itemId, itemTitle: null, status: 'failed', details: { source: 'server-schedule', scheduleId: row.id, error: e.message } });
         }

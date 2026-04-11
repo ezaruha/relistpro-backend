@@ -124,6 +124,7 @@ async function initSchema() {
         ALTER TABLE rp_schedules ADD COLUMN IF NOT EXISTS slot TEXT;
         ALTER TABLE rp_schedules ADD COLUMN IF NOT EXISTS executed BOOLEAN DEFAULT false;
         ALTER TABLE rp_schedules ADD COLUMN IF NOT EXISTS tz_offset INTEGER DEFAULT 0;
+        ALTER TABLE rp_items ADD COLUMN IF NOT EXISTS previous_item_id TEXT;
       EXCEPTION WHEN OTHERS THEN NULL;
       END $$;
 
@@ -155,7 +156,7 @@ async function initSchema() {
       CREATE INDEX IF NOT EXISTS idx_rp_actions_user_time ON rp_actions(user_id, created_at DESC);
 
       -- Append-only item backups so a lost/failed-repost item can always be recovered.
-      -- One row per backup snapshot — never overwritten, pruned to keep last 5 per item.
+      -- One row per backup snapshot — never overwritten, pruned to keep last 10 per item.
       CREATE TABLE IF NOT EXISTS rp_item_backups (
         id BIGSERIAL PRIMARY KEY,
         user_id UUID NOT NULL REFERENCES rp_users(id) ON DELETE CASCADE,
@@ -171,6 +172,14 @@ async function initSchema() {
         backed_up_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
       CREATE INDEX IF NOT EXISTS idx_rp_item_backups_user_item ON rp_item_backups(user_id, item_id, backed_up_at DESC);
+
+      -- Prevent concurrent reposts of the same item
+      CREATE TABLE IF NOT EXISTS rp_repost_locks (
+        item_id TEXT NOT NULL,
+        user_id UUID NOT NULL REFERENCES rp_users(id) ON DELETE CASCADE,
+        locked_at TIMESTAMPTZ DEFAULT NOW(),
+        PRIMARY KEY (item_id, user_id)
+      );
     `);
     console.log('[DB] Schema ready');
   } catch (e) {
