@@ -1444,11 +1444,15 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     if (c.step === 'idle') {
       const acct = activeAccount(c);
       try {
-        const sess = await store.getSession(acct.userId);
+        let sess = await store.getSession(acct.userId);
+        if (sess) {
+          // Non-destructive CSRF re-derive — same safe path used pre-post.
+          sess = await refreshVintedSession(sess, acct.userId).catch(() => sess);
+        }
         if (!sess) {
           return bot.sendMessage(chatId,
-            '⚠️ No Vinted session found for ' + (acct.vintedName || acct.username) + '.\n\n' +
-            'To fix:\n' +
+            '⚠️ Your Vinted login for ' + (acct.vintedName || acct.username) + ' has expired (your Telegram login is fine).\n\n' +
+            'To refresh:\n' +
             '1. Open vinted.co.uk in Chrome\n' +
             '2. Click the RelistPro extension → Sync\n' +
             '3. Come back here and send your photos again');
@@ -2494,16 +2498,18 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
     // immediately sees the field buttons instead of having to tap "Edit".
     const editMode = c._summaryEditOpen || errFields.size > 0;
 
-    // If an edit just finished, prepend a friendly "post or edit more" line
-    // above the summary to match the user's requested loop.
-    if (editMode && c._justEdited) {
+    // If an edit just finished, always confirm it and show the edit grid
+    // for this render so the user can edit another field or tap POST.
+    let forceEditView = false;
+    if (c._justEdited) {
       const fieldLabel = c._justEdited;
       text = `✅ Updated ${esc(fieldLabel)}\\. Post now or edit something else?\n\n` + text;
+      forceEditView = true;
     }
     delete c._justEdited;
 
     let keyboard;
-    if (editMode) {
+    if (editMode || forceEditView) {
       keyboard = [
         [{ text: warn('title', '✏️ Title'), callback_data: 'edit:title' }, { text: warn('description', '✏️ Description'), callback_data: 'edit:desc' }, { text: warn('price', '💰 Price'), callback_data: 'edit:price' }],
         [{ text: warn('category', '📂 Category'), callback_data: 'pick:cat' }, { text: warn('size', '📏 Size'), callback_data: 'pick:size' }, { text: warn('brand', '🏷️ Brand'), callback_data: 'edit:brand' }],
@@ -4271,7 +4277,8 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       delete c._retried;
       delete c._dupChecked;
       delete c._dupEdit;
-      saveChatState(chatId);
+      console.log(`[TG] Post success: chat=${chatId} accounts=${c.accounts?.length} idx=${c.activeIdx} activeUser=${activeAccount(c)?.username}`);
+      await saveChatState(chatId);
 
     } catch (e) {
       console.error('[TG] Listing error:', e.message);
