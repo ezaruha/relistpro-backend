@@ -2473,7 +2473,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
     let text = `✅ *LISTING READY*\n📤 Posting to: *${esc(vintedLabel)}*\n\n` +
       `*Title:* ${esc(L.title)}\n\n` +
       `*Description:*\n${esc(L.description)}\n\n` +
-      `*Price:* £${L.price}\n` +
+      `*Price:* £${esc(String(L.price))}\n` +
       `*Brand:* ${esc(brandDisplay)}\n` +
       `*Condition:* ${esc(condDisplay)}\n` +
       `*Category:* ${esc(catDisplay)}\n` +
@@ -2537,10 +2537,21 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       try {
         await bot.editMessageText(text, { chat_id: chatId, message_id: c.summaryMsgId, ...opts });
         return;
-      } catch { /* falls through to send new */ }
+      } catch (e) {
+        console.log('[TG] showSummary edit failed, resending:', e.message);
+      }
     }
-    const sent = await bot.sendMessage(chatId, text, opts);
-    c.summaryMsgId = sent.message_id;
+    try {
+      const sent = await bot.sendMessage(chatId, text, opts);
+      c.summaryMsgId = sent.message_id;
+    } catch (e) {
+      // Last-ditch: MarkdownV2 parse failed somewhere — resend as plain text
+      // so the user never sees "nothing happens" after an edit.
+      console.error('[TG] showSummary MarkdownV2 failed, falling back to plain:', e.message);
+      const plain = text.replace(/\\([_*\[\]()~`>#+\-=|{}.!\\])/g, '$1').replace(/[*_`]/g, '');
+      const sent = await bot.sendMessage(chatId, plain, { reply_markup: opts.reply_markup });
+      c.summaryMsgId = sent.message_id;
+    }
   }
 
   // ──────────────────────────────────────────
@@ -3692,9 +3703,21 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
         c.listing.size_id = null;
         c.listing.size_name = 'N/A';
       }
+      clearErrorField(c, 'size');
       console.log(`[TG] No sizes for catalog_id=${c.listing.catalog_id}, defaulting to: ${c.listing.size_name} (id=${c.listing.size_id})`);
       if (c.step.startsWith('wiz_')) return wizardNext(chatId);
-      return bot.sendMessage(chatId, `No sizes for this category — using "${c.listing.size_name}".`);
+      // Review path: refresh summary with confirmation + give user a way to
+      // change category if they actually need a size.
+      await bot.sendMessage(chatId,
+        `ℹ️ This category has no size options — set to "${c.listing.size_name}".\n` +
+        `If you need a specific size, change the category instead.`,
+        { reply_markup: { inline_keyboard: [
+          [{ text: '📂 Change category', callback_data: 'pick:cat' }]
+        ]}}
+      );
+      c.step = 'review';
+      c._justEdited = 'size';
+      return showSummary(chatId);
     }
 
     // Cache for title lookup when user selects
@@ -3739,7 +3762,10 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       c.listing.size_id = null;
       c.listing.size_name = 'N/A';
       if (c.step.startsWith('wiz_')) return wizardNext(chatId);
-      bot.sendMessage(chatId, 'Could not load sizes. Skipping.');
+      await bot.sendMessage(chatId, 'Could not load sizes — set to "N/A". Try again or change the category.');
+      c.step = 'review';
+      c._justEdited = 'size';
+      return showSummary(chatId);
     }
   }
 
@@ -4257,7 +4283,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
 
       await bot.editMessageText(
         `*Item listed successfully\\!* 🎉\n\n` +
-        `*${esc(L.title)}* — £${L.price}\n\n` +
+        `*${esc(L.title)}* — £${esc(String(L.price))}\n\n` +
         `[View on Vinted](${esc(itemUrl)})`,
         { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'MarkdownV2' }
       );
