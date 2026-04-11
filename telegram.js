@@ -4432,12 +4432,22 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       );
     }
 
-    // Command channel requires Postgres (rp_commands + rp_command_photos).
-    // If DATABASE_URL isn't set (dev mode or Railway env drift), fall back
-    // to the legacy inline-backend post path so the bot still functions.
+    // The safe post path requires Postgres (rp_commands + rp_command_photos)
+    // so the extension can pick up the job and post from the user's real
+    // browser. Without DB we'd have to route through the legacy inline path
+    // — which posts from the Railway datacenter IP and is the exact pattern
+    // that got the previous account permabanned for "fraudulent purposes".
+    // Refuse to post rather than silently re-enable that vector.
     if (!db || !db.hasDb()) {
-      console.log('[TG] createListing: no DB, falling back to createListingViaBackend');
-      return createListingViaBackend(chatId);
+      console.error('[TG] createListing BLOCKED for chat ' + chatId + ': DATABASE_URL is not set — refusing to post via Railway-side fallback to protect the Vinted account from the ban vector that hit tonyfrancoz.');
+      c.step = 'review'; saveChatState(chatId);
+      return bot.sendMessage(chatId,
+        '🛑 *Posting is disabled*\n\n' +
+        'The safe post path (through your Chrome extension) needs Postgres to queue commands, and this backend is running without `DATABASE_URL`.\n\n' +
+        '⚠️ *Why I refuse to fall back:* the legacy path posts directly from the Railway server IP. That is the exact pattern that got the previous account permabanned for "fraudulent purposes". I will not route through it silently.\n\n' +
+        'Fix: set `DATABASE_URL` on the Railway backend so the extension command-channel is active, then tap POST again.',
+        { parse_mode: 'Markdown' }
+      );
     }
 
     // Sort photos by Telegram message_id and drop failed downloads
