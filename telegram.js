@@ -1245,6 +1245,8 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       }
       c.step = 'idle';
       await saveChatState(chatId);
+      // Store telegram chat_id on the user record for dashboard linking
+      try { await db.query('UPDATE rp_users SET telegram_chat_id=$1,telegram_username=$2,updated_at=NOW() WHERE id=$3', [String(chatId), msg.from?.username||null, user.id]); } catch(e) { /* non-critical */ }
       console.log(`[TG] Login complete: chat=${chatId} accounts=${c.accounts.length} idx=${c.activeIdx} user=${username}`);
 
       const vintedDisplay = vintedName || '_not detected_';

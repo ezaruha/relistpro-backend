@@ -3,24 +3,131 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>RelistPro</title>
+<title>RelistPro — Sell Faster on Vinted</title>
+<meta name="description" content="RelistPro helps you sell faster on Vinted with smart reposting, photo editing, scheduling, and analytics. Free Chrome extension.">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
   --bg:#0a0a0a;--card:#141414;--card2:#1c1c1c;--border:#252525;
   --text:#e2e8f0;--sub:#94a3b8;--accent:#6366f1;--accent2:#818cf8;
-  --green:#22c55e;--red:#ef4444;--radius:10px;--shadow:0 4px 24px rgba(0,0,0,.5);
+  --green:#22c55e;--red:#ef4444;--radius:12px;--shadow:0 4px 24px rgba(0,0,0,.5);
+  --max:1120px;
 }
-body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;min-height:100vh;overflow-x:hidden}
+a{color:var(--accent2);text-decoration:none}
+a:hover{text-decoration:underline}
 button{cursor:pointer;border:none;font-family:inherit;transition:.15s}
 input{font-family:inherit}
 
-/* ── Auth ── */
-#authScreen{display:flex;align-items:center;justify-content:center;min-height:100vh;background:radial-gradient(ellipse at 50% 0%,#1e1b4b 0%,var(--bg) 60%)}
-.auth-box{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:36px;width:340px;box-shadow:var(--shadow)}
-.auth-box h1{font-size:26px;font-weight:700;margin-bottom:4px;background:linear-gradient(135deg,#fff,var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.auth-box p{color:var(--sub);font-size:13px;margin-bottom:24px}
-.tab-sw{display:flex;background:var(--card2);border-radius:8px;padding:3px;margin-bottom:20px;gap:3px}
+/* ── Nav ── */
+.nav{position:sticky;top:0;background:rgba(10,10,10,.92);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);z-index:1000;padding:0 24px}
+.nav-inner{max-width:var(--max);margin:0 auto;display:flex;align-items:center;height:56px;gap:24px}
+.nav-logo{font-size:18px;font-weight:800;background:linear-gradient(135deg,#fff,var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-right:auto}
+.nav a{color:var(--sub);font-size:13px;font-weight:500;text-decoration:none}
+.nav a:hover{color:#fff}
+.nav-cta{padding:7px 18px;border-radius:8px;background:var(--accent);color:#fff;font-size:13px;font-weight:600;text-decoration:none!important}
+.nav-cta:hover{background:var(--accent2)}
+
+/* ── Hero ── */
+.hero{text-align:center;padding:100px 24px 80px;background:radial-gradient(ellipse at 50% 0%,#1e1b4b 0%,var(--bg) 60%)}
+.hero h1{font-size:clamp(36px,6vw,64px);font-weight:800;line-height:1.1;margin-bottom:16px;background:linear-gradient(135deg,#fff 30%,var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.hero p{font-size:clamp(16px,2.5vw,20px);color:var(--sub);max-width:560px;margin:0 auto 32px;line-height:1.6}
+.hero-btns{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+.btn-hero{padding:14px 36px;border-radius:12px;font-size:16px;font-weight:700;border:none}
+.btn-hero.primary{background:var(--accent);color:#fff;box-shadow:0 6px 24px rgba(99,102,241,.3)}
+.btn-hero.primary:hover{background:var(--accent2);transform:translateY(-1px)}
+.btn-hero.secondary{background:var(--card2);color:var(--text);border:1px solid var(--border)}
+.btn-hero.secondary:hover{border-color:var(--accent)}
+
+/* ── Stats bar ── */
+.stats-bar{background:var(--card);border-top:1px solid var(--border);border-bottom:1px solid var(--border);padding:20px 24px}
+.stats-inner{max-width:var(--max);margin:0 auto;display:flex;justify-content:center;gap:48px;flex-wrap:wrap}
+.stat{text-align:center}
+.stat-n{font-size:28px;font-weight:800;color:var(--accent2)}
+.stat-l{font-size:12px;color:var(--sub);margin-top:2px}
+
+/* ── Section ── */
+.section{max-width:var(--max);margin:0 auto;padding:80px 24px}
+.sec-title{text-align:center;font-size:clamp(28px,4vw,42px);font-weight:800;margin-bottom:8px}
+.sec-sub{text-align:center;font-size:16px;color:var(--sub);margin-bottom:48px;max-width:600px;margin-left:auto;margin-right:auto;line-height:1.6}
+
+/* ── Features grid ── */
+.features{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}
+.feat{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:24px}
+.feat-icon{font-size:28px;margin-bottom:12px}
+.feat h3{font-size:15px;font-weight:700;margin-bottom:6px}
+.feat p{font-size:13px;color:var(--sub);line-height:1.6}
+
+/* ── How it works ── */
+.steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:24px;counter-reset:step}
+.step{text-align:center;padding:32px 20px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);counter-increment:step;position:relative}
+.step::before{content:counter(step);display:flex;width:40px;height:40px;border-radius:50%;background:var(--accent);color:#fff;font-size:18px;font-weight:800;align-items:center;justify-content:center;margin:0 auto 16px}
+.step h3{font-size:15px;font-weight:700;margin-bottom:6px}
+.step p{font-size:13px;color:var(--sub);line-height:1.5}
+
+/* ── Telegram section ── */
+.tg-section{background:var(--card);border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.tg-inner{max-width:var(--max);margin:0 auto;padding:80px 24px;display:grid;grid-template-columns:1fr 1fr;gap:48px;align-items:center}
+@media(max-width:768px){.tg-inner{grid-template-columns:1fr}}
+.tg-chat{background:var(--card2);border:1px solid var(--border);border-radius:16px;padding:24px;font-size:13px;line-height:1.8;color:var(--sub);max-width:360px}
+.tg-msg{background:var(--bg);border-radius:12px;padding:10px 14px;margin-bottom:8px}
+.tg-msg.bot{background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.2);color:var(--accent2)}
+
+/* ── Comparison ── */
+.cmp-table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
+.cmp-table th,.cmp-table td{padding:12px 16px;text-align:left;border-bottom:1px solid var(--border);font-size:13px}
+.cmp-table th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--sub);font-weight:600}
+.cmp-table td:first-child{color:var(--sub);font-weight:500}
+.cmp-table .yes{color:var(--green);font-weight:600}
+.cmp-table .no{color:var(--red);opacity:.5}
+
+/* ── Pricing ── */
+.pricing{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
+.price-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:28px;position:relative}
+.price-card.popular{border-color:var(--accent);box-shadow:0 0 24px rgba(99,102,241,.15)}
+.price-badge{position:absolute;top:-12px;left:50%;transform:translateX(-50%);background:var(--accent);color:#fff;font-size:10px;font-weight:700;padding:3px 14px;border-radius:20px;text-transform:uppercase;letter-spacing:.05em}
+.price-name{font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
+.price-amt{font-size:36px;font-weight:800;margin-bottom:4px}
+.price-per{font-size:13px;color:var(--sub);margin-bottom:16px}
+.price-feat{font-size:12px;color:var(--sub);line-height:2}
+.price-feat .check{color:var(--green);margin-right:4px}
+.btn-price{width:100%;margin-top:16px;padding:12px;border-radius:10px;font-size:14px;font-weight:700;border:none}
+.btn-price.primary{background:var(--accent);color:#fff}
+.btn-price.primary:hover{background:var(--accent2)}
+.btn-price.secondary{background:var(--card2);color:var(--text);border:1px solid var(--border)}
+.btn-price.secondary:hover{border-color:var(--accent)}
+
+/* ── Trust ── */
+.trust{display:flex;justify-content:center;gap:32px;flex-wrap:wrap;padding:48px 24px;text-align:center}
+.trust-item{font-size:12px;color:var(--sub);display:flex;align-items:center;gap:6px}
+.trust-icon{font-size:16px}
+
+/* ── FAQ ── */
+.faq{max-width:720px;margin:0 auto}
+.faq-item{border-bottom:1px solid var(--border);padding:16px 0}
+.faq-q{font-size:14px;font-weight:600;cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:12px}
+.faq-q::after{content:'+';font-size:20px;color:var(--sub);flex-shrink:0;transition:transform .2s}
+.faq-item.open .faq-q::after{transform:rotate(45deg)}
+.faq-a{font-size:13px;color:var(--sub);line-height:1.7;max-height:0;overflow:hidden;transition:max-height .3s,padding .3s}
+.faq-item.open .faq-a{max-height:200px;padding-top:10px}
+
+/* ── Footer ── */
+.footer{background:var(--card);border-top:1px solid var(--border);padding:40px 24px}
+.footer-inner{max-width:var(--max);margin:0 auto;display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:24px}
+.footer-brand{font-size:16px;font-weight:800;background:linear-gradient(135deg,#fff,var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:6px}
+.footer-copy{font-size:11px;color:#555}
+.footer-links{display:flex;gap:24px;flex-wrap:wrap}
+.footer-links a{font-size:12px;color:var(--sub)}
+.footer-links a:hover{color:#fff}
+
+/* ── Auth modal ── */
+.auth-overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.7);z-index:2000;align-items:center;justify-content:center}
+.auth-overlay.show{display:flex}
+.auth-box{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:36px;width:360px;max-width:92vw;box-shadow:var(--shadow);position:relative}
+.auth-box h2{font-size:22px;font-weight:700;margin-bottom:4px;background:linear-gradient(135deg,#fff,var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.auth-box .close{position:absolute;top:14px;right:16px;background:none;border:none;color:var(--sub);font-size:20px;cursor:pointer}
+.auth-box p{color:var(--sub);font-size:13px;margin-bottom:20px}
+.tab-sw{display:flex;background:var(--card2);border-radius:8px;padding:3px;margin-bottom:18px;gap:3px}
 .tab-sw button{flex:1;padding:7px;border-radius:6px;background:transparent;color:var(--sub);font-size:13px;border:none}
 .tab-sw button.on{background:var(--accent);color:#fff}
 .field{margin-bottom:12px}
@@ -30,65 +137,8 @@ input{font-family:inherit}
 .btn-primary{width:100%;background:var(--accent);color:#fff;border-radius:8px;padding:11px;font-weight:600;font-size:14px;margin-top:4px}
 .btn-primary:hover{background:var(--accent2)}
 .auth-err{color:var(--red);font-size:12px;margin-top:8px;display:none;text-align:center}
-
-/* ── App ── */
-#app{display:none}
-#app.visible{display:block}
-header{background:var(--card);border-bottom:1px solid var(--border);padding:0 24px;display:flex;align-items:center;height:56px;gap:16px}
-.logo{font-size:17px;font-weight:700;background:linear-gradient(135deg,#fff,var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;flex:1}
-.hdr-user{font-size:12px;color:var(--sub)}
-.btn-out{padding:5px 12px;border-radius:6px;font-size:12px;font-weight:600;background:var(--card2);border:1px solid var(--border);color:var(--sub)}
-.btn-out:hover{color:var(--red);border-color:var(--red)}
-
-main{max-width:640px;margin:0 auto;padding:28px 20px 60px}
-
-/* ── Sections ── */
-.section{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:20px;overflow:hidden}
-.sec-hdr{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px}
-.sec-hdr h2{font-size:14px;font-weight:600}
-.sec-hdr .dot{width:8px;height:8px;border-radius:50%;background:var(--accent)}
-.sec-hdr .dot.green{background:var(--green)}
-.sec-hdr .dot.red{background:var(--red)}
-.sec-body{padding:18px 20px}
-.row{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--border)}
-.row:last-child{border:none}
-.row-label{font-size:12px;color:var(--sub)}
-.row-val{font-size:13px;font-weight:500}
-.row-val.accent{color:var(--accent2)}
-.row-val.green{color:var(--green)}
-
-/* ── Account field inline edit ── */
-.edit-row{display:flex;gap:8px;align-items:center;margin-top:12px}
-.edit-row input{flex:1;background:var(--card2);border:1px solid var(--border);border-radius:7px;padding:8px 10px;color:var(--text);font-size:13px;outline:none}
-.edit-row input:focus{border-color:var(--accent)}
-.btn-save{padding:7px 14px;border-radius:7px;background:var(--accent);color:#fff;font-size:12px;font-weight:600;border:none;white-space:nowrap}
-.btn-save:hover{background:var(--accent2)}
-.btn-save:disabled{opacity:.5;cursor:default}
-
-/* ── Plans ── */
-.plans{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:4px}
-.plan-card{background:var(--card2);border:1px solid var(--border);border-radius:9px;padding:14px;cursor:default}
-.plan-card.current{border-color:var(--accent)}
-.plan-name{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px}
-.plan-name.free{color:var(--sub)}
-.plan-name.pro{color:var(--accent2)}
-.plan-name.business{color:#f59e0b}
-.plan-price{font-size:20px;font-weight:700;margin-bottom:8px}
-.plan-feat{font-size:10px;color:var(--sub);line-height:1.8}
-.badge-current{display:inline-block;font-size:9px;font-weight:700;padding:2px 7px;border-radius:20px;background:rgba(99,102,241,.15);color:var(--accent2);text-transform:uppercase;margin-bottom:6px}
-.btn-upgrade{width:100%;margin-top:10px;padding:7px;border-radius:7px;font-size:11px;font-weight:600;background:var(--accent);color:#fff;border:none}
-.btn-upgrade:hover{background:var(--accent2)}
-.btn-upgrade:disabled{opacity:.4;cursor:default}
-
-/* ── Connected account card ── */
-.acct-card{display:flex;align-items:center;gap:12px;background:var(--card2);border:1px solid var(--border);border-radius:9px;padding:14px 16px}
-.acct-icon{width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}
-.acct-info{flex:1;min-width:0}
-.acct-domain{font-size:13px;font-weight:600}
-.acct-sub{font-size:11px;color:var(--sub);margin-top:2px}
-.acct-badge{font-size:10px;font-weight:600;padding:2px 8px;border-radius:20px;background:rgba(34,197,94,.1);color:var(--green);flex-shrink:0}
-.no-acct{text-align:center;padding:20px;color:var(--sub);font-size:13px}
-.no-acct strong{display:block;margin-bottom:6px;color:var(--text);font-size:14px}
+.forgot-link{display:block;text-align:center;margin-top:10px;font-size:12px;color:var(--sub);cursor:pointer}
+.forgot-link:hover{color:var(--accent2)}
 
 /* ── Toast ── */
 #toast{position:fixed;bottom:24px;right:24px;padding:10px 16px;border-radius:9px;font-size:12px;font-weight:500;color:#fff;box-shadow:0 4px 20px rgba(0,0,0,.3);opacity:0;transition:opacity .2s;pointer-events:none;z-index:9999}
@@ -96,87 +146,251 @@ main{max-width:640px;margin:0 auto;padding:28px 20px 60px}
 #toast.ok{background:#22c55e}
 #toast.err{background:var(--red)}
 #toast.info{background:#1d1d1f}
+
+@media(max-width:600px){
+  .nav{padding:0 12px}
+  .nav-inner{gap:12px}
+  .nav a.desk{display:none}
+  .hero{padding:60px 16px 48px}
+  .section{padding:48px 16px}
+  .stats-inner{gap:24px}
+}
 </style>
 </head>
 <body>
 
-<!-- AUTH -->
-<div id="authScreen">
+<!-- ── NAV ── -->
+<nav class="nav">
+  <div class="nav-inner">
+    <div class="nav-logo">RelistPro</div>
+    <a href="#features" class="desk">Features</a>
+    <a href="#how" class="desk">How it Works</a>
+    <a href="#pricing" class="desk">Pricing</a>
+    <a href="#faq" class="desk">FAQ</a>
+    <a href="#" onclick="openAuth('login');return false" class="nav-cta">Sign In</a>
+  </div>
+</nav>
+
+<!-- ── HERO ── -->
+<section class="hero">
+  <h1>Sell Faster on Vinted</h1>
+  <p>Smart reposting, automatic photo editing, scheduled reposts, and a full analytics dashboard. The only tool you need to boost your Vinted sales.</p>
+  <div class="hero-btns">
+    <button class="btn-hero primary" onclick="openAuth('register')">Get Started Free</button>
+    <button class="btn-hero secondary" onclick="window.open('https://chromewebstore.google.com','_blank')">Install Extension</button>
+  </div>
+</section>
+
+<!-- ── STATS ── -->
+<div class="stats-bar">
+  <div class="stats-inner">
+    <div class="stat"><div class="stat-n" id="st-reposts">0</div><div class="stat-l">Items Reposted</div></div>
+    <div class="stat"><div class="stat-n" id="st-users">0</div><div class="stat-l">Active Users</div></div>
+    <div class="stat"><div class="stat-n" id="st-items">0</div><div class="stat-l">Items Managed</div></div>
+  </div>
+</div>
+
+<!-- ── FEATURES ── -->
+<section class="section" id="features">
+  <h2 class="sec-title">Everything You Need to Sell More</h2>
+  <p class="sec-sub">Powerful tools designed for Vinted sellers who want to grow their sales without the manual effort.</p>
+  <div class="features">
+    <div class="feat"><div class="feat-icon">&#x1F504;</div><h3>Smart Reposting</h3><p>One-click repost with automatic photo editing that beats Vinted's duplicate detection. Old listing deleted, new one created instantly.</p></div>
+    <div class="feat"><div class="feat-icon">&#x1F4C5;</div><h3>Scheduled Reposts</h3><p>Set a date and time, pick your items, and let RelistPro handle the rest. Even works when your browser is closed.</p></div>
+    <div class="feat"><div class="feat-icon">&#x1F4F1;</div><h3>Telegram Bot</h3><p>List items by sending photos from your phone. AI analyses images and creates listings for you. Repost from anywhere.</p></div>
+    <div class="feat"><div class="feat-icon">&#x1F4CA;</div><h3>Wardrobe Dashboard</h3><p>Full analytics: views, favourites, revenue, sold items, drafts, and repost history. Filter, search, and manage everything in one place.</p></div>
+    <div class="feat"><div class="feat-icon">&#x1F5BC;&#xFE0F;</div><h3>Photo Protection</h3><p>Subtle, invisible edits to photos — rotation, colour shifts, noise — so Vinted sees each repost as a unique listing.</p></div>
+    <div class="feat"><div class="feat-icon">&#x1F4AC;</div><h3>Auto-Reply</h3><p>Instant responses to messages, likes, and purchase questions. Customise templates for every scenario.</p></div>
+    <div class="feat"><div class="feat-icon">&#x1F4BE;</div><h3>Backup &amp; Recovery</h3><p>Every listing is backed up automatically. Lost an item? Restore it from your backup history in seconds.</p></div>
+    <div class="feat"><div class="feat-icon">&#x1F30D;</div><h3>Multi-Country</h3><p>Works on all 25+ Vinted domains: UK, FR, DE, IT, ES, NL, PL, and more. Sell across borders.</p></div>
+  </div>
+</section>
+
+<!-- ── HOW IT WORKS ── -->
+<section class="section" id="how" style="background:var(--card);border-top:1px solid var(--border);border-bottom:1px solid var(--border);max-width:100%;padding-left:24px;padding-right:24px">
+  <div style="max-width:var(--max);margin:0 auto">
+    <h2 class="sec-title">How It Works</h2>
+    <p class="sec-sub">Get started in under a minute. No configuration needed.</p>
+    <div class="steps">
+      <div class="step"><h3>Install the Extension</h3><p>Add RelistPro to Chrome from the Web Store. One click, no setup.</p></div>
+      <div class="step"><h3>Sync Your Wardrobe</h3><p>Open any Vinted page and click the RelistPro icon. Hit Sync to import all your listings.</p></div>
+      <div class="step"><h3>Repost &amp; Grow</h3><p>Repost items instantly, schedule future reposts, and watch your sales increase.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ── TELEGRAM ── -->
+<section class="tg-section" id="telegram">
+  <div class="tg-inner">
+    <div>
+      <h2 style="font-size:32px;font-weight:800;margin-bottom:12px">Repost From Your Phone</h2>
+      <p style="color:var(--sub);font-size:15px;line-height:1.7;margin-bottom:24px">The RelistPro Telegram Bot lets you list and repost items without touching your computer. Just send photos and the AI handles the rest.</p>
+      <div style="margin-bottom:20px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px"><span style="background:var(--accent);color:#fff;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0">1</span><span style="font-size:14px">Open <strong>@RelistProBot</strong> on Telegram</span></div>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px"><span style="background:var(--accent);color:#fff;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0">2</span><span style="font-size:14px">Send <code style="background:var(--card2);padding:2px 8px;border-radius:4px;font-size:13px">/login username password</code></span></div>
+        <div style="display:flex;align-items:center;gap:10px"><span style="background:var(--accent);color:#fff;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0">3</span><span style="font-size:14px">Send photos to create listings instantly</span></div>
+      </div>
+      <a href="https://t.me/RelistProBot" target="_blank" style="display:inline-block;padding:12px 28px;background:var(--accent);color:#fff;border-radius:10px;font-weight:700;font-size:14px;text-decoration:none">Open Telegram Bot</a>
+    </div>
+    <div class="tg-chat">
+      <div class="tg-msg">&#128247; <em>You sent 3 photos</em></div>
+      <div class="tg-msg bot">&#x1F6CD;&#xFE0F; I can see: Nike Air Max 90, good condition. Ready to create your listing?</div>
+      <div class="tg-msg">Yes, list it for &#163;45</div>
+      <div class="tg-msg bot">&#x2705; Listed! "Nike Air Max 90" — &#163;45.00 on vinted.co.uk</div>
+    </div>
+  </div>
+</section>
+
+<!-- ── COMPARISON ── -->
+<section class="section">
+  <h2 class="sec-title">RelistPro vs Manual Reposting</h2>
+  <p class="sec-sub">See how much time you save with every repost.</p>
+  <table class="cmp-table">
+    <thead><tr><th></th><th>Manual</th><th>RelistPro</th></tr></thead>
+    <tbody>
+      <tr><td>Time per repost</td><td>5-10 minutes</td><td class="yes">30 seconds</td></tr>
+      <tr><td>Photo editing</td><td>Manual (Photoshop)</td><td class="yes">Automatic</td></tr>
+      <tr><td>Scheduling</td><td class="no">Not possible</td><td class="yes">Set &amp; forget</td></tr>
+      <tr><td>Backup</td><td class="no">None</td><td class="yes">Automatic</td></tr>
+      <tr><td>Bulk repost</td><td>One by one</td><td class="yes">Select all, done</td></tr>
+      <tr><td>Analytics</td><td class="no">None</td><td class="yes">Views, favs, revenue</td></tr>
+      <tr><td>Mobile</td><td class="no">Browser only</td><td class="yes">Telegram bot</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ── PRICING ── -->
+<section class="section" id="pricing" style="background:var(--card);border-top:1px solid var(--border);border-bottom:1px solid var(--border);max-width:100%;padding-left:24px;padding-right:24px">
+  <div style="max-width:var(--max);margin:0 auto">
+    <h2 class="sec-title">Simple, Transparent Pricing</h2>
+    <p class="sec-sub">Start free. Upgrade when you're ready to scale.</p>
+    <div class="pricing">
+      <div class="price-card">
+        <div class="price-name" style="color:var(--sub)">Free</div>
+        <div class="price-amt">&#163;0</div>
+        <div class="price-per">Forever free</div>
+        <div class="price-feat">
+          <span class="check">&#x2713;</span> Up to 10 active items<br>
+          <span class="check">&#x2713;</span> 5 reposts / month<br>
+          <span class="check">&#x2713;</span> Basic photo editing<br>
+          <span class="check">&#x2713;</span> 10 backups<br>
+          <span class="check">&#x2713;</span> 1 month analytics
+        </div>
+        <button class="btn-price secondary" onclick="openAuth('register')">Get Started</button>
+      </div>
+      <div class="price-card popular">
+        <div class="price-badge">Most Popular</div>
+        <div class="price-name" style="color:var(--accent2)">Starter</div>
+        <div class="price-amt">&#163;4.99</div>
+        <div class="price-per">per month</div>
+        <div class="price-feat">
+          <span class="check">&#x2713;</span> Up to 50 active items<br>
+          <span class="check">&#x2713;</span> 30 reposts / month<br>
+          <span class="check">&#x2713;</span> 2 schedules<br>
+          <span class="check">&#x2713;</span> Full photo editing<br>
+          <span class="check">&#x2713;</span> 50 backups<br>
+          <span class="check">&#x2713;</span> 3 months analytics
+        </div>
+        <button class="btn-price primary" onclick="openAuth('register')">Start Free Trial</button>
+      </div>
+      <div class="price-card">
+        <div class="price-name" style="color:#f59e0b">Pro</div>
+        <div class="price-amt">&#163;9.99</div>
+        <div class="price-per">per month</div>
+        <div class="price-feat">
+          <span class="check">&#x2713;</span> Unlimited items<br>
+          <span class="check">&#x2713;</span> Unlimited reposts<br>
+          <span class="check">&#x2713;</span> Unlimited schedules<br>
+          <span class="check">&#x2713;</span> Unlimited backups<br>
+          <span class="check">&#x2713;</span> Auto-reply to messages<br>
+          <span class="check">&#x2713;</span> Telegram bot posting<br>
+          <span class="check">&#x2713;</span> Full analytics history<br>
+          <span class="check">&#x2713;</span> Priority support
+        </div>
+        <button class="btn-price secondary" onclick="openAuth('register')">Go Pro</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── TRUST ── -->
+<div class="trust">
+  <div class="trust-item"><span class="trust-icon">&#x1F512;</span> Secure — data encrypted</div>
+  <div class="trust-item"><span class="trust-icon">&#x1F6E1;&#xFE0F;</span> No Vinted password stored</div>
+  <div class="trust-item"><span class="trust-icon">&#x274C;</span> Cancel anytime</div>
+  <div class="trust-item"><span class="trust-icon">&#x1F1EA;&#x1F1FA;</span> GDPR compliant</div>
+</div>
+
+<!-- ── FAQ ── -->
+<section class="section" id="faq">
+  <h2 class="sec-title">Frequently Asked Questions</h2>
+  <p class="sec-sub">Everything you need to know about RelistPro.</p>
+  <div class="faq">
+    <div class="faq-item"><div class="faq-q" onclick="this.parentElement.classList.toggle('open')">What is RelistPro?</div><div class="faq-a">RelistPro is a Chrome extension and Telegram bot that helps Vinted sellers repost their listings faster. It automatically creates fresh listings with edited photos, deletes old ones, and tracks your wardrobe analytics.</div></div>
+    <div class="faq-item"><div class="faq-q" onclick="this.parentElement.classList.toggle('open')">Is it safe to use?</div><div class="faq-a">Yes. RelistPro uses your existing Vinted session cookies — it never asks for or stores your Vinted password. Your data is encrypted and stored securely. We are fully GDPR compliant.</div></div>
+    <div class="faq-item"><div class="faq-q" onclick="this.parentElement.classList.toggle('open')">Does Vinted allow reposting?</div><div class="faq-a">Reposting is a common practice among Vinted sellers. RelistPro applies subtle photo edits so each repost appears as a unique listing. Many successful sellers use reposting as a core sales strategy.</div></div>
+    <div class="faq-item"><div class="faq-q" onclick="this.parentElement.classList.toggle('open')">How does photo editing work?</div><div class="faq-a">RelistPro applies invisible edits — subtle rotation, colour shifts, pixel noise, and metadata changes — so Vinted's duplicate detection doesn't flag your reposted listing. The photos look identical to the human eye.</div></div>
+    <div class="faq-item"><div class="faq-q" onclick="this.parentElement.classList.toggle('open')">What happens to my old listing?</div><div class="faq-a">When you repost, RelistPro creates the new listing first, then deletes the old one automatically. A backup of the original is always saved so you can restore it if needed.</div></div>
+    <div class="faq-item"><div class="faq-q" onclick="this.parentElement.classList.toggle('open')">Can I use it on my phone?</div><div class="faq-a">Yes! The RelistPro Telegram Bot lets you list and repost items by sending photos from your phone. The bot uses AI to analyse your photos and create listings automatically.</div></div>
+    <div class="faq-item"><div class="faq-q" onclick="this.parentElement.classList.toggle('open')">What Vinted countries are supported?</div><div class="faq-a">RelistPro works on all 25+ Vinted domains including UK, France, Germany, Italy, Spain, Netherlands, Poland, Czech Republic, Belgium, and more.</div></div>
+    <div class="faq-item"><div class="faq-q" onclick="this.parentElement.classList.toggle('open')">How do I cancel my subscription?</div><div class="faq-a">You can cancel anytime from the Account tab in the extension dashboard, or via the Stripe billing portal. Your paid features remain active until the end of your billing period.</div></div>
+    <div class="faq-item"><div class="faq-q" onclick="this.parentElement.classList.toggle('open')">Is my data safe?</div><div class="faq-a">Your data is stored in a PostgreSQL database with encrypted connections. We never share your data with third parties. You can export all your data as CSV or delete your account at any time.</div></div>
+    <div class="faq-item"><div class="faq-q" onclick="this.parentElement.classList.toggle('open')">How do I get help?</div><div class="faq-a">Reply to any email from us, use the Telegram bot's /help command, or contact us at support@relistpro.com. Pro plan users get priority support.</div></div>
+  </div>
+</section>
+
+<!-- ── FOOTER ── -->
+<footer class="footer">
+  <div class="footer-inner">
+    <div>
+      <div class="footer-brand">RelistPro</div>
+      <div class="footer-copy">&copy; 2025 RelistPro. All rights reserved.</div>
+    </div>
+    <div class="footer-links">
+      <a href="#features">Features</a>
+      <a href="#pricing">Pricing</a>
+      <a href="#faq">FAQ</a>
+      <a href="https://t.me/RelistProBot" target="_blank">Telegram Bot</a>
+      <a href="#" onclick="openAuth('login');return false">Sign In</a>
+    </div>
+  </div>
+</footer>
+
+<!-- ── AUTH MODAL ── -->
+<div class="auth-overlay" id="authOverlay">
   <div class="auth-box">
-    <h1>RelistPro</h1>
-    <p>Manage your account and subscription</p>
+    <button class="close" onclick="closeAuth()">&times;</button>
+    <h2>RelistPro</h2>
+    <p>Sign in or create an account</p>
     <div class="tab-sw">
-      <button id="tabLogin" class="on" onclick="showTab('login')">Sign In</button>
-      <button id="tabReg" onclick="showTab('register')">Register</button>
+      <button id="tabLogin" class="on" onclick="showAuthTab('login')">Sign In</button>
+      <button id="tabReg" onclick="showAuthTab('register')">Register</button>
     </div>
     <div id="loginForm">
       <div class="field"><label>Username</label><input id="l-user" placeholder="your username" autocomplete="username"></div>
-      <div class="field"><label>Password</label><input id="l-pw" type="password" placeholder="••••••••" autocomplete="current-password"></div>
+      <div class="field"><label>Password</label><input id="l-pw" type="password" placeholder="&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;&#x2022;" autocomplete="current-password"></div>
       <button class="btn-primary" onclick="doLogin()">Sign In</button>
+      <span class="forgot-link" onclick="showForgot()">Forgot password?</span>
     </div>
     <div id="regForm" style="display:none">
       <div class="field"><label>Username</label><input id="r-user" placeholder="choose a username" autocomplete="username"></div>
       <div class="field"><label>Email (optional)</label><input id="r-email" type="email" placeholder="you@example.com" autocomplete="email"></div>
       <div class="field"><label>Password</label><input id="r-pw" type="password" placeholder="min 8 characters" autocomplete="new-password"></div>
+      <div class="field"><label>Referral Code (optional)</label><input id="r-ref" placeholder="ABC123" style="text-transform:uppercase;letter-spacing:2px"></div>
       <button class="btn-primary" onclick="doRegister()">Create Account</button>
+    </div>
+    <div id="forgotForm" style="display:none">
+      <div class="field"><label>Email address</label><input id="f-email" type="email" placeholder="your@email.com"></div>
+      <button class="btn-primary" id="btn-send-code" onclick="sendResetCode()">Send Reset Code</button>
+      <div id="resetFields" style="display:none;margin-top:12px">
+        <div class="field"><label>Reset Code</label><input id="f-code" placeholder="123456" style="letter-spacing:4px;text-align:center"></div>
+        <div class="field"><label>New Password</label><input id="f-newpw" type="password" placeholder="min 8 characters"></div>
+        <button class="btn-primary" onclick="doReset()">Reset Password</button>
+      </div>
+      <span class="forgot-link" onclick="showAuthTab('login')">Back to Sign In</span>
     </div>
     <div class="auth-err" id="auth-err"></div>
   </div>
-</div>
-
-<!-- APP -->
-<div id="app">
-  <header>
-    <div class="logo">RelistPro</div>
-    <span class="hdr-user" id="hdr-user"></span>
-    <button class="btn-out" onclick="doLogout()">Sign out</button>
-  </header>
-  <main>
-
-    <!-- Connected Vinted Account -->
-    <div class="section">
-      <div class="sec-hdr">
-        <div class="dot green" id="acct-dot"></div>
-        <h2>Connected Vinted Account</h2>
-      </div>
-      <div class="sec-body" id="acct-body">
-        <div class="no-acct"><strong>No account connected</strong>Install the Chrome extension, open any Vinted page and click Sync to connect.</div>
-      </div>
-    </div>
-
-    <!-- Account Settings -->
-    <div class="section">
-      <div class="sec-hdr">
-        <div class="dot"></div>
-        <h2>Account Settings</h2>
-      </div>
-      <div class="sec-body">
-        <div class="row"><span class="row-label">Username</span><span class="row-val" id="set-username">—</span></div>
-        <div class="row" style="border:none;flex-direction:column;align-items:flex-start;gap:6px">
-          <span class="row-label">Email</span>
-          <div class="edit-row" style="width:100%">
-            <input id="set-email" placeholder="Add your email address" type="email">
-            <button class="btn-save" id="btn-save-email" onclick="saveEmail()">Save</button>
-          </div>
-          <span style="font-size:11px;color:var(--sub)">Used for account recovery and notifications</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Subscription -->
-    <div class="section">
-      <div class="sec-hdr">
-        <div class="dot accent"></div>
-        <h2>Subscription</h2>
-      </div>
-      <div class="sec-body">
-        <div class="plans" id="plans-grid">
-          <div style="grid-column:1/-1;text-align:center;padding:20px;color:var(--sub);font-size:13px">Loading plans…</div>
-        </div>
-      </div>
-    </div>
-
-  </main>
 </div>
 
 <div id="toast"></div>
@@ -184,7 +398,6 @@ main{max-width:640px;margin:0 auto;padding:28px 20px 60px}
 <script>
 const API = '';
 let token = localStorage.getItem('rp_token') || '';
-let profile = null;
 
 function toast(msg, type) {
   const el = document.getElementById('toast');
@@ -194,12 +407,27 @@ function toast(msg, type) {
   el._t = setTimeout(() => el.className = '', type === 'err' ? 5000 : 3000);
 }
 
-function showTab(t) {
+// Auth modal
+function openAuth(tab) {
+  document.getElementById('authOverlay').classList.add('show');
+  showAuthTab(tab || 'login');
+}
+function closeAuth() {
+  document.getElementById('authOverlay').classList.remove('show');
+}
+function showAuthTab(t) {
   document.getElementById('tabLogin').classList.toggle('on', t === 'login');
   document.getElementById('tabReg').classList.toggle('on', t === 'register');
   document.getElementById('loginForm').style.display = t === 'login' ? '' : 'none';
   document.getElementById('regForm').style.display = t === 'register' ? '' : 'none';
+  document.getElementById('forgotForm').style.display = t === 'forgot' ? '' : 'none';
   document.getElementById('auth-err').style.display = 'none';
+}
+function showForgot() {
+  showAuthTab('forgot');
+  document.getElementById('forgotForm').style.display = '';
+  document.getElementById('loginForm').style.display = 'none';
+  document.getElementById('regForm').style.display = 'none';
 }
 
 function showErr(msg) {
@@ -208,154 +436,96 @@ function showErr(msg) {
   el.style.display = 'block';
 }
 
-async function api(path, method, body) {
-  const opts = { method: method || 'GET', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token } };
-  if (body) opts.body = JSON.stringify(body);
-  const r = await fetch(API + path, opts);
-  return r.json();
-}
-
 async function doLogin() {
   const user = document.getElementById('l-user').value.trim();
   const pw = document.getElementById('l-pw').value;
   if (!user || !pw) { showErr('Enter username and password'); return; }
-  const r = await fetch(API + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: user, password: pw }) });
-  const d = await r.json();
-  if (!r.ok) { showErr(d.error || 'Login failed'); return; }
-  token = d.token;
-  localStorage.setItem('rp_token', token);
-  startApp();
+  try {
+    const r = await fetch(API + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: user, password: pw }) });
+    const d = await r.json();
+    if (!r.ok) { showErr(d.error || 'Login failed'); return; }
+    token = d.token;
+    localStorage.setItem('rp_token', token);
+    closeAuth();
+    toast('Signed in! Install the Chrome extension to start reposting.', 'ok');
+  } catch(e) { showErr('Network error'); }
 }
 
 async function doRegister() {
   const user = document.getElementById('r-user').value.trim();
   const email = document.getElementById('r-email').value.trim();
   const pw = document.getElementById('r-pw').value;
+  const ref = document.getElementById('r-ref').value.trim();
   if (!user || !pw) { showErr('Username and password required'); return; }
   if (pw.length < 8) { showErr('Password must be at least 8 characters'); return; }
-  const r = await fetch(API + '/api/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: user, password: pw, email }) });
-  const d = await r.json();
-  if (!r.ok) { showErr(d.error || 'Registration failed'); return; }
-  token = d.token;
-  localStorage.setItem('rp_token', token);
-  startApp();
-}
-
-function doLogout() {
-  token = '';
-  localStorage.removeItem('rp_token');
-  document.getElementById('app').classList.remove('visible');
-  document.getElementById('authScreen').style.display = 'flex';
-}
-
-async function startApp() {
-  document.getElementById('authScreen').style.display = 'none';
-  document.getElementById('app').classList.add('visible');
   try {
-    const [prof, session, plans, sub] = await Promise.all([
-      api('/api/user/profile'),
-      api('/api/session/status'),
-      api('/api/subscriptions/plans'),
-      api('/api/subscriptions/current')
-    ]);
-    profile = prof;
-    renderProfile(prof);
-    renderSession(session);
-    renderPlans(plans, sub);
-  } catch(e) {
-    toast('Failed to load account data', 'err');
-  }
-}
-
-function renderProfile(p) {
-  document.getElementById('hdr-user').textContent = p.username || '';
-  document.getElementById('set-username').textContent = p.username || '—';
-  document.getElementById('set-email').value = p.email || '';
-}
-
-function renderSession(s) {
-  const dot = document.getElementById('acct-dot');
-  const body = document.getElementById('acct-body');
-  if (s && s.active) {
-    dot.className = 'dot green';
-    const domain = s.domain || 'vinted';
-    const memberId = s.memberId || '—';
-    const since = s.storedAt ? new Date(s.storedAt).toLocaleDateString('en', { day:'numeric', month:'short', year:'numeric' }) : null;
-    body.innerHTML = '<div class="acct-card">' +
-      '<div class="acct-icon">👗</div>' +
-      '<div class="acct-info">' +
-        '<div class="acct-domain">' + domain + '</div>' +
-        '<div class="acct-sub">Member ID: ' + memberId + (since ? ' · Synced ' + since : '') + '</div>' +
-      '</div>' +
-      '<div class="acct-badge">Connected</div>' +
-    '</div>' +
-    '<p style="font-size:11px;color:var(--sub);margin-top:12px">Re-sync from the extension to refresh your session.</p>';
-  } else {
-    dot.className = 'dot red';
-    body.innerHTML = '<div class="no-acct"><strong>No Vinted account connected</strong>Open any Vinted page with the Chrome extension installed, then click the RelistPro button to sync.</div>';
-  }
-}
-
-function renderPlans(plansData, sub) {
-  const plans = plansData && plansData.plans ? plansData.plans : {};
-  const current = sub && sub.plan ? sub.plan : 'free';
-  const order = ['free', 'pro', 'business'];
-  const labels = { free: 'Free', pro: 'Pro', business: 'Business' };
-  const prices = { free: '£0/mo', pro: '£9.99/mo', business: '£24.99/mo' };
-  const feats = {
-    free: ['100 reposts/month', '1 schedule', 'Basic wardrobe sync'],
-    pro: ['Unlimited reposts', '10 schedules', 'Priority sync', 'Bulk repost'],
-    business: ['Everything in Pro', 'Multiple accounts', 'API access', 'Priority support']
-  };
-  let h = '';
-  order.forEach(plan => {
-    const isCurrent = plan === current;
-    h += '<div class="plan-card' + (isCurrent ? ' current' : '') + '">';
-    if (isCurrent) h += '<div class="badge-current">Current</div><br>';
-    h += '<div class="plan-name ' + plan + '">' + labels[plan] + '</div>';
-    h += '<div class="plan-price">' + prices[plan] + '</div>';
-    h += '<div class="plan-feat">' + feats[plan].join('<br>') + '</div>';
-    if (!isCurrent) {
-      h += '<button class="btn-upgrade" onclick="upgrade(\'' + plan + '\')">Upgrade</button>';
+    const r = await fetch(API + '/api/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: user, password: pw, email }) });
+    const d = await r.json();
+    if (!r.ok) { showErr(d.error || 'Registration failed'); return; }
+    token = d.token;
+    localStorage.setItem('rp_token', token);
+    // Apply referral code if provided
+    if (ref) {
+      try {
+        const profR = await fetch(API + '/api/user/profile', { headers: { 'Authorization': 'Bearer ' + token } });
+        const prof = await profR.json();
+        if (prof.ok) {
+          await fetch(API + '/api/referral/apply', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: ref, userId: prof.username }) });
+        }
+      } catch(e) {}
     }
-    h += '</div>';
-  });
-  document.getElementById('plans-grid').innerHTML = h;
+    closeAuth();
+    toast('Account created! Install the Chrome extension to get started.', 'ok');
+  } catch(e) { showErr('Network error'); }
 }
 
-async function upgrade(plan) {
-  const r = await api('/api/subscriptions/checkout', 'POST', {
-    plan,
-    successUrl: window.location.href + '?success=1',
-    cancelUrl: window.location.href
-  });
-  if (r.url) { window.location.href = r.url; }
-  else toast(r.error || 'Checkout unavailable — Stripe not configured', 'err');
+async function sendResetCode() {
+  const email = document.getElementById('f-email').value.trim();
+  if (!email) { showErr('Enter your email'); return; }
+  try {
+    const r = await fetch(API + '/api/auth/forgot-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }) });
+    const d = await r.json();
+    if (d.ok) {
+      document.getElementById('resetFields').style.display = '';
+      document.getElementById('btn-send-code').textContent = 'Resend Code';
+      toast('Check your email for the reset code', 'ok');
+    } else { showErr(d.error || 'Failed'); }
+  } catch(e) { showErr('Network error'); }
 }
 
-async function saveEmail() {
-  const email = document.getElementById('set-email').value.trim();
-  const btn = document.getElementById('btn-save-email');
-  btn.disabled = true;
-  const r = await api('/api/user/profile', 'PATCH', { email });
-  btn.disabled = false;
-  if (r.ok) toast('Email saved', 'ok');
-  else toast(r.error || 'Save failed', 'err');
+async function doReset() {
+  const email = document.getElementById('f-email').value.trim();
+  const code = document.getElementById('f-code').value.trim();
+  const pw = document.getElementById('f-newpw').value;
+  if (!email || !code || !pw) { showErr('Fill all fields'); return; }
+  if (pw.length < 8) { showErr('Password must be at least 8 characters'); return; }
+  try {
+    const r = await fetch(API + '/api/auth/reset-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, code, newPassword: pw }) });
+    const d = await r.json();
+    if (d.ok) { toast('Password reset! Sign in with your new password.', 'ok'); showAuthTab('login'); }
+    else { showErr(d.error || 'Failed'); }
+  } catch(e) { showErr('Network error'); }
 }
 
-// Enter key support for auth forms
+// Enter key for auth
 document.getElementById('l-pw').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
 document.getElementById('r-pw').addEventListener('keydown', e => { if (e.key === 'Enter') doRegister(); });
+document.getElementById('authOverlay').addEventListener('click', e => { if (e.target === document.getElementById('authOverlay')) closeAuth(); });
 
-// Auto-login if token stored
-if (token) {
-  startApp().catch(() => {
-    token = '';
-    localStorage.removeItem('rp_token');
+// Load public stats
+fetch(API + '/api/stats/public').then(r => r.json()).then(d => {
+  if (d.totalReposts) document.getElementById('st-reposts').textContent = d.totalReposts.toLocaleString();
+  if (d.totalUsers) document.getElementById('st-users').textContent = d.totalUsers.toLocaleString();
+  if (d.totalItems) document.getElementById('st-items').textContent = d.totalItems.toLocaleString();
+}).catch(() => {});
+
+// Smooth scroll for anchor links
+document.querySelectorAll('a[href^="#"]').forEach(a => {
+  a.addEventListener('click', e => {
+    const target = document.querySelector(a.getAttribute('href'));
+    if (target) { e.preventDefault(); target.scrollIntoView({ behavior: 'smooth' }); }
   });
-} else {
-  document.getElementById('authScreen').style.display = 'flex';
-}
+});
 </script>
 </body>
 </html>

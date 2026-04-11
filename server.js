@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const db = require('./db');
+const mailer = require('./email');
 
 const app = express();
 const PORT = process.env.PORT || 3456;
@@ -42,10 +43,12 @@ function saveData() {
 // repostsPerMonth: hard cap on reposts per calendar month (null = unlimited).
 // Free is generous enough to try everything; Pro removes all caps.
 const PLANS = {
-  free: { name:'Free', price:0,    itemLimit:50,   scheduleLimit:1,    repostsPerMonth:30,   backupLimit:50,   autoReply:false, analyticsMonths:1,
-          features:['Up to 50 active items','30 reposts / month','1 schedule','50 backups','Manual messages'] },
-  pro:  { name:'Pro',  price:9.99, itemLimit:null, scheduleLimit:null, repostsPerMonth:null, backupLimit:null, autoReply:true,  analyticsMonths:24,
-          features:['Unlimited items','Unlimited reposts','Unlimited schedules','Unlimited backups','Auto-reply to messages','Full analytics history','Bulk repost & multi-quantity'] }
+  free:    { name:'Free',    price:0,    itemLimit:10,   scheduleLimit:0,    repostsPerMonth:5,    backupLimit:10,   autoReply:false, telegramPosting:false, analyticsMonths:1,  photoEditing:'basic',
+             features:['Up to 10 active items','5 reposts / month','No schedules','10 backups','Basic photo editing'] },
+  starter: { name:'Starter', price:4.99, itemLimit:50,   scheduleLimit:2,    repostsPerMonth:30,   backupLimit:50,   autoReply:false, telegramPosting:false, analyticsMonths:3,  photoEditing:'full',
+             features:['Up to 50 active items','30 reposts / month','2 schedules','50 backups','Full photo editing','3 months analytics'] },
+  pro:     { name:'Pro',     price:9.99, itemLimit:null, scheduleLimit:null, repostsPerMonth:null, backupLimit:null, autoReply:true,  telegramPosting:true,  analyticsMonths:24, photoEditing:'full',
+             features:['Unlimited items','Unlimited reposts','Unlimited schedules','Unlimited backups','Auto-reply to messages','Telegram bot posting','Full analytics history','Priority support'] }
 };
 
 // Compute usage stats for a user across the current month
@@ -240,6 +243,7 @@ app.post('/api/auth/register', async (req, res) => {
     const hash = await hashPassword(password);
     const token = generateToken();
     await store.createUser(username, hash, token, email);
+    if (email) { mailer.sendWelcome(email, username).catch(e => console.error('[RP] Welcome email error:', e.message)); }
     res.json({ ok:true, token });
   } catch(e) { res.status(500).json({ error:e.message }); }
 });
@@ -316,10 +320,18 @@ app.get('/api/user/profile', auth, async (req, res) => {
 });
 
 app.patch('/api/user/profile', auth, async (req, res) => {
-  const { email } = req.body;
-  if (db.hasDb() && email) {
-    try { await db.query('UPDATE rp_users SET email=$1,updated_at=NOW() WHERE id=$2', [email, req.user.id]); }
-    catch(e) { return res.status(500).json({ error:e.message }); }
+  const { email, telegram_username } = req.body;
+  if (db.hasDb()) {
+    try {
+      const sets = []; const vals = [];
+      if (email !== undefined) { sets.push(`email=$${sets.length+1}`); vals.push(email); }
+      if (telegram_username !== undefined) { sets.push(`telegram_username=$${sets.length+1}`); vals.push(telegram_username); }
+      if (sets.length > 0) {
+        sets.push('updated_at=NOW()');
+        vals.push(req.user.id);
+        await db.query(`UPDATE rp_users SET ${sets.join(',')} WHERE id=$${vals.length}`, vals);
+      }
+    } catch(e) { return res.status(500).json({ error:e.message }); }
   }
   res.json({ ok:true });
 });
@@ -343,6 +355,41 @@ app.post('/api/auth/change-password', auth, async (req, res) => {
     } else {
       users[req.user.username].hash = newHash; saveData();
     }
+    if (req.user.email) { mailer.sendPasswordChanged(req.user.email).catch(e => console.error('[RP] Password-changed email error:', e.message)); }
+    res.json({ ok:true });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
+// ═══ FORGOT / RESET PASSWORD ═══
+app.post('/api/auth/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error:'email required' });
+  try {
+    if (!db.hasDb()) return res.status(400).json({ error:'Database not configured' });
+    const r = await db.query('SELECT id,email FROM rp_users WHERE LOWER(email)=LOWER($1) LIMIT 1', [email.trim()]);
+    if (!r.rows[0]) return res.json({ ok:true }); // don't reveal whether email exists
+    const code = String(Math.floor(100000 + Math.random()*900000));
+    const expires = new Date(Date.now() + 15*60*1000).toISOString();
+    await db.query('UPDATE rp_users SET reset_code=$1,reset_expires=$2,updated_at=NOW() WHERE id=$3', [code, expires, r.rows[0].id]);
+    mailer.sendPasswordResetCode(email.trim(), code).catch(e => console.error('[RP] Reset email error:', e.message));
+    res.json({ ok:true });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
+app.post('/api/auth/reset-password', async (req, res) => {
+  const { email, code, newPassword } = req.body;
+  if (!email || !code || !newPassword) return res.status(400).json({ error:'email, code, and newPassword required' });
+  if (newPassword.length < 8) return res.status(400).json({ error:'Password must be at least 8 characters' });
+  try {
+    if (!db.hasDb()) return res.status(400).json({ error:'Database not configured' });
+    const r = await db.query('SELECT id,reset_code,reset_expires FROM rp_users WHERE LOWER(email)=LOWER($1) LIMIT 1', [email.trim()]);
+    if (!r.rows[0]) return res.status(400).json({ error:'Invalid code' });
+    const user = r.rows[0];
+    if (!user.reset_code || user.reset_code !== code.trim()) return res.status(400).json({ error:'Invalid code' });
+    if (new Date(user.reset_expires) < new Date()) return res.status(400).json({ error:'Code expired' });
+    const hash = await hashPassword(newPassword);
+    await db.query('UPDATE rp_users SET password_hash=$1,reset_code=NULL,reset_expires=NULL,updated_at=NOW() WHERE id=$2', [hash, user.id]);
+    mailer.sendPasswordChanged(email.trim()).catch(e => console.error('[RP] Password-changed email error:', e.message));
     res.json({ ok:true });
   } catch(e) { res.status(500).json({ error:e.message }); }
 });
@@ -636,7 +683,7 @@ app.post('/api/subscriptions/checkout', auth, async (req, res) => {
   if (!PLANS[plan] || plan === 'free') return res.status(400).json({ error:'Invalid plan' });
   if (!stripe) return res.json({ ok:false, manual:true, message:'To upgrade, contact support at support@relistpro.com', plan, price:PLANS[plan].price });
   try {
-    const priceIds = { pro: process.env.STRIPE_PRICE_PRO };
+    const priceIds = { starter: process.env.STRIPE_PRICE_STARTER, pro: process.env.STRIPE_PRICE_PRO };
     if (!priceIds[plan]) return res.status(400).json({ error:'Stripe price not configured for this plan' });
     let customerId = req.user.stripe_customer_id;
     if (!customerId) {
@@ -672,12 +719,18 @@ app.post('/api/webhooks/stripe', express.raw({ type:'application/json' }), async
         const expires = sub ? new Date(sub.current_period_end * 1000).toISOString() : null;
         await store.updateUserPlan(userId, plan, expires, s.customer, s.subscription);
         console.log(`[RP] Plan upgraded: ${userId} → ${plan}`);
+        const u = await store.getUserById(userId);
+        if (u && u.email) { mailer.sendPlanUpgraded(u.email, PLANS[plan]?.name || plan).catch(e => console.error('[RP] Upgrade email error:', e.message)); }
       }
     } else if (event.type === 'customer.subscription.deleted') {
       const sub = event.data.object;
       const cus = await stripe.customers.retrieve(sub.customer);
       const userId = cus.metadata?.userId;
-      if (userId) { await store.updateUserPlan(userId, 'free', null, null, null); }
+      if (userId) {
+        const u = await store.getUserById(userId);
+        await store.updateUserPlan(userId, 'free', null, null, null);
+        if (u && u.email) { mailer.sendSubscriptionCancelled(u.email, sub.current_period_end ? new Date(sub.current_period_end*1000) : null).catch(e => console.error('[RP] Cancel email error:', e.message)); }
+      }
     } else if (event.type === 'customer.subscription.updated') {
       const sub = event.data.object;
       const cus = await stripe.customers.retrieve(sub.customer);
@@ -686,6 +739,86 @@ app.post('/api/webhooks/stripe', express.raw({ type:'application/json' }), async
     }
     res.json({ received:true });
   } catch(e) { console.error('[RP] Webhook error:', e.message); res.status(500).json({ error:e.message }); }
+});
+
+// Cancel subscription at period end
+app.post('/api/subscriptions/cancel', auth, async (req, res) => {
+  if (!stripe) return res.status(400).json({ error:'Stripe not configured' });
+  try {
+    const subId = req.user.stripe_subscription_id;
+    if (!subId) return res.status(400).json({ error:'No active subscription' });
+    await stripe.subscriptions.update(subId, { cancel_at_period_end:true });
+    res.json({ ok:true, message:'Subscription will cancel at end of billing period' });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
+// Stripe billing portal — self-service management
+app.post('/api/subscriptions/portal', auth, async (req, res) => {
+  if (!stripe) return res.status(400).json({ error:'Stripe not configured' });
+  try {
+    const customerId = req.user.stripe_customer_id;
+    if (!customerId) return res.status(400).json({ error:'No Stripe customer' });
+    const session = await stripe.billingPortal.sessions.create({
+      customer: customerId,
+      return_url: req.body.returnUrl || `${req.headers.origin || 'https://relistpro.com'}/app`
+    });
+    res.json({ ok:true, url:session.url });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
+// Billing history — last 10 invoices
+app.get('/api/user/billing-history', auth, async (req, res) => {
+  if (!stripe) return res.json({ ok:true, invoices:[] });
+  try {
+    const customerId = req.user.stripe_customer_id;
+    if (!customerId) return res.json({ ok:true, invoices:[] });
+    const invoices = await stripe.invoices.list({ customer:customerId, limit:10 });
+    const rows = invoices.data.map(i => ({
+      id:i.id, amount:(i.amount_paid||0)/100, currency:i.currency, status:i.status,
+      date:i.created ? new Date(i.created*1000).toISOString() : null,
+      pdf:i.invoice_pdf||null
+    }));
+    res.json({ ok:true, invoices:rows });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
+// Public stats — cached, no auth
+let _statsCache = null, _statsCacheAt = 0;
+app.get('/api/stats/public', async (req, res) => {
+  if (_statsCache && Date.now() - _statsCacheAt < 300000) return res.json(_statsCache);
+  try {
+    if (!db.hasDb()) return res.json({ ok:true, totalReposts:0, totalUsers:0, totalItems:0 });
+    const [r, u, i] = await Promise.all([
+      db.query("SELECT COUNT(*) AS n FROM rp_actions WHERE type='repost' AND status='success'"),
+      db.query("SELECT COUNT(*) AS n FROM rp_users"),
+      db.query("SELECT COUNT(*) AS n FROM rp_items WHERE status!='sold'")
+    ]);
+    _statsCache = { ok:true, totalReposts:parseInt(r.rows[0].n)||0, totalUsers:parseInt(u.rows[0].n)||0, totalItems:parseInt(i.rows[0].n)||0 };
+    _statsCacheAt = Date.now();
+    res.json(_statsCache);
+  } catch(e) { res.json({ ok:true, totalReposts:0, totalUsers:0, totalItems:0 }); }
+});
+
+// Delete account — anonymize data, cancel Stripe, revoke token
+app.delete('/api/user/account', auth, async (req, res) => {
+  try {
+    // Cancel Stripe subscription if active
+    if (stripe && req.user.stripe_subscription_id) {
+      try { await stripe.subscriptions.cancel(req.user.stripe_subscription_id); } catch(e) {}
+    }
+    if (db.hasDb()) {
+      // Anonymize user record
+      await db.query("UPDATE rp_users SET username=$1, email=NULL, password_hash='deleted', token=$2, plan='free', stripe_customer_id=NULL, stripe_subscription_id=NULL, telegram_username=NULL, telegram_chat_id=NULL WHERE id=$3",
+        ['deleted_'+req.user.id.slice(0,8), 'revoked_'+Date.now(), req.user.id]);
+      // Delete user data
+      await db.query("DELETE FROM rp_items WHERE user_id=$1", [req.user.id]);
+      await db.query("DELETE FROM rp_sessions WHERE user_id=$1", [req.user.id]);
+      await db.query("DELETE FROM rp_actions WHERE user_id=$1", [req.user.id]);
+      await db.query("DELETE FROM rp_schedules WHERE user_id=$1", [req.user.id]);
+      await db.query("DELETE FROM rp_messages WHERE user_id=$1", [req.user.id]);
+    }
+    res.json({ ok:true });
+  } catch(e) { res.status(500).json({ error:e.message }); }
 });
 
 // Reliably hide + delete an item on Vinted with retry logic
@@ -1562,8 +1695,106 @@ async function logAction(userId, type, data) {
       `INSERT INTO rp_actions(user_id,type,item_id,new_item_id,item_title,status,details) VALUES($1,$2,$3,$4,$5,$6,$7)`,
       [userId, type, data.itemId || null, data.newItemId || null, data.itemTitle || null, data.status || 'success', JSON.stringify(data.details || {})]
     );
+    // Quota warning emails at 80% and 100%
+    if (type === 'repost' && (data.status || 'success') === 'success') {
+      try {
+        const user = await store.getUserById(userId);
+        if (user && user.email) {
+          const plan = user.plan || 'free';
+          const planInfo = PLANS[plan] || PLANS.free;
+          if (planInfo.repostsPerMonth) {
+            const usage = await getUserUsage(userId);
+            const pct = (usage.repostsThisMonth / planInfo.repostsPerMonth) * 100;
+            if (pct >= 80) {
+              mailer.sendQuotaWarning(user.email, usage.repostsThisMonth, planInfo.repostsPerMonth, planInfo.name).catch(e => console.error('[RP] Quota email error:', e.message));
+            }
+          }
+        }
+      } catch(e) { /* non-critical */ }
+    }
   } catch (e) { console.error('[RP-cron] logAction error:', e.message); }
 }
+
+// ═══ TELEGRAM (dashboard-facing) ═══
+app.get('/api/telegram/user-status', auth, async (req, res) => {
+  try {
+    const u = req.user;
+    res.json({ ok:true, connected:!!u.telegram_chat_id, username:u.telegram_username||null, chatId:u.telegram_chat_id||null });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
+app.post('/api/telegram/test', auth, async (req, res) => {
+  const chatId = req.user.telegram_chat_id;
+  if (!chatId) return res.status(400).json({ error:'Telegram not linked. Send /login to @RelistProBot first.' });
+  try {
+    const TelegramBot = require('node-telegram-bot-api');
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    if (!token) return res.status(400).json({ error:'Telegram bot not configured' });
+    const bot = new TelegramBot(token);
+    await bot.sendMessage(chatId, '✅ Test message from RelistPro! Your Telegram is linked correctly.');
+    res.json({ ok:true });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
+app.post('/api/telegram/unlink', auth, async (req, res) => {
+  try {
+    if (db.hasDb()) {
+      await db.query('UPDATE rp_users SET telegram_chat_id=NULL,telegram_username=NULL,updated_at=NOW() WHERE id=$1', [req.user.id]);
+    }
+    res.json({ ok:true });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
+// ═══ REFERRAL SYSTEM ═══
+app.get('/api/referral/code', auth, async (req, res) => {
+  try {
+    let code = req.user.referral_code;
+    if (!code) {
+      code = crypto.randomBytes(4).toString('hex').toUpperCase();
+      if (db.hasDb()) {
+        await db.query('UPDATE rp_users SET referral_code=$1,updated_at=NOW() WHERE id=$2', [code, req.user.id]);
+      }
+    }
+    res.json({ ok:true, code });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
+app.get('/api/referral/stats', auth, async (req, res) => {
+  try {
+    if (!db.hasDb()) return res.json({ code:null, referralCount:0, rewardsEarned:0 });
+    let code = req.user.referral_code;
+    const countR = await db.query('SELECT COUNT(*) AS n FROM rp_users WHERE referred_by=$1', [req.user.id]);
+    res.json({ ok:true, code:code||null, referralCount:parseInt(countR.rows[0].n,10)||0, rewardsEarned:req.user.referral_rewards||0 });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
+app.post('/api/referral/apply', async (req, res) => {
+  const { code, userId } = req.body;
+  if (!code || !userId) return res.status(400).json({ error:'code and userId required' });
+  try {
+    if (!db.hasDb()) return res.status(400).json({ error:'Database not configured' });
+    const referrerR = await db.query('SELECT id,plan,plan_expires_at FROM rp_users WHERE referral_code=$1', [code.trim().toUpperCase()]);
+    if (!referrerR.rows[0]) return res.status(400).json({ error:'Invalid referral code' });
+    const referrer = referrerR.rows[0];
+    if (referrer.id === userId) return res.status(400).json({ error:'Cannot refer yourself' });
+    // Check if already referred
+    const alreadyR = await db.query('SELECT referred_by FROM rp_users WHERE id=$1', [userId]);
+    if (alreadyR.rows[0]?.referred_by) return res.status(400).json({ error:'Already referred' });
+    // Link referral
+    await db.query('UPDATE rp_users SET referred_by=$1,updated_at=NOW() WHERE id=$2', [referrer.id, userId]);
+    // Reward both: extend plan_expires_at by 1 month (or set to 1 month from now if free)
+    const oneMonth = new Date(Date.now() + 30*24*60*60*1000).toISOString();
+    for (const uid of [referrer.id, userId]) {
+      const u = await store.getUserById(uid);
+      const currentExpiry = u.plan_expires_at ? new Date(u.plan_expires_at) : new Date();
+      const newExpiry = new Date(Math.max(currentExpiry.getTime(), Date.now()) + 30*24*60*60*1000).toISOString();
+      const plan = (u.plan === 'free') ? 'starter' : u.plan;
+      await store.updateUserPlan(uid, plan, newExpiry, null, null);
+      await db.query('UPDATE rp_users SET referral_rewards=COALESCE(referral_rewards,0)+1 WHERE id=$1', [uid]);
+    }
+    res.json({ ok:true });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
 
 // ═══ TELEGRAM BOT ═══
 const initTelegram = require('./telegram');

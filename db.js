@@ -125,8 +125,20 @@ async function initSchema() {
         ALTER TABLE rp_schedules ADD COLUMN IF NOT EXISTS executed BOOLEAN DEFAULT false;
         ALTER TABLE rp_schedules ADD COLUMN IF NOT EXISTS tz_offset INTEGER DEFAULT 0;
         ALTER TABLE rp_items ADD COLUMN IF NOT EXISTS previous_item_id TEXT;
+        -- Password reset
+        ALTER TABLE rp_users ADD COLUMN IF NOT EXISTS reset_code TEXT;
+        ALTER TABLE rp_users ADD COLUMN IF NOT EXISTS reset_expires TIMESTAMPTZ;
+        -- Telegram integration
+        ALTER TABLE rp_users ADD COLUMN IF NOT EXISTS telegram_username TEXT;
+        ALTER TABLE rp_users ADD COLUMN IF NOT EXISTS telegram_chat_id TEXT;
+        -- Referral system
+        ALTER TABLE rp_users ADD COLUMN IF NOT EXISTS referral_code TEXT;
+        ALTER TABLE rp_users ADD COLUMN IF NOT EXISTS referred_by UUID;
+        ALTER TABLE rp_users ADD COLUMN IF NOT EXISTS referral_rewards INTEGER DEFAULT 0;
       EXCEPTION WHEN OTHERS THEN NULL;
       END $$;
+      -- Unique index on referral_code (nulls excluded so only one constraint per non-null code)
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_rp_users_referral_code ON rp_users(referral_code) WHERE referral_code IS NOT NULL;
 
       CREATE TABLE IF NOT EXISTS rp_pending_activations (
         item_id TEXT NOT NULL,
