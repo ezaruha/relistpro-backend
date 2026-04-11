@@ -660,48 +660,52 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         redirect: 'manual', // capture Set-Cookie before redirect
       });
 
-      // Grab new cookies from the response
+      // Parse existing cookies into a map (always — we may only rotate CSRF)
+      const cookieMap = {};
+      session.cookies.split(';').forEach(c => {
+        const [k, ...v] = c.trim().split('=');
+        if (k) cookieMap[k.trim()] = v.join('=');
+      });
+
+      // Merge any Set-Cookie from the refresh endpoint itself
       const setCookies = refreshResp.headers.getSetCookie?.() || [];
-      if (setCookies.length) {
-        // Parse existing cookies into a map
-        const cookieMap = {};
-        session.cookies.split(';').forEach(c => {
-          const [k, ...v] = c.trim().split('=');
-          if (k) cookieMap[k.trim()] = v.join('=');
-        });
-        // Update with new cookies from response
-        for (const sc of setCookies) {
-          const [pair] = sc.split(';');
-          const [k, ...v] = pair.split('=');
-          if (k) cookieMap[k.trim()] = v.join('=');
-        }
-        session.cookies = Object.entries(cookieMap).map(([k,v]) => `${k}=${v}`).join('; ');
-
-        // Try to extract new CSRF from a page fetch
-        try {
-          const pageResp = await fetch(`https://${domain}/`, {
-            headers: { 'Cookie': session.cookies, 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-          });
-          const html = await pageResp.text();
-          const csrfMatch = html.match(/"CSRF_TOKEN\\?":\\?"([^"\\]+)\\?"/);
-          if (csrfMatch) {
-            session.csrf = csrfMatch[1];
-            console.log('[TG] Refreshed CSRF token from page');
-          }
-          // Also grab cookies from this response
-          const pageCookies = pageResp.headers.getSetCookie?.() || [];
-          for (const sc of pageCookies) {
-            const [pair] = sc.split(';');
-            const [k, ...v] = pair.split('=');
-            if (k) cookieMap[k.trim()] = v.join('=');
-          }
-          session.cookies = Object.entries(cookieMap).map(([k,v]) => `${k}=${v}`).join('; ');
-        } catch {}
-
-        // Save updated session
-        await store.setSession(userId, session);
-        console.log(`[TG] Session refreshed for user ${userId}`);
+      for (const sc of setCookies) {
+        const [pair] = sc.split(';');
+        const [k, ...v] = pair.split('=');
+        if (k) cookieMap[k.trim()] = v.join('=');
       }
+      if (setCookies.length) {
+        session.cookies = Object.entries(cookieMap).map(([k,v]) => `${k}=${v}`).join('; ');
+      }
+
+      // Defensive check: if the merge wiped our auth markers, bail without
+      // writing back. This catches Vinted 302→login responses and similar.
+      const AUTH_MARKERS = ['_vinted_fr_session', 'access_token_web', 'refresh_token_web', 'v_sid'];
+      const stillAuthed = AUTH_MARKERS.some(k => cookieMap[k]);
+      if (!stillAuthed) {
+        console.warn(`[TG] refreshVintedSession aborted — merged cookies missing auth markers for user ${userId}`);
+        return session;
+      }
+
+      // Try to extract new CSRF from a page fetch — DO NOT merge the page's
+      // Set-Cookie back into session.cookies. The homepage returns anonymous
+      // cookies that would overwrite our authenticated ones and invalidate
+      // the session on the next request.
+      try {
+        const pageResp = await fetch(`https://${domain}/`, {
+          headers: { 'Cookie': session.cookies, 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+        });
+        const html = await pageResp.text();
+        const csrfMatch = html.match(/"CSRF_TOKEN\\?":\\?"([^"\\]+)\\?"/);
+        if (csrfMatch) {
+          session.csrf = csrfMatch[1];
+          console.log('[TG] Refreshed CSRF token from page');
+        }
+      } catch {}
+
+      // Save updated session (cookies and/or rotated CSRF)
+      await store.setSession(userId, session);
+      console.log(`[TG] Session refreshed for user ${userId} (setCookies=${setCookies.length})`);
     } catch (e) {
       console.log('[TG] Session refresh failed:', e.message);
     }
@@ -3091,9 +3095,6 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       bot.sendMessage(chatId, '📸 Send more photos to list another item, or use /help to see all commands.');
 
       console.log(`[TG] Listed item ${draftId} for user ${activeAccount(c).username}`);
-
-      // Refresh session after posting so it stays alive for next listing
-      try { await refreshVintedSession(session, acct.userId); } catch {}
 
       // Reset state
       c.step = 'idle';
