@@ -679,9 +679,10 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     await tableReady; // ensure table exists before writing
     try {
       const accts = JSON.stringify(c.accounts || []);
-      // Save only fileIds for photos (not base64 — too large for JSONB, causes save to fail)
+      // Save only fileIds + Telegram message_id for photos (not base64 — too
+      // large for JSONB). _mid preserves media-group selection order on restore.
       const photoRefs = c.photos?.length
-        ? JSON.stringify(c.photos.map(p => ({ fileId: p.fileId })))
+        ? JSON.stringify(c.photos.map(p => ({ fileId: p.fileId, _mid: p._mid })))
         : null;
       console.log(`[TG] Saving state: chat=${chatId} accounts=${c.accounts?.length || 0} idx=${c.activeIdx} step=${c.step} photos=${c.photos?.length || 0}`);
       await db.query(
@@ -716,7 +717,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     await tableReady;
     try {
       const acct = activeAccount(c);
-      const photoRefs = (c.photos || []).map(p => ({ fileId: p.fileId })).filter(r => r.fileId);
+      const photoRefs = (c.photos || []).map(p => ({ fileId: p.fileId, _mid: p._mid })).filter(r => r.fileId);
       if (!photoRefs.length) {
         console.log('[TG] saveFailedListing skipped — no fileIds');
         return;
@@ -862,7 +863,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
             const buffer = fs.readFileSync(filePath);
             try { fs.unlinkSync(filePath); } catch (_) {}
             if (buffer.length) {
-              c.photos.push({ base64: buffer.toString('base64'), fileId: ref.fileId });
+              c.photos.push({ base64: buffer.toString('base64'), fileId: ref.fileId, _mid: ref._mid });
             }
           } catch (e) {
             console.error(`[TG] Re-download failed for ${ref.fileId}: ${e.message}`);
@@ -1311,10 +1312,18 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       return bot.sendMessage(chatId, 'Finish or /cancel your current listing first.');
     }
 
-    // Download highest-res version
+    // Download highest-res version.
+    // IMPORTANT: push a placeholder SYNCHRONOUSLY (before the async download)
+    // so media-group photos preserve the user's selection order. Telegram
+    // fires the 'photo' event in message_id order; if we waited to push until
+    // after `await bot.downloadFile`, faster downloads would land first and
+    // reorder the upload. We sort by `_mid` again before uploading, belt and
+    // braces, in case the Telegram client queues events out of order.
     const photo = msg.photo[msg.photo.length - 1];
+    const slot = { _mid: msg.message_id, fileId: photo.file_id, base64: null };
+    c.photos.push(slot);
     try {
-      console.log(`[TG] Downloading photo file_id=${photo.file_id}`);
+      console.log(`[TG] Downloading photo file_id=${photo.file_id} mid=${msg.message_id}`);
       // Use bot.downloadFile which uses the library's built-in HTTP client
       // (fetch() fails on Railway for Telegram file URLs)
       const os = require('os');
@@ -1323,10 +1332,12 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       const buffer = fs.readFileSync(filePath);
       try { fs.unlinkSync(filePath); } catch (_) {}
       if (!buffer.length) throw new Error('Empty file');
-      c.photos.push({ base64: buffer.toString('base64'), fileId: photo.file_id });
-      console.log(`[TG] Photo downloaded: ${buffer.length} bytes`);
+      slot.base64 = buffer.toString('base64');
+      console.log(`[TG] Photo downloaded: ${buffer.length} bytes mid=${msg.message_id}`);
     } catch (e) {
       console.error('[TG] Photo download error:', e.message);
+      const idx = c.photos.indexOf(slot);
+      if (idx >= 0) c.photos.splice(idx, 1);
       return bot.sendMessage(chatId, `Can't download the photo (${e.message}). Try sending it again.`);
     }
 
@@ -2334,7 +2345,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
           const filePath = await bot.downloadFile(ref.fileId, os.tmpdir());
           const buffer = fs.readFileSync(filePath);
           try { fs.unlinkSync(filePath); } catch (_) {}
-          if (buffer.length) c.photos.push({ base64: buffer.toString('base64'), fileId: ref.fileId });
+          if (buffer.length) c.photos.push({ base64: buffer.toString('base64'), fileId: ref.fileId, _mid: ref._mid });
         } catch (e) {
           console.error(`[TG] Retry download failed for ${ref.fileId}:`, e.message);
         }
@@ -3141,6 +3152,12 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       }
 
       // ── Step 1: Upload photos ──
+      // Sort by Telegram message_id to restore user's selection order
+      // (media-group downloads race, so the push order isn't reliable).
+      // Drop any slots where the download failed (base64 still null).
+      c.photos = c.photos
+        .filter(p => p && p.base64)
+        .sort((a, b) => (a._mid || 0) - (b._mid || 0));
       const photoIds = [];
       const domain = session.domain || 'www.vinted.co.uk';
 
