@@ -1479,6 +1479,20 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     ];
   }
 
+  // Strip a brand word (and hyphen/space variants of a multi-word brand) from
+  // a piece of text, case-insensitive, with whole-word boundaries. Used when
+  // the user explicitly opts into cleaning the title/description after
+  // switching to Unbranded.
+  function stripBrandFromText(text, brand) {
+    if (!text || !brand) return text;
+    const parts = String(brand).trim().split(/[\s-]+/).filter(Boolean);
+    if (!parts.length) return text;
+    const escaped = parts.map(p => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    const pattern = escaped.join('[\\s-]+');
+    const re = new RegExp(`\\b${pattern}\\b`, 'gi');
+    return text.replace(re, '').replace(/\s{2,}/g, ' ').replace(/^\s*[-,:;]\s*/, '').trim();
+  }
+
   // Cached Vinted "Unbranded" brand id per domain.
   const unbrandedIdByDomain = new Map();
   async function getUnbrandedId(session) {
@@ -1505,6 +1519,8 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     c._authChecked = true;
     const wasWiz = (c._authPrevStep || '').startsWith('wiz_');
     delete c._authPrevStep;
+    delete c._authGateBrandName;
+    delete c._authStripPreview;
     clearErrorField(c, 'brand');
     if (wasWiz) {
       c.step = 'wiz_brand';
@@ -2168,6 +2184,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       const effectiveName = textName || c.listing.brand || '';
       if (bid > 0 && !c._authChecked && isHighRiskBrand(effectiveName)) {
         c._authPrevStep = c.step;
+        c._authGateBrandName = effectiveName;
         c.step = 'auth_gate';
         saveChatState(chatId);
         const checklist = getProofChecklist(c.listing.category_name);
@@ -2219,6 +2236,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
 
     // ── Authenticity gate: post as Unbranded ──
     if (data === 'auth:unbranded') {
+      const originalBrand = c._authGateBrandName || c.listing.brand || '';
       try {
         const acct = activeAccount(c);
         const session = acct ? await store.getSession(acct.userId) : null;
@@ -2231,7 +2249,69 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
         c.listing.brand_id = null;
         c.listing.brand = 'Unbranded';
       }
-      await bot.sendMessage(chatId, '🏷️ Brand switched to *Unbranded*. Continuing...', { parse_mode: 'MarkdownV2' });
+
+      const origTitle = c.listing.title || '';
+      const origDesc = c.listing.description || '';
+      const strippedTitle = stripBrandFromText(origTitle, originalBrand);
+      const strippedDesc = stripBrandFromText(origDesc, originalBrand);
+      const changedTitle = strippedTitle !== origTitle;
+      const changedDesc = strippedDesc !== origDesc;
+
+      if (!originalBrand || (!changedTitle && !changedDesc)) {
+        await bot.sendMessage(chatId, '🏷️ Brand switched to *Unbranded*\\. Continuing\\.\\.\\.', { parse_mode: 'MarkdownV2' });
+        return resumeAfterAuthGate(chatId);
+      }
+
+      if (changedTitle && strippedTitle.length < 3) {
+        await bot.sendMessage(chatId,
+          `🏷️ Brand switched to Unbranded. Title would be empty after removing "${originalBrand}", keeping it as-is. Continuing...`);
+        return resumeAfterAuthGate(chatId);
+      }
+
+      c._authStripPreview = { originalBrand, strippedTitle, strippedDesc, changedTitle, changedDesc };
+
+      const lines = [
+        `🏷️ Brand switched to *Unbranded*.`,
+        ``,
+        `Vinted also scans titles and descriptions for brand words. Want me to strip "${originalBrand}" from them?`,
+        ``,
+      ];
+      if (changedTitle) {
+        lines.push(`*Title now:* ${origTitle}`);
+        lines.push(`*Title after:* ${strippedTitle}`);
+        lines.push(``);
+      }
+      if (changedDesc) {
+        const d1 = origDesc.length > 120 ? origDesc.slice(0, 117) + '...' : origDesc;
+        const d2 = strippedDesc.length > 120 ? strippedDesc.slice(0, 117) + '...' : strippedDesc;
+        lines.push(`*Description now:* ${d1}`);
+        lines.push(`*Description after:* ${d2}`);
+      }
+
+      return bot.sendMessage(chatId, lines.join('\n'), {
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: [
+          [{ text: '✂️ Yes — strip brand word', callback_data: 'auth:strip:yes' }],
+          [{ text: '📝 No — keep as-is', callback_data: 'auth:strip:no' }],
+        ]}
+      });
+    }
+
+    if (data === 'auth:strip:yes') {
+      const p = c._authStripPreview;
+      if (p) {
+        if (p.changedTitle) c.listing.title = p.strippedTitle;
+        if (p.changedDesc) c.listing.description = p.strippedDesc;
+        console.log(`[TG] Auth gate strip applied: brand="${p.originalBrand}"`);
+      }
+      delete c._authStripPreview;
+      await bot.sendMessage(chatId, '✂️ Brand word stripped. Continuing...');
+      return resumeAfterAuthGate(chatId);
+    }
+
+    if (data === 'auth:strip:no') {
+      delete c._authStripPreview;
+      await bot.sendMessage(chatId, '📝 Keeping title and description as-is. Continuing...');
       return resumeAfterAuthGate(chatId);
     }
 
@@ -2244,6 +2324,8 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       c.catalogCache = null;
       delete c._authChecked;
       delete c._authPrevStep;
+      delete c._authGateBrandName;
+      delete c._authStripPreview;
       saveChatState(chatId);
       return bot.sendMessage(chatId, '❌ Listing cancelled. Send new photos whenever you\'re ready.');
     }
