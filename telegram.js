@@ -4432,6 +4432,14 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       );
     }
 
+    // Command channel requires Postgres (rp_commands + rp_command_photos).
+    // If DATABASE_URL isn't set (dev mode or Railway env drift), fall back
+    // to the legacy inline-backend post path so the bot still functions.
+    if (!db || !db.hasDb()) {
+      console.log('[TG] createListing: no DB, falling back to createListingViaBackend');
+      return createListingViaBackend(chatId);
+    }
+
     // Sort photos by Telegram message_id and drop failed downloads
     c.photos = c.photos.filter(p => p && p.base64).sort((a, b) => (a._mid || 0) - (b._mid || 0));
 
