@@ -1345,7 +1345,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       c.caption = null;
     }
 
-    if (c.step !== 'collecting_photos' && c.step !== 'collecting_photos_for_review') {
+    if (c.step !== 'collecting_photos' && c.step !== 'collecting_photos_for_review' && c.step !== 'collecting_proof_photos') {
       return bot.sendMessage(chatId, 'Finish or /cancel your current listing first.');
     }
 
@@ -1380,6 +1380,17 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         await bot.sendMessage(chatId, `📸 Got ${c.photos.length} photo(s) for your listing. Ready to post!`);
         showSummary(chatId);
       }, 2000);
+    } else if (c.step === 'collecting_proof_photos') {
+      // Authenticity proof photos — just append, user taps Done to continue
+      c.photoTimer = setTimeout(async () => {
+        saveChatState(chatId);
+        await bot.sendMessage(chatId,
+          `📸 Got ${c.photos.length} photo(s) total. Send more proof shots, or tap Done when finished.`,
+          { reply_markup: { inline_keyboard: [
+            [{ text: '✅ Done — continue listing', callback_data: 'auth:proofdone' }]
+          ]}}
+        );
+      }, 2000);
     } else {
       c.photoTimer = setTimeout(() => processPhotos(chatId), 2000);
     }
@@ -1391,6 +1402,117 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
   // ── Step-by-step wizard order ──
   const WIZARD_STEPS = ['title', 'description', 'price', 'category', 'size', 'condition', 'colour', 'brand', 'parcel', 'confirm'];
+
+  // ── Authenticity gate ──
+  // Brands Vinted runs through authenticity verification. Selecting one of
+  // these triggers an automated counterfeit check; a mismatch can ban the
+  // account. We prompt the user to either add proof photos, switch to
+  // "Unbranded", or cancel before the listing ever reaches Vinted.
+  const HIGH_RISK_BRANDS = new Set([
+    'gucci','louis vuitton','lv','prada','balenciaga','dior','christian dior',
+    'chanel','burberry','moncler','stone island','canada goose','nike','jordan',
+    'air jordan','off-white','off white','hermes','hermès','yves saint laurent',
+    'ysl','saint laurent','fendi','versace','armani','giorgio armani','emporio armani',
+    'ralph lauren','polo ralph lauren','patagonia','supreme','palace','trapstar',
+    'corteiz','the north face','north face','arc\'teryx','arcteryx','bottega veneta',
+    'celine','céline','goyard','loewe','valentino','givenchy','loro piana',
+    'rolex','omega','cartier','audemars piguet','patek philippe','tag heuer'
+  ]);
+
+  function isHighRiskBrand(name) {
+    if (!name) return false;
+    const n = String(name).toLowerCase().trim();
+    if (HIGH_RISK_BRANDS.has(n)) return true;
+    for (const b of HIGH_RISK_BRANDS) {
+      if (n.includes(b) || b.includes(n)) return true;
+    }
+    return false;
+  }
+
+  function getProofChecklist(categoryName) {
+    const cat = String(categoryName || '').toLowerCase();
+    if (/dress|skirt|top|shirt|blouse|trouser|jean|coat|jacket|hoodie|sweatshirt|knit|suit/.test(cat)) {
+      return [
+        'Sewn-in care/composition label (zoomed)',
+        'Inner brand + size label',
+        'Any serial / RFID / authenticity tag',
+        'Stitching close-up (seams or logo embroidery)'
+      ];
+    }
+    if (/bag|handbag|purse|clutch|backpack|tote/.test(cat)) {
+      return [
+        'Inner leather heat stamp / brand embossing',
+        'Date code or serial number (inside pocket or tag)',
+        'Zipper pull showing brand engraving',
+        'Authenticity card / dust bag / receipt if available'
+      ];
+    }
+    if (/shoe|trainer|sneaker|boot|heel|sandal/.test(cat)) {
+      return [
+        'Inner tongue label: size, style code, country',
+        'Sole close-up (pattern + branding)',
+        'Stitching around the toe and heel',
+        'Box label if you still have it'
+      ];
+    }
+    if (/watch/.test(cat)) {
+      return [
+        'Caseback: engraving / serial number',
+        'Crown and crown-logo close-up',
+        'Dial macro (applied indices, logo alignment)',
+        'Papers / warranty card if available'
+      ];
+    }
+    if (/belt|sunglass|wallet|scarf|jewel|accessor/.test(cat)) {
+      return [
+        'Brand engraving / etching',
+        'Inside or back of the item showing stamp/label',
+        'Any serial number or hologram',
+        'Dust bag / box / receipt if available'
+      ];
+    }
+    return [
+      'Sewn-in or stamped brand label (zoomed)',
+      'Any serial / date code / style number',
+      'Stitching or construction close-up',
+      'Receipt / authenticity card if available'
+    ];
+  }
+
+  // Cached Vinted "Unbranded" brand id per domain.
+  const unbrandedIdByDomain = new Map();
+  async function getUnbrandedId(session) {
+    const domain = session?.domain || 'www.vinted.co.uk';
+    if (unbrandedIdByDomain.has(domain)) return unbrandedIdByDomain.get(domain);
+    try {
+      const resp = await vintedFetch(session, `/api/v2/brands?keyword=unbranded`);
+      if (resp.ok) {
+        const data = await resp.json();
+        const list = data.brands || [];
+        const match = list.find(b => /^unbranded$/i.test(b.title || b.name || ''));
+        if (match?.id) {
+          unbrandedIdByDomain.set(domain, match.id);
+          return match.id;
+        }
+      }
+    } catch (e) { console.error('[TG] getUnbrandedId error:', e.message); }
+    unbrandedIdByDomain.set(domain, null);
+    return null;
+  }
+
+  function resumeAfterAuthGate(chatId) {
+    const c = getChat(chatId);
+    c._authChecked = true;
+    const wasWiz = (c._authPrevStep || '').startsWith('wiz_');
+    delete c._authPrevStep;
+    clearErrorField(c, 'brand');
+    if (wasWiz) {
+      c.step = 'wiz_brand';
+      return wizardNext(chatId);
+    }
+    c.step = 'review';
+    return showSummary(chatId);
+  }
 
   async function processPhotos(chatId) {
     const c = getChat(chatId);
@@ -2039,9 +2161,91 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       if (textName) c.listing.brand = textName;
       else if (bid === 0 && !c.listing.brand) c.listing.brand = '';
       clearErrorField(c, 'brand');
+
+      // Authenticity gate: if this is a Vinted-verified brand and we haven't
+      // already run the gate for this listing, stop here and ask the user to
+      // add proof photos, switch to Unbranded, or cancel.
+      const effectiveName = textName || c.listing.brand || '';
+      if (bid > 0 && !c._authChecked && isHighRiskBrand(effectiveName)) {
+        c._authPrevStep = c.step;
+        c.step = 'auth_gate';
+        saveChatState(chatId);
+        const checklist = getProofChecklist(c.listing.category_name);
+        const listText = checklist.map(s => `• ${s}`).join('\n');
+        return bot.sendMessage(chatId,
+          `⚠️ *${esc(effectiveName)}* triggers Vinted's automated authenticity check\\. ` +
+          `Posting without the right proof shots can get the account banned for counterfeits\\.\n\n` +
+          `You have three options:`,
+          {
+            parse_mode: 'MarkdownV2',
+            reply_markup: { inline_keyboard: [
+              [{ text: '📸 I have proof — add photos', callback_data: 'auth:proof' }],
+              [{ text: '🏷️ Post as Unbranded', callback_data: 'auth:unbranded' }],
+              [{ text: '❌ Cancel this listing', callback_data: 'auth:cancel' }],
+            ]}
+          }
+        ).then(() => bot.sendMessage(chatId,
+          `Vinted typically wants these shots for this category:\n${listText}\n\n` +
+          `Tap "I have proof" to add them now.`
+        ));
+      }
+
       if (c.step.startsWith('wiz_')) return wizardNext(chatId);
       c.step = 'review';
       return showSummary(chatId);
+    }
+
+    // ── Authenticity gate: user has proof photos ──
+    if (data === 'auth:proof') {
+      c.step = 'collecting_proof_photos';
+      saveChatState(chatId);
+      const checklist = getProofChecklist(c.listing?.category_name);
+      const listText = checklist.map(s => `• ${s}`).join('\n');
+      return bot.sendMessage(chatId,
+        `📸 Send your authenticity photos now. Recommended shots:\n${listText}\n\n` +
+        `They will be added to the listing alongside your product shots. Tap Done when finished.`,
+        { reply_markup: { inline_keyboard: [
+          [{ text: '✅ Done — continue listing', callback_data: 'auth:proofdone' }]
+        ]}}
+      );
+    }
+
+    if (data === 'auth:proofdone') {
+      if (c.step === 'collecting_proof_photos') {
+        await bot.sendMessage(chatId, `✅ Added ${c.photos?.length || 0} photo(s) total. Continuing...`);
+      }
+      return resumeAfterAuthGate(chatId);
+    }
+
+    // ── Authenticity gate: post as Unbranded ──
+    if (data === 'auth:unbranded') {
+      try {
+        const acct = activeAccount(c);
+        const session = acct ? await store.getSession(acct.userId) : null;
+        const ubId = session ? await getUnbrandedId(session) : null;
+        c.listing.brand_id = ubId || null;
+        c.listing.brand = 'Unbranded';
+        console.log(`[TG] Auth gate → Unbranded (id=${ubId})`);
+      } catch (e) {
+        console.error('[TG] auth:unbranded error:', e.message);
+        c.listing.brand_id = null;
+        c.listing.brand = 'Unbranded';
+      }
+      await bot.sendMessage(chatId, '🏷️ Brand switched to *Unbranded*. Continuing...', { parse_mode: 'MarkdownV2' });
+      return resumeAfterAuthGate(chatId);
+    }
+
+    // ── Authenticity gate: cancel the whole listing ──
+    if (data === 'auth:cancel') {
+      c.step = 'idle';
+      c.photos = [];
+      c.listing = null;
+      c.summaryMsgId = null;
+      c.catalogCache = null;
+      delete c._authChecked;
+      delete c._authPrevStep;
+      saveChatState(chatId);
+      return bot.sendMessage(chatId, '❌ Listing cancelled. Send new photos whenever you\'re ready.');
     }
 
     // ── Retry a saved failed listing ──
@@ -2382,6 +2586,10 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
 
     if (c.step === 'collecting_photos_for_review') {
       return bot.sendMessage(chatId, '📸 Send photos for your listing. Once done, I\'ll take you back to the summary.');
+    }
+
+    if (c.step === 'collecting_proof_photos') {
+      return bot.sendMessage(chatId, '📸 Send authenticity proof photos, then tap Done.');
     }
   });
 
