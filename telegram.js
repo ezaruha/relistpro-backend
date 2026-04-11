@@ -1615,6 +1615,42 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     return null;
   }
 
+  // Fire the authenticity gate message for the current listing's brand.
+  // Caller is responsible for setting c._authPrevStep and c.step beforehand.
+  async function triggerAuthGate(chatId, effectiveName) {
+    const c = getChat(chatId);
+    c._authGateBrandName = effectiveName;
+    c.step = 'auth_gate';
+    saveChatState(chatId);
+    const checklist = getProofChecklist(c.listing?.category_name);
+    const listText = checklist.map(s => `• ${esc(s)}`).join('\n');
+    const brandEsc = esc(effectiveName);
+    return bot.sendMessage(chatId,
+      `⚠️ *Authenticity check — ${brandEsc}*\n\n` +
+      `Vinted automatically reviews every listing tagged with a verified brand like *${brandEsc}*\\. ` +
+      `Their system looks for counterfeits using image matching, label/tag text OCR, and seller history\\. ` +
+      `If the listing fails that check, the item is delisted and the account gets a strike — repeat strikes lead to a permanent counterfeit ban with no appeal and lost inventory\\.\n\n` +
+      `You have three ways forward, each with a different tradeoff:\n\n` +
+      `📸 *I have proof — add photos*\n` +
+      `Best option if the item is genuine\\. You'll send close\\-ups of the label, care tag, stitching, serial sticker etc\\. ` +
+      `These get attached to the listing and satisfy Vinted's check\\. Listing stays tagged as *${brandEsc}* and gets the full brand\\-search traffic\\.\n\n` +
+      `🏷️ *Post as Unbranded*\n` +
+      `Safe fallback if you don't have proof shots handy\\. The listing posts without the brand tag, so Vinted skips the counterfeit check entirely\\. ` +
+      `Downside: you lose the brand tag and the brand\\-search SEO — the item sells slower and usually for less\\. The word *${brandEsc}* will also be stripped from the title and description\\.\n\n` +
+      `❌ *Cancel this listing*\n` +
+      `Drops the draft completely\\. Pick this if you want to gather proof shots first and come back later\\.\n\n` +
+      `Vinted usually wants these proof shots for this category:\n${listText}`,
+      {
+        parse_mode: 'MarkdownV2',
+        reply_markup: { inline_keyboard: [
+          [{ text: '📸 I have proof — add photos', callback_data: 'auth:proof' }],
+          [{ text: '🏷️ Post as Unbranded', callback_data: 'auth:unbranded' }],
+          [{ text: '❌ Cancel this listing', callback_data: 'auth:cancel' }],
+        ]}
+      }
+    );
+  }
+
   function resumeAfterAuthGate(chatId) {
     const c = getChat(chatId);
     c._authChecked = true;
@@ -1629,6 +1665,233 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     }
     c.step = 'review';
     return showSummary(chatId);
+  }
+
+  // ──────────────────────────────────────────
+  // AUTO-RESOLVE HELPERS (shared by fast-post path + manual pickers)
+  // ──────────────────────────────────────────
+
+  // Pick the top-scored category for the AI hint. Returns {id, title, path}|null.
+  // Same structured-path + keyword + gender scoring as searchCategories, but
+  // returns silently without rendering a picker.
+  async function autoResolveCategory(L) {
+    if (!L.category_hint && !L.title) return null;
+    const hint = L.category_hint || L.title;
+    const parts = hint.split(/\s*[>\/]\s*/).map(p => p.trim()).filter(Boolean);
+    const hintGender = (L.gender || '').toLowerCase();
+    const gSection = hintGender === 'women' ? 'women'
+      : hintGender === 'men' ? 'men'
+      : hintGender === 'kids' ? 'kids' : null;
+
+    let matches = [];
+    if (parts.length >= 2) {
+      for (let i = parts.length - 1; i >= 0 && !matches.length; i--) {
+        const pm = searchCategoriesByKeyword(parts[i]);
+        if (!pm.length) continue;
+        matches = pm.map(m => {
+          const mt = (m.path || m.title || '').toLowerCase();
+          let score = parts.reduce((a, p, idx) => {
+            if (!mt.includes(p.toLowerCase())) return a;
+            if (idx === 0) return a + 10;
+            if (idx === parts.length - 1) return a + 5;
+            return a + 1;
+          }, 0);
+          if (gSection) {
+            const ms = mt.split('>')[0].trim();
+            score += ms.includes(gSection) ? 8 : -12;
+          }
+          return { ...m, _score: score };
+        }).sort((a, b) => b._score - a._score);
+      }
+    }
+    if (!matches.length) matches = searchCategoriesByKeyword(hint);
+    if (!matches.length && L.title) {
+      const words = L.title.split(/\s+/).filter(w => w.length >= 3);
+      for (const w of words) {
+        const m = searchCategoriesByKeyword(w);
+        if (m.length) { matches = m; break; }
+      }
+    }
+    if (!matches.length) {
+      const itemDesc = `${L.title || ''} ${hint}`.trim();
+      matches = await aiPickCategory(itemDesc);
+    }
+    return matches[0] || null;
+  }
+
+  // Try to match AI size_hint against Vinted's size_groups for the current
+  // catalog. Returns {id, title}|null. No UI side effect.
+  async function autoResolveSize(session, L) {
+    if (!L.catalog_id || !L.size_hint) return null;
+    if (L.aiConfidence?.size === 'low') return null;
+    const hint = L.size_hint.trim().toUpperCase();
+    try {
+      const resp = await vintedFetch(session, `/api/v2/size_groups?catalog_ids=${L.catalog_id}`);
+      if (!resp.ok) return null;
+      const data = await resp.json();
+      const groups = data.size_groups || data.catalog_sizes || data.sizes || [];
+      const all = [];
+      for (const g of groups) {
+        for (const s of (g.sizes || [g])) {
+          if (s.id && s.title) all.push({ id: s.id, title: s.title });
+        }
+      }
+      let m = all.find(s => s.title.toUpperCase() === hint);
+      if (!m) m = all.find(s => s.title.toUpperCase().includes(hint));
+      if (!m) m = all.find(s => hint.includes(s.title.toUpperCase()) && s.title.length > 1);
+      return m || null;
+    } catch { return null; }
+  }
+
+  // Fallback: "One size" lookup for categories that support it.
+  async function findOneSize(session, catalogId) {
+    try {
+      const resp = await vintedFetch(session, `/api/v2/size_groups?catalog_ids=${catalogId}`);
+      if (!resp.ok) return null;
+      const data = await resp.json();
+      const groups = data.size_groups || data.catalog_sizes || data.sizes || [];
+      const all = [];
+      for (const g of groups) {
+        for (const s of (g.sizes || [g])) {
+          if (s.id && s.title) all.push({ id: s.id, title: s.title });
+        }
+      }
+      return all.find(s => /one\s*size/i.test(s.title)) || null;
+    } catch { return null; }
+  }
+
+  // Five-strategy brand lookup against /api/v2/brands. Returns {id,title}|null
+  // — no UI side effect, safe to call from the fast-post path.
+  async function lookupVintedBrand(session, query) {
+    if (!query) return null;
+    const tried = new Set();
+    const tryQ = async (q) => {
+      if (!q || tried.has(q.toLowerCase())) return [];
+      tried.add(q.toLowerCase());
+      try {
+        const r = await vintedFetch(session, `/api/v2/brands?q=${encodeURIComponent(q)}&per_page=10`);
+        if (!r.ok) return [];
+        const d = await r.json();
+        return d.brands || [];
+      } catch { return []; }
+    };
+    let b = await tryQ(query);
+    if (!b.length) b = await tryQ(query.replace(/\s+/g, ''));
+    if (!b.length) b = await tryQ(query.replace(/[^a-zA-Z0-9\s]/g, '').trim());
+    if (!b.length && query.includes(' ')) b = await tryQ(query.split(/\s+/)[0]);
+    if (!b.length && query.includes(' ')) {
+      const partsW = query.split(/\s+/);
+      b = await tryQ(partsW[partsW.length - 1]);
+    }
+    return b[0] ? { id: b[0].id, title: b[0].title || b[0].name } : null;
+  }
+
+  // Takes a draft that analyzeWithAI just enriched (brand/size/category as
+  // strings) and resolves every ID silently before handing off to
+  // showSummary. Fires the authenticity gate for high-risk brands so the
+  // user still sees it before reaching the review screen.
+  async function autoResolveListing(chatId) {
+    const c = getChat(chatId);
+    const L = c.listing;
+    if (!L) return;
+    const acct = activeAccount(c);
+    const session = acct ? await store.getSession(acct.userId).catch(() => null) : null;
+
+    // Category first — size lookup needs catalog_id.
+    if (!L.catalog_id) {
+      try {
+        if (session) await ensureLiveCatalog(session);
+      } catch {}
+      const cat = await autoResolveCategory(L);
+      if (cat) {
+        L.catalog_id = cat.id;
+        L.category_name = cat.path || cat.title || `ID: ${cat.id}`;
+        console.log(`[TG] autoResolve category → ${L.category_name} (id=${cat.id})`);
+      } else {
+        console.log('[TG] autoResolve category → no match');
+      }
+    }
+
+    // Size: AI hint → Vinted size match → fall back to "One size" if catalog allows.
+    if (!L.size_id && L.catalog_id && session) {
+      const s = await autoResolveSize(session, L);
+      if (s) {
+        L.size_id = s.id;
+        L.size_name = s.title;
+        console.log(`[TG] autoResolve size → ${s.title} (id=${s.id})`);
+      } else {
+        const one = await findOneSize(session, L.catalog_id);
+        if (one) {
+          L.size_id = one.id;
+          L.size_name = one.title;
+          console.log(`[TG] autoResolve size → fallback One size (id=${one.id})`);
+        } else {
+          console.log('[TG] autoResolve size → no match, user must pick manually');
+        }
+      }
+    }
+
+    // Brand: lookup → set id if matched, else keep plain-text brand so the
+    // draft POST sends {brand_id:null, brand:"Foo"}. That's exactly how
+    // Vinted's web form creates new brand records server-side.
+    if (!L.brand_id && L.brand && session) {
+      const b = await lookupVintedBrand(session, L.brand);
+      if (b) {
+        L.brand_id = b.id;
+        L.brand = b.title;
+        console.log(`[TG] autoResolve brand → ${b.title} (id=${b.id})`);
+      } else {
+        L.brand = normalizeText(L.brand, 'title');
+        L.brand_id = null;
+        console.log(`[TG] autoResolve brand → "${L.brand}" (plain text, Vinted will create on post)`);
+      }
+    }
+
+    saveChatState(chatId);
+
+    // Brand still empty? AI couldn't detect one. Ask the user before the
+    // summary so we don't silently post a listing with no brand tag.
+    if (!L.brand || !String(L.brand).trim()) {
+      return promptFastBrand(chatId);
+    }
+
+    return proceedToReview(chatId);
+  }
+
+  // Authenticity gate → summary tail, shared by autoResolveListing and the
+  // fast_brand_prompt handler. Assumes the listing has a non-empty brand.
+  async function proceedToReview(chatId) {
+    const c = getChat(chatId);
+    const L = c.listing;
+    if (!L) return;
+    const effectiveName = L.brand || '';
+    if (L.brand_id > 0 && !c._authChecked && isHighRiskBrand(effectiveName)) {
+      c._authPrevStep = 'review';
+      return triggerAuthGate(chatId, effectiveName);
+    }
+    c.step = 'review';
+    c._summaryEditOpen = false;
+    saveChatState(chatId);
+    return showSummary(chatId);
+  }
+
+  // Ask the user to type a brand name when the AI couldn't detect one.
+  // One-tap shortcut to post as Unbranded is also offered.
+  async function promptFastBrand(chatId) {
+    const c = getChat(chatId);
+    c.step = 'fast_brand_prompt';
+    saveChatState(chatId);
+    return bot.sendMessage(chatId,
+      `🏷️ *Brand?*\n\n` +
+      `I couldn't read a brand off your photos. Type the brand name and I'll try to match it in Vinted's catalogue — if it's not there I'll still post it as plain text.\n\n` +
+      `If the item is unbranded or you don't know, tap the button below.`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: [
+          [{ text: '🏷️ Post as Unbranded', callback_data: 'fast:unbranded' }],
+        ]}
+      }
+    );
   }
 
   async function processPhotos(chatId) {
@@ -1698,10 +1961,9 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
       console.log(`[TG] AI analysis: brand=${analysis.brand}, size=${analysis.size_hint}, color=${analysis.color}/${analysis.color2}, material=${analysis.material}, parcel=${analysis.parcel_size}, gender=${analysis.gender}`);
 
-      // Start wizard at step 0 (title)
-      c.wizardIdx = 0;
       saveChatState(chatId);
-      await askWizardStep(chatId);
+      await bot.sendMessage(chatId, '🤖 Resolving category, size and brand…');
+      await autoResolveListing(chatId);
     } catch (e) {
       console.error('[TG] AI analysis error:', e.message);
       c.step = 'idle';
@@ -2134,14 +2396,31 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
     }
     const warn = (f, base) => errFields.has(f) ? '⚠️ ' + base : base;
 
-    const keyboard = [
-      [{ text: warn('title', '✏️ Title'), callback_data: 'edit:title' }, { text: warn('description', '✏️ Description'), callback_data: 'edit:desc' }, { text: warn('price', '💰 Price'), callback_data: 'edit:price' }],
-      [{ text: warn('category', '📂 Category'), callback_data: 'pick:cat' }, { text: warn('size', '📏 Size'), callback_data: 'pick:size' }, { text: warn('brand', '🏷️ Brand'), callback_data: 'edit:brand' }],
-      [{ text: warn('color', '🎨 Colour'), callback_data: 'pick:color' }, { text: warn('condition', '📦 Condition'), callback_data: 'pick:cond' }, { text: warn('parcel', '📮 Parcel size'), callback_data: 'pick:pkg' }],
-    ];
+    // Force edit mode when there are publish errors to fix, so the user
+    // immediately sees the field buttons instead of having to tap "Edit".
+    const editMode = c._summaryEditOpen || errFields.size > 0;
 
-    if (ready) {
-      keyboard.unshift([{ text: '🚀 POST TO VINTED', callback_data: 'post' }]);
+    // If an edit just finished, prepend a friendly "post or edit more" line
+    // above the summary to match the user's requested loop.
+    if (editMode && c._justEdited) {
+      const fieldLabel = c._justEdited;
+      text = `✅ Updated ${esc(fieldLabel)}\\. Post now or edit something else?\n\n` + text;
+    }
+    delete c._justEdited;
+
+    let keyboard;
+    if (editMode) {
+      keyboard = [
+        [{ text: warn('title', '✏️ Title'), callback_data: 'edit:title' }, { text: warn('description', '✏️ Description'), callback_data: 'edit:desc' }, { text: warn('price', '💰 Price'), callback_data: 'edit:price' }],
+        [{ text: warn('category', '📂 Category'), callback_data: 'pick:cat' }, { text: warn('size', '📏 Size'), callback_data: 'pick:size' }, { text: warn('brand', '🏷️ Brand'), callback_data: 'edit:brand' }],
+        [{ text: warn('color', '🎨 Colour'), callback_data: 'pick:color' }, { text: warn('condition', '📦 Condition'), callback_data: 'pick:cond' }, { text: warn('parcel', '📮 Parcel size'), callback_data: 'pick:pkg' }],
+        [{ text: '📷 Photos', callback_data: 'edit:photos' }, { text: '⬅️ Done editing', callback_data: 'edit:done' }],
+      ];
+      if (ready) keyboard.unshift([{ text: '🚀 POST TO VINTED', callback_data: 'post' }]);
+    } else {
+      keyboard = [];
+      if (ready) keyboard.push([{ text: '🚀 POST TO VINTED', callback_data: 'post' }]);
+      keyboard.push([{ text: '✏️ Edit something', callback_data: 'edit:picker' }]);
     }
     keyboard.push([{ text: '❌ Cancel', callback_data: 'cancel' }]);
 
@@ -2241,6 +2520,20 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       return bot.sendMessage(chatId, `Current price: £${c.listing.price}\n\nWhat would you like to change? (e.g. "lower it", "make it £15", "price it higher"):`);
     }
 
+    // ── Expand / collapse the review keyboard ──
+    if (data === 'edit:picker') {
+      c._summaryEditOpen = true;
+      c.summaryMsgId = null;
+      saveChatState(chatId);
+      return showSummary(chatId);
+    }
+    if (data === 'edit:done') {
+      c._summaryEditOpen = false;
+      c.summaryMsgId = null;
+      saveChatState(chatId);
+      return showSummary(chatId);
+    }
+
     // ── Edit text fields (from final review) ──
     if (data === 'edit:title') {
       c.step = 'editing_title';
@@ -2257,6 +2550,9 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
     if (data === 'edit:brand') {
       c.step = 'editing_brand';
       return bot.sendMessage(chatId, `Current brand: ${c.listing.brand || 'None'}\n\nType the brand name to search (or "none" to clear):`);
+    }
+    if (data === 'edit:photos') {
+      return enterEditStep(chatId, 'photos');
     }
 
     // ── Pick condition ──
@@ -2275,6 +2571,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       // If in wizard, advance; if in review, go back to summary
       if (c.step.startsWith('wiz_')) return wizardNext(chatId);
       c.step = 'review';
+      c._justEdited = 'condition';
       return showSummary(chatId);
     }
 
@@ -2295,6 +2592,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       clearErrorField(c, 'color');
       if (c.step.startsWith('wiz_')) return wizardNext(chatId);
       c.step = 'review';
+      c._justEdited = 'colour';
       return showSummary(chatId);
     }
 
@@ -2343,17 +2641,21 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
 
     // ── Sync accept/reject ──
     if (data === 'sync:accept') {
+      let syncedLabel = null;
       if (c.step === 'confirm_desc_sync' && c.pendingSyncDesc) {
         c.listing.description = c.pendingSyncDesc;
         clearErrorField(c, 'description');
+        syncedLabel = 'description';
       } else if (c.step === 'confirm_title_sync' && c.pendingSyncTitle) {
         c.listing.title = c.pendingSyncTitle;
         clearErrorField(c, 'title');
+        syncedLabel = 'title';
       }
       delete c.pendingSyncDesc;
       delete c.pendingSyncTitle;
       c.step = 'review';
       c.summaryMsgId = null;
+      if (syncedLabel) c._justEdited = syncedLabel;
       saveChatState(chatId);
       return showSummary(chatId);
     }
@@ -2391,53 +2693,47 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       const effectiveName = textName || c.listing.brand || '';
       if (bid > 0 && !c._authChecked && isHighRiskBrand(effectiveName)) {
         c._authPrevStep = c.step;
-        c._authGateBrandName = effectiveName;
-        c.step = 'auth_gate';
-        saveChatState(chatId);
-        const checklist = getProofChecklist(c.listing.category_name);
-        const listText = checklist.map(s => `• ${esc(s)}`).join('\n');
-        const brandEsc = esc(effectiveName);
-        return bot.sendMessage(chatId,
-          `⚠️ *Authenticity check — ${brandEsc}*\n\n` +
-          `Vinted automatically reviews every listing tagged with a verified brand like *${brandEsc}*\\. ` +
-          `Their system looks for counterfeits using image matching, label/tag text OCR, and seller history\\. ` +
-          `If the listing fails that check, the item is delisted and the account gets a strike — repeat strikes lead to a permanent counterfeit ban with no appeal and lost inventory\\.\n\n` +
-          `You have three ways forward, each with a different tradeoff:\n\n` +
-          `📸 *I have proof — add photos*\n` +
-          `Best option if the item is genuine\\. You'll send close\\-ups of the label, care tag, stitching, serial sticker etc\\. ` +
-          `These get attached to the listing and satisfy Vinted's check\\. Listing stays tagged as *${brandEsc}* and gets the full brand\\-search traffic\\.\n\n` +
-          `🏷️ *Post as Unbranded*\n` +
-          `Safe fallback if you don't have proof shots handy\\. The listing posts without the brand tag, so Vinted skips the counterfeit check entirely\\. ` +
-          `Downside: you lose the brand tag and the brand\\-search SEO — the item sells slower and usually for less\\. The word *${brandEsc}* will also be stripped from the title and description\\.\n\n` +
-          `❌ *Cancel this listing*\n` +
-          `Drops the draft completely\\. Pick this if you want to gather proof shots first and come back later\\.\n\n` +
-          `Vinted usually wants these proof shots for this category:\n${listText}`,
-          {
-            parse_mode: 'MarkdownV2',
-            reply_markup: { inline_keyboard: [
-              [{ text: '📸 I have proof — add photos', callback_data: 'auth:proof' }],
-              [{ text: '🏷️ Post as Unbranded', callback_data: 'auth:unbranded' }],
-              [{ text: '❌ Cancel this listing', callback_data: 'auth:cancel' }],
-            ]}
-          }
-        );
+        return triggerAuthGate(chatId, effectiveName);
       }
 
       if (c.step.startsWith('wiz_')) return wizardNext(chatId);
       c.step = 'review';
+      c._justEdited = 'brand';
       return showSummary(chatId);
     }
 
     // ── Authenticity gate: user has proof photos ──
+    // ── Fast-path brand prompt: user tapped "Post as Unbranded" ──
+    if (data === 'fast:unbranded') {
+      if (c.step !== 'fast_brand_prompt') return;
+      const acct = activeAccount(c);
+      const session = acct ? await store.getSession(acct.userId).catch(() => null) : null;
+      const ubId = session ? await getUnbrandedId(session).catch(() => null) : null;
+      c.listing.brand = 'Unbranded';
+      c.listing.brand_id = ubId || null;
+      clearErrorField(c, 'brand');
+      await bot.sendMessage(chatId, '🏷️ Brand set to Unbranded. Continuing...');
+      return proceedToReview(chatId);
+    }
+
     if (data === 'auth:proof') {
       c.step = 'collecting_proof_photos';
       saveChatState(chatId);
       const checklist = getProofChecklist(c.listing?.category_name);
-      const listText = checklist.map(s => `• ${s}`).join('\n');
+      const listText = checklist.map((s, i) => `${i + 1}. ${s}`).join('\n');
+      const existing = c.photos?.length || 0;
       return bot.sendMessage(chatId,
-        `📸 Send your authenticity photos now. Recommended shots:\n${listText}\n\n` +
-        `They will be added to the listing alongside your product shots. Tap Done when finished.`,
-        { reply_markup: { inline_keyboard: [
+        `📸 *Send authenticity photos now*\n\n` +
+        `Take 3–4 close-up shots and send them here. You already have ${existing} product photo(s); these get added on top.\n\n` +
+        `*What to shoot (in order):*\n${listText}\n\n` +
+        `*Tips for photos Vinted will accept:*\n` +
+        `• Good light — daylight near a window is best\n` +
+        `• Hold the phone steady, tap to focus on the label\n` +
+        `• Fill the frame with the label — no need to show the whole garment\n` +
+        `• If text is blurry, take it again — OCR has to read it\n\n` +
+        `When you're done, tap *Done*. If Vinted rejects the listing anyway, you can always add more photos and repost.`,
+        { parse_mode: 'Markdown',
+          reply_markup: { inline_keyboard: [
           [{ text: '✅ Done — continue listing', callback_data: 'auth:proofdone' }]
         ]}}
       );
@@ -2774,6 +3070,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       bot.deleteMessage(chatId, syncMsg.message_id).catch(() => {});
       c.step = 'review';
       c.summaryMsgId = null;
+      c._justEdited = 'title';
       return showSummary(chatId);
     }
 
@@ -2799,6 +3096,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       bot.deleteMessage(chatId, syncMsg.message_id).catch(() => {});
       c.step = 'review';
       c.summaryMsgId = null;
+      c._justEdited = 'description';
       return showSummary(chatId);
     }
 
@@ -2808,6 +3106,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       c.listing.price = Math.round(price * 100) / 100;
       clearErrorField(c, 'price');
       c.step = 'review';
+      c._justEdited = 'price';
       return showSummary(chatId);
     }
 
@@ -2817,6 +3116,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
         c.listing.isbn = null;
         clearErrorField(c, 'isbn');
         c.step = 'review';
+        c._justEdited = 'ISBN';
         await bot.sendMessage(chatId, 'OK, ISBN cleared. If the category is Books you may still need to fix that.');
         return showSummary(chatId);
       }
@@ -2827,6 +3127,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       c.listing.isbn = digits;
       clearErrorField(c, 'isbn');
       c.step = 'review';
+      c._justEdited = 'ISBN';
       return showSummary(chatId);
     }
 
@@ -2835,9 +3136,50 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
         c.listing.brand = '';
         c.listing.brand_id = null;
         c.step = 'review';
+        c._justEdited = 'brand';
         return showSummary(chatId);
       }
       return searchBrands(chatId, msg.text);
+    }
+
+    // ── Fast-path brand prompt (AI couldn't detect a brand) ──
+    if (c.step === 'fast_brand_prompt') {
+      const raw = (msg.text || '').trim();
+      if (!raw) return bot.sendMessage(chatId, 'Type a brand name, or tap "Post as Unbranded".');
+      if (/^(none|skip|unbranded|no)$/i.test(raw)) {
+        const acct = activeAccount(c);
+        const session = acct ? await store.getSession(acct.userId).catch(() => null) : null;
+        const ubId = session ? await getUnbrandedId(session).catch(() => null) : null;
+        c.listing.brand = 'Unbranded';
+        c.listing.brand_id = ubId || null;
+        clearErrorField(c, 'brand');
+        await bot.sendMessage(chatId, '🏷️ Brand set to Unbranded. Continuing...');
+        return proceedToReview(chatId);
+      }
+      const acct = activeAccount(c);
+      const session = acct ? await store.getSession(acct.userId).catch(() => null) : null;
+      if (!session) {
+        c.listing.brand = normalizeText(raw, 'title');
+        c.listing.brand_id = null;
+        await bot.sendMessage(chatId, `🏷️ Brand set to "${c.listing.brand}". Continuing...`);
+        return proceedToReview(chatId);
+      }
+      const lookingMsg = await bot.sendMessage(chatId, `🔎 Looking up "${raw}" in Vinted's catalogue...`);
+      const b = await lookupVintedBrand(session, raw);
+      bot.deleteMessage(chatId, lookingMsg.message_id).catch(() => {});
+      if (b) {
+        c.listing.brand = b.title;
+        c.listing.brand_id = b.id;
+        clearErrorField(c, 'brand');
+        await bot.sendMessage(chatId, `✅ Matched: *${b.title}*`, { parse_mode: 'Markdown' });
+      } else {
+        c.listing.brand = normalizeText(raw, 'title');
+        c.listing.brand_id = null;
+        clearErrorField(c, 'brand');
+        await bot.sendMessage(chatId,
+          `ℹ️ "${c.listing.brand}" isn't in Vinted's catalogue. I'll post it as plain text — Vinted will add it to their catalogue on your first listing with this brand.`);
+      }
+      return proceedToReview(chatId);
     }
 
     if (c.step === 'searching_cat' || c.step === 'wiz_category') {
@@ -3103,6 +3445,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
     c.listing.size_name = '';
     if (c.step.startsWith('wiz_')) return wizardNext(chatId);
     c.step = 'review';
+    c._justEdited = 'category';
     return showSummary(chatId);
   }
 
@@ -3218,6 +3561,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
     clearErrorField(c, 'size');
     if (c.step.startsWith('wiz_')) return wizardNext(chatId);
     c.step = 'review';
+    c._justEdited = 'size';
     return showSummary(chatId);
   }
 
@@ -3284,6 +3628,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
     clearErrorField(c, 'parcel');
     if (c.step.startsWith('wiz_')) return wizardNext(chatId);
     c.step = 'review';
+    c._justEdited = 'parcel';
     return showSummary(chatId);
   }
 
