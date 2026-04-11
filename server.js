@@ -524,6 +524,13 @@ app.post('/api/items/backup', auth, async (req, res) => {
   }
 });
 
+// Get the original (pre-repost) photos for an item — used by browser-side repost
+// to avoid quality degradation from re-editing already-edited photos.
+app.get('/api/items/:itemId/original-photos', auth, async (req, res) => {
+  const photos = await getOriginalPhotos(req.user.id, req.params.itemId);
+  res.json({ ok: true, photos: photos || null });
+});
+
 // ═══ DASHBOARD DATA (web dashboard reads here) ═══
 app.get('/api/dashboard', auth, async (req, res) => {
   if (!db.hasDb()) return res.json({ ok:false, error:'Database not configured' });
@@ -700,6 +707,41 @@ async function acquireRepostLock(userId, itemId) {
 async function releaseRepostLock(userId, itemId) {
   if (!db.hasDb()) return;
   try { await db.query('DELETE FROM rp_repost_locks WHERE item_id=$1 AND user_id=$2', [itemId, userId]); } catch (_) {}
+}
+
+// Retrieve the ORIGINAL (pre-repost) photos for an item by finding the oldest backup
+// in its repost chain. This prevents photo quality degradation from repeated edits.
+async function getOriginalPhotos(userId, itemId) {
+  if (!db.hasDb()) return null;
+  try {
+    // Walk the previous_item_id chain to find all IDs this item has had
+    const ids = [itemId];
+    let currentId = itemId;
+    for (let i = 0; i < 20; i++) { // max 20 hops to prevent infinite loop
+      const r = await db.query('SELECT previous_item_id FROM rp_items WHERE item_id=$1 AND user_id=$2', [currentId, userId]);
+      if (r.rows[0] && r.rows[0].previous_item_id) {
+        ids.push(r.rows[0].previous_item_id);
+        currentId = r.rows[0].previous_item_id;
+      } else break;
+    }
+    // Find the oldest backup across all IDs in the chain
+    const placeholders = ids.map((_, i) => `$${i + 2}`).join(',');
+    const r = await db.query(
+      `SELECT photos, raw_data FROM rp_item_backups WHERE user_id=$1 AND item_id IN (${placeholders}) ORDER BY backed_up_at ASC LIMIT 1`,
+      [userId, ...ids]
+    );
+    if (r.rows[0]) {
+      // Prefer photos from raw_data (has full_size_url), fall back to photos column
+      const rawPhotos = r.rows[0].raw_data?.photos;
+      const colPhotos = r.rows[0].photos;
+      const photos = (Array.isArray(rawPhotos) && rawPhotos.length) ? rawPhotos : colPhotos;
+      if (Array.isArray(photos) && photos.length) {
+        console.log(`[RP] Found original photos from oldest backup (chain: ${ids.join('→')}): ${photos.length} photos`);
+        return photos;
+      }
+    }
+  } catch (e) { console.warn('[RP] getOriginalPhotos error:', e.message); }
+  return null;
 }
 
 // Save a backup of an item after successful repost so future reposts have data
@@ -968,8 +1010,11 @@ app.post('/api/vinted/items/:itemId/repost', auth, async (req, res) => {
       freshPhotos = browserPhotos;
       console.log(`[RP] Using ${freshPhotos.length} browser photos for ${itemId}`);
     } else {
-      console.log(`[RP] Server-side re-upload for ${itemId}...`);
-      freshPhotos = await reuploadPhotos(session, item.photos || []);
+      // Use original (pre-repost) photos to avoid quality degradation from repeated edits
+      const origPhotos = await getOriginalPhotos(req.user.id, itemId);
+      const photosToUpload = origPhotos || item.photos || [];
+      console.log(`[RP] Server-side re-upload for ${itemId} (${origPhotos ? 'original' : 'current'} photos)...`);
+      freshPhotos = await reuploadPhotos(session, photosToUpload);
     }
     const draft = buildDraftPayload(item);
     draft.assigned_photos = freshPhotos;
@@ -1062,8 +1107,11 @@ app.post('/api/repost-queue', auth, async (req, res) => {
           await logAction(userId, 'repost', { itemId, status:'failed', details:{ source:'backend-queue', error:'Item not found' } });
           continue;
         }
-        // Re-upload photos
-        const freshPhotos = await reuploadPhotos(session, item.photos || []);
+        // Re-upload photos — use originals to avoid quality degradation
+        const origPhotos = await getOriginalPhotos(userId, itemId);
+        const photosToUpload = origPhotos || item.photos || [];
+        console.log(`[RP-queue] Re-uploading ${photosToUpload.length} photos for ${itemId} (${origPhotos ? 'original' : 'current'})`);
+        const freshPhotos = await reuploadPhotos(session, photosToUpload);
         const draft = buildDraftPayload(item);
         draft.assigned_photos = freshPhotos;
         const uuid = draft.temp_uuid;
@@ -1403,8 +1451,11 @@ async function checkAllSchedules() {
             continue;
           }
 
-          // Re-upload photos
-          const freshPhotos = await reuploadPhotos(session, item.photos || []);
+          // Re-upload photos — use originals to avoid quality degradation
+          const origPhotos = await getOriginalPhotos(userId, itemId);
+          const photosToUpload = origPhotos || item.photos || [];
+          console.log(`[RP-cron] Re-uploading ${photosToUpload.length} photos for ${itemId} (${origPhotos ? 'original' : 'current'})`);
+          const freshPhotos = await reuploadPhotos(session, photosToUpload);
           const draft = buildDraftPayload(item);
           draft.assigned_photos = freshPhotos;
           const uuid = draft.temp_uuid;
