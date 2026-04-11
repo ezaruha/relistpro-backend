@@ -995,6 +995,23 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     }
   });
 
+  // Track bot-sent message IDs per chat so /menu → Clean up can best-effort
+  // delete them later. In-memory only; Telegram refuses to delete anything
+  // older than 48 h anyway, so persistence across restarts is pointless.
+  const _origSendMessage = bot.sendMessage.bind(bot);
+  bot.sendMessage = async function(chatId, text, opts) {
+    const result = await _origSendMessage(chatId, text, opts);
+    try {
+      const c = chats.get(chatId);
+      if (c && result?.message_id) {
+        if (!c._sentIds) c._sentIds = [];
+        c._sentIds.push(result.message_id);
+        if (c._sentIds.length > 200) c._sentIds.splice(0, c._sentIds.length - 200);
+      }
+    } catch (_) {}
+    return result;
+  };
+
   // If webhook URL is set, switch to webhook mode instead
   if (WEBHOOK_URL) {
     bot.stopPolling();
@@ -1029,6 +1046,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
   // ── Register command menu (shows in Telegram's command list) ──
   bot.setMyCommands([
     { command: 'start',  description: 'Welcome message & setup guide' },
+    { command: 'menu',   description: 'Main menu — switch, log out, clean chat' },
     { command: 'login',  description: 'Connect your RelistPro account' },
     { command: 'switch', description: 'Switch between linked Vinted accounts' },
     { command: 'status', description: 'Check connection & Vinted session' },
@@ -1043,34 +1061,9 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
   // COMMANDS
   // ──────────────────────────────────────────
 
-  bot.onText(/\/start(?:@\S+)?/, async (msg) => {
-    await ensureLoaded(msg.chat.id);
-    const c = getChat(msg.chat.id);
-    ensureMulti(c);
-    const connected = activeAccount(c);
-
-    if (connected) {
-      // Already logged in — show quick guide
-      const rpName = esc(connected.username);
-      const vtName = esc(connected.vintedName || '_not detected_');
-      return bot.sendMessage(msg.chat.id,
-        `Welcome back\\! ✅\n\n` +
-        `👤 RelistPro: *${rpName}*\n` +
-        `🛍️ Vinted: *${vtName}*\n\n` +
-        `📸 *Send photos* of an item to list it on Vinted\n` +
-        `Add a caption with details like "Nike hoodie size M £25"\n\n` +
-        `*Commands:*\n` +
-        `/status — check your Vinted session\n` +
-        `/switch — switch between accounts\n` +
-        `/cancel — abort current listing\n` +
-        `/logout — disconnect account\n` +
-        `/help — show all commands`,
-        { parse_mode: 'MarkdownV2' }
-      );
-    }
-
-    // Not logged in — full setup guide
-    bot.sendMessage(msg.chat.id,
+  // First-time setup text shown to un-logged-in users.
+  function sendSetupGuide(chatId) {
+    return bot.sendMessage(chatId,
       `Welcome to *RelistPro Bot* 🛍️\n\n` +
       `List items on Vinted in seconds — just send photos\\!\n\n` +
       `━━━━━━━━━━━━━━━━━━━━━━\n` +
@@ -1096,6 +1089,52 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       `*Need help?* Tap /help anytime`,
       { parse_mode: 'MarkdownV2' }
     );
+  }
+
+  // One-tap main menu for logged-in users. Rendered on /start, /menu, and
+  // the no-arg /login so the user never needs to retype credentials.
+  async function showMainMenu(chatId) {
+    const c = getChat(chatId);
+    ensureMulti(c);
+    const active = activeAccount(c);
+    if (!active) return sendSetupGuide(chatId);
+
+    const rpName = esc(active.username);
+    const vtName = esc(active.vintedName || '_not detected_');
+    const countLine = c.accounts.length > 1
+      ? `\n\n${c.accounts.length} accounts linked`
+      : '';
+
+    const rows = [
+      [{ text: `📸 Continue as ${active.username}`, callback_data: 'menu:continue' }],
+    ];
+    if (c.accounts.length > 1) {
+      rows.push([{ text: '🔄 Switch account', callback_data: 'menu:switch' }]);
+    }
+    rows.push([{ text: '➕ Add another account', callback_data: 'menu:add' }]);
+    rows.push([{ text: '👋 Log out this account', callback_data: 'menu:logout' }]);
+    rows.push([{ text: '🧹 Clean up chat', callback_data: 'menu:clean' }]);
+
+    return bot.sendMessage(chatId,
+      `👋 *Welcome back*\n\n` +
+      `👤 RelistPro: *${rpName}*\n` +
+      `🛍️ Vinted: *${vtName}*${countLine}\n\n` +
+      `What do you want to do?`,
+      { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: rows } }
+    );
+  }
+
+  bot.onText(/\/start(?:@\S+)?/, async (msg) => {
+    await ensureLoaded(msg.chat.id);
+    const c = getChat(msg.chat.id);
+    ensureMulti(c);
+    if (activeAccount(c)) return showMainMenu(msg.chat.id);
+    return sendSetupGuide(msg.chat.id);
+  });
+
+  bot.onText(/\/menu(?:@\S+)?/, async (msg) => {
+    await ensureLoaded(msg.chat.id);
+    return showMainMenu(msg.chat.id);
   });
 
   bot.onText(/\/help(?:@\S+)?/, async (msg) => {
@@ -1138,22 +1177,11 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       return doLogin(chatId, args[0], args[1]);
     }
 
-    // Already connected? Confirm the persistent state instead of making the
-    // user re-enter credentials. The Telegram login is permanent — it only
-    // ever clears when the user runs /logout.
+    // Already connected? Show the one-tap menu instead of making the user
+    // re-enter credentials. Telegram login is persistent — the menu lets
+    // them continue, switch, add, log out, or clean up in one tap.
     if (args.length === 0 && c.accounts?.length) {
-      const lines = c.accounts.map((a, i) => {
-        const mark = i === c.activeIdx ? '➤' : ' ';
-        const vn = a.vintedName ? ` → 🛍️ ${a.vintedName}` : '';
-        return `${mark} ${a.username}${vn}`;
-      }).join('\n');
-      return bot.sendMessage(chatId,
-        `✅ You're already connected — this login is permanent until you run /logout.\n\n${lines}\n\n` +
-        `📸 Send photos to list an item.\n` +
-        `🔄 /switch to change active account\n` +
-        `➕ Add another account: /login <username> <password>\n\n` +
-        `ℹ️ If Vinted says your session expired, that's separate from this login — just open Vinted in Chrome, tap the RelistPro extension → Sync. You don't need to /login again here.`
-      );
+      return showMainMenu(chatId);
     }
 
     // Conversational login — ask for username first
@@ -2534,6 +2562,100 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
         );
       }
       return;
+    }
+
+    // ── Main menu actions (from showMainMenu) ──
+    if (data === 'menu:continue') {
+      return bot.sendMessage(chatId, '📸 Send photos of an item to start a listing.');
+    }
+
+    if (data === 'menu:switch') {
+      ensureMulti(c);
+      if (c.accounts.length < 2) {
+        return bot.sendMessage(chatId, 'Only one account linked. Use ➕ Add another account from /menu.');
+      }
+      const rows = [];
+      for (const [i, a] of c.accounts.entries()) {
+        const vt = a.vintedName || '(no Vinted name)';
+        const label = `${a.username} → ${vt}${i === c.activeIdx ? ' [current]' : ''}`;
+        rows.push([{ text: label.slice(0, 64), callback_data: `menu:switch:${i}` }]);
+      }
+      rows.push([{ text: '⬅️ Back', callback_data: 'menu:back' }]);
+      return bot.sendMessage(chatId, 'Switch to which account?\n(RelistPro → Vinted)', { reply_markup: { inline_keyboard: rows } });
+    }
+
+    if (data.startsWith('menu:switch:')) {
+      ensureMulti(c);
+      const idx = parseInt(data.split(':')[2]);
+      if (idx >= 0 && idx < c.accounts.length) {
+        c.activeIdx = idx;
+        saveChatAccounts(chatId, c.accounts, c.activeIdx);
+      }
+      return showMainMenu(chatId);
+    }
+
+    if (data === 'menu:back') {
+      return showMainMenu(chatId);
+    }
+
+    if (data === 'menu:add') {
+      ensureMulti(c);
+      c.step = 'login_username';
+      return bot.sendMessage(chatId, 'Type the RelistPro username you want to add:');
+    }
+
+    if (data === 'menu:logout') {
+      ensureMulti(c);
+      if (!c.accounts.length) {
+        return sendSetupGuide(chatId);
+      }
+      const removed = c.accounts.splice(c.activeIdx, 1)[0];
+      if (c.accounts.length) {
+        c.activeIdx = 0;
+        await bot.sendMessage(chatId, `Removed ${removed.username}. Switched to ${c.accounts[0].username}.`);
+        saveChatAccounts(chatId, c.accounts, c.activeIdx);
+        return showMainMenu(chatId);
+      }
+      c.activeIdx = -1;
+      c.step = 'idle';
+      await bot.sendMessage(chatId, `Removed ${removed.username}. No accounts left.`);
+      saveChatAccounts(chatId, c.accounts, c.activeIdx);
+      return sendSetupGuide(chatId);
+    }
+
+    if (data === 'menu:clean') {
+      const sent = (c._sentIds || []).slice();
+      c._sentIds = [];
+      let deleted = 0, skipped = 0;
+      for (const mid of sent) {
+        try {
+          await bot.deleteMessage(chatId, mid);
+          deleted++;
+        } catch (_) {
+          skipped++;
+        }
+      }
+      // Clear draft listing + photos + wizard state. Accounts, Vinted
+      // session, and the failed-listings queue are deliberately untouched.
+      c.listing = null;
+      c.photos = [];
+      c.wizardIdx = 0;
+      c.step = 'idle';
+      c.summaryMsgId = null;
+      delete c._dupChecked; delete c._dupEdit; delete c._authChecked;
+      delete c._authPrevStep; delete c._authGateBrandName;
+      delete c._summaryEditOpen; delete c._justEdited;
+      await saveChatState(chatId);
+
+      const total = sent.length;
+      const note = skipped > 0
+        ? `\n\nℹ️ Telegram doesn't let me delete messages older than 48 h or messages you sent yourself. Use Telegram's *Clear history* option for a fully clean chat.`
+        : '';
+      return bot.sendMessage(chatId,
+        `🧹 Cleaned up ${deleted}/${total} bot message(s) and reset the draft listing.\n\n` +
+        `Your account(s) and your last 5 saved listings are still here — use /retry to see them.${note}`,
+        { parse_mode: 'Markdown' }
+      );
     }
 
     // ── Resume / New listing ──
