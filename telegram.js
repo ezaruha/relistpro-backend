@@ -992,9 +992,12 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
     if (connected) {
       // Already logged in — show quick guide
-      const name = esc(connected.vintedName || connected.username);
+      const rpName = esc(connected.username);
+      const vtName = esc(connected.vintedName || '_not detected_');
       return bot.sendMessage(msg.chat.id,
-        `Welcome back\\! ✅ Connected as *${name}*\n\n` +
+        `Welcome back\\! ✅\n\n` +
+        `👤 RelistPro: *${rpName}*\n` +
+        `🛍️ Vinted: *${vtName}*\n\n` +
         `📸 *Send photos* of an item to list it on Vinted\n` +
         `Add a caption with details like "Nike hoodie size M £25"\n\n` +
         `*Commands:*\n` +
@@ -1138,13 +1141,14 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       await saveChatState(chatId);
       console.log(`[TG] Login complete: chat=${chatId} accounts=${c.accounts.length} idx=${c.activeIdx} user=${username}`);
 
-      const vintedLabel = vintedName || username;
+      const vintedDisplay = vintedName || '_not detected_';
       const countMsg = c.accounts.length > 1 ? `\n${c.accounts.length} accounts linked\\. Use /switch to change\\.` : '';
       bot.sendMessage(chatId,
-        `✅ Logged in as *${esc(vintedLabel)}*\n` +
-        `Vinted: ${esc(session.domain)}\n` +
+        `✅ *Logged in*\n\n` +
+        `👤 RelistPro: *${esc(username)}*\n` +
+        `🛍️ Vinted: *${esc(vintedDisplay)}* \\(${esc(session.domain)}\\)\n` +
         `${countMsg}\n` +
-        `📸 Send me photos of an item to list on *${esc(vintedLabel)}*'s Vinted\\!`,
+        `📸 Send me photos of an item to list it\\!`,
         { parse_mode: 'MarkdownV2' });
     } catch (e) {
       console.error('[TG] Login error:', e.message);
@@ -1166,10 +1170,10 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       const a = c.accounts[i];
       const session = await store.getSession(a.userId);
       const active = i === c.activeIdx ? ' [active]' : '';
-      const vintedLabel = a.vintedName || a.username;
+      const header = `${i + 1}. 👤 ${a.username} → 🛍️ ${a.vintedName || 'not detected'}${active}`;
 
       if (!session) {
-        lines.push(`${i + 1}. ${vintedLabel}${active}\n   ❌ No Vinted session — open Chrome → RelistPro extension → Sync`);
+        lines.push(`${header}\n   ❌ No Vinted session — open Chrome → RelistPro extension → Sync`);
         continue;
       }
 
@@ -1189,9 +1193,9 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       } catch {}
 
       if (sessionAlive) {
-        lines.push(`${i + 1}. ${vintedLabel}${active}\n   ✅ Vinted session active (${session.domain})`);
+        lines.push(`${header}\n   ✅ Vinted session active (${session.domain})`);
       } else {
-        lines.push(`${i + 1}. ${vintedLabel}${active}\n   ⚠️ Vinted session expired — open Chrome → RelistPro extension → Sync`);
+        lines.push(`${header}\n   ⚠️ Vinted session expired — open Chrome → RelistPro extension → Sync`);
       }
     }
 
@@ -1209,11 +1213,11 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
     const rows = [];
     for (const [i, a] of c.accounts.entries()) {
-      const vintedLabel = a.vintedName ? `${a.vintedName} @ ${a.vintedDomain || '?'}` : a.username;
-      const label = i === c.activeIdx ? `${vintedLabel} [current]` : vintedLabel;
-      rows.push([{ text: label, callback_data: `sw:${i}` }]);
+      const vt = a.vintedName || '(no Vinted name)';
+      const label = `${a.username} → ${vt}${i === c.activeIdx ? ' [current]' : ''}`;
+      rows.push([{ text: label.slice(0, 64), callback_data: `sw:${i}` }]);
     }
-    bot.sendMessage(chatId, 'Switch to which account?', { reply_markup: { inline_keyboard: rows } });
+    bot.sendMessage(chatId, 'Switch to which account?\n(RelistPro → Vinted)', { reply_markup: { inline_keyboard: rows } });
   });
 
   bot.onText(/\/logout(?:@\S+)?(.*)/, async (msg, match) => {
@@ -1983,7 +1987,11 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
         c.catalogCache = null;
         const a = c.accounts[idx];
         saveChatAccounts(chatId, c.accounts, c.activeIdx);
-        return bot.editMessageText(`Switched to ${a.username}. Send photos to list on this account.`, { chat_id: chatId, message_id: query.message.message_id });
+        const vt = a.vintedName || 'not detected';
+        return bot.editMessageText(
+          `✅ Switched account\n\n👤 RelistPro: ${a.username}\n🛍️ Vinted: ${vt}\n\n📸 Send photos to list on this account.`,
+          { chat_id: chatId, message_id: query.message.message_id }
+        );
       }
       return;
     }
