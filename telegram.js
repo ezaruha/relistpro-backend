@@ -746,6 +746,44 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     }
   }
 
+  // Save the current listing to the failed-retry queue (caps at 5 per chat)
+  async function saveFailedListing(chatId, errorSummary) {
+    if (!db || !db.hasDb()) return;
+    const c = chats.get(chatId);
+    if (!c || !c.listing) return;
+    await tableReady;
+    try {
+      const acct = activeAccount(c);
+      const photoRefs = (c.photos || []).map(p => ({ fileId: p.fileId })).filter(r => r.fileId);
+      if (!photoRefs.length) {
+        console.log('[TG] saveFailedListing skipped — no fileIds');
+        return;
+      }
+      await db.query(
+        `INSERT INTO rp_telegram_failed_listings
+           (chat_id, listing, photo_refs, account_idx, account_name, error_summary)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          String(chatId),
+          JSON.stringify(c.listing),
+          JSON.stringify(photoRefs),
+          c.activeIdx ?? 0,
+          acct?.vintedName || acct?.username || null,
+          (errorSummary || '').slice(0, 500),
+        ]
+      );
+      await db.query(
+        `DELETE FROM rp_telegram_failed_listings
+         WHERE id IN (
+           SELECT id FROM rp_telegram_failed_listings
+           WHERE chat_id=$1 ORDER BY created_at DESC OFFSET 5
+         )`,
+        [String(chatId)]
+      );
+      console.log(`[TG] saveFailedListing OK for chat ${chatId}`);
+    } catch (e) { console.error('[TG] saveFailedListing error:', e.message); }
+  }
+
   // Shortcut: save just accounts (lightweight, no photos)
   async function saveChatAccounts(chatId, accounts, activeIdx) {
     if (!db || !db.hasDb()) return;
@@ -813,6 +851,21 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       await db.query(`ALTER TABLE rp_telegram_chats ADD COLUMN IF NOT EXISTS photos JSONB`);
       await db.query(`ALTER TABLE rp_telegram_chats ADD COLUMN IF NOT EXISTS wizard_idx INTEGER DEFAULT 0`);
       await db.query(`ALTER TABLE rp_telegram_chats ADD COLUMN IF NOT EXISTS step TEXT DEFAULT 'idle'`);
+
+      // Failed-listing retry queue (last 5 per chat)
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS rp_telegram_failed_listings (
+          id            SERIAL PRIMARY KEY,
+          chat_id       TEXT NOT NULL,
+          listing       JSONB NOT NULL,
+          photo_refs    JSONB NOT NULL,
+          account_idx   INTEGER,
+          account_name  TEXT,
+          error_summary TEXT,
+          created_at    TIMESTAMPTZ DEFAULT NOW()
+        )
+      `);
+      await db.query(`CREATE INDEX IF NOT EXISTS rp_tg_failed_chat_created ON rp_telegram_failed_listings (chat_id, created_at DESC)`);
       console.log('[TG] Chat persistence table ready');
     } catch (e) { console.error('[TG] Table init error:', e.message); }
   }
@@ -918,6 +971,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     { command: 'switch', description: 'Switch between linked Vinted accounts' },
     { command: 'status', description: 'Check connection & Vinted session' },
     { command: 'cancel', description: 'Abort current listing' },
+    { command: 'retry',  description: 'Resume a failed listing (last 5)' },
     { command: 'logout', description: 'Disconnect current account' },
     { command: 'help',   description: 'Show all commands' },
   ]).then(() => console.log('[TG] Commands menu registered'));
@@ -1194,6 +1248,32 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     c.listing = null;
     c.catalogCache = null;
     bot.sendMessage(msg.chat.id, 'Listing cancelled. Send new photos whenever you\'re ready.');
+  });
+
+  bot.onText(/^\/retry(?:@\S+)?$/i, async (msg) => {
+    const chatId = msg.chat.id;
+    await ensureLoaded(chatId);
+    if (!db || !db.hasDb()) return bot.sendMessage(chatId, 'Database not available.');
+    try {
+      const r = await db.query(
+        `SELECT id, listing, account_name, error_summary, created_at
+         FROM rp_telegram_failed_listings
+         WHERE chat_id=$1 ORDER BY created_at DESC LIMIT 5`,
+        [String(chatId)]
+      );
+      if (!r.rows.length) return bot.sendMessage(chatId, 'No failed listings saved.');
+      const rows = r.rows.map(row => {
+        const L = typeof row.listing === 'string' ? JSON.parse(row.listing) : row.listing;
+        const label = `${L.title || 'Untitled'} — £${L.price || '?'} (${row.account_name || 'acct'})`;
+        return [{ text: label.slice(0, 60), callback_data: `retry:${row.id}` }];
+      });
+      return bot.sendMessage(chatId, '🔁 Pick a failed listing to retry:', {
+        reply_markup: { inline_keyboard: rows }
+      });
+    } catch (e) {
+      console.error('[TG] /retry error:', e.message);
+      return bot.sendMessage(chatId, 'Could not load failed listings.');
+    }
   });
 
   // ──────────────────────────────────────────
@@ -1960,7 +2040,65 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       return showSummary(chatId);
     }
 
+    // ── Retry a saved failed listing ──
+    if (data.startsWith('retry:')) {
+      if (!db || !db.hasDb()) return bot.sendMessage(chatId, 'Database not available.');
+      const rowId = parseInt(data.split(':')[1]);
+      const r = await db.query(
+        `SELECT listing, photo_refs, account_idx FROM rp_telegram_failed_listings WHERE id=$1 AND chat_id=$2`,
+        [rowId, String(chatId)]
+      );
+      if (!r.rows.length) return bot.sendMessage(chatId, 'Retry entry not found (may have been cleared).');
+      const row = r.rows[0];
+      const parseJ = (v) => typeof v === 'string' ? JSON.parse(v) : v;
+      const listing = parseJ(row.listing);
+      const photoRefs = parseJ(row.photo_refs) || [];
+
+      ensureMulti(c);
+      if (row.account_idx != null && row.account_idx < c.accounts.length) {
+        c.activeIdx = row.account_idx;
+      }
+
+      c.listing = listing;
+      delete c.listing._failedDraftId;
+      delete c.listing._errorFields;
+      delete c._dupChecked;
+      delete c._dupEdit;
+      delete c._lastDraftId;
+      delete c._retried;
+      c.summaryMsgId = null;
+      c.step = 'review';
+
+      c.photos = [];
+      const os = require('os');
+      const fs = require('fs');
+      const status = await bot.sendMessage(chatId, `🔁 Re-downloading ${photoRefs.length} photo(s)...`);
+      for (const ref of photoRefs) {
+        try {
+          const filePath = await bot.downloadFile(ref.fileId, os.tmpdir());
+          const buffer = fs.readFileSync(filePath);
+          try { fs.unlinkSync(filePath); } catch (_) {}
+          if (buffer.length) c.photos.push({ base64: buffer.toString('base64'), fileId: ref.fileId });
+        } catch (e) {
+          console.error(`[TG] Retry download failed for ${ref.fileId}:`, e.message);
+        }
+      }
+      if (!c.photos.length) {
+        await bot.editMessageText(
+          '❌ Photos could not be re-downloaded from Telegram (fileIds may have expired). Please resend photos.',
+          { chat_id: chatId, message_id: status.message_id }
+        ).catch(() => {});
+        return;
+      }
+      await bot.editMessageText(`✅ Restored ${c.photos.length} photo(s). Review and tap POST.`, {
+        chat_id: chatId, message_id: status.message_id
+      }).catch(() => {});
+      saveChatState(chatId);
+      return showSummary(chatId);
+    }
+
     // ── POST ──
+    // Ordering guarantee: dup prompt runs BEFORE any Vinted network call, on new listings and retries alike.
     if (data === 'post') {
       // Admin-only duplicate check: ask if this listing exists on another account.
       // If yes, photos are rewritten via sharp to defeat Vinted's perceptual hash.
@@ -2462,6 +2600,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
 
     // Cache for title lookup when user selects
     c.sizeCache = allSizes;
+    c.sizeCacheGroups = groups;
 
     // Try to auto-match AI-detected size — but only if confidence is not low
     const hint = (c.listing.size_hint || '').trim().toUpperCase();
@@ -2489,7 +2628,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
     if (autoMatched) {
       rows.unshift([{ text: `✅ Use detected: ${autoMatched.title}`, callback_data: `size:${autoMatched.id}` }]);
     }
-    rows.push([{ text: '⏭️ Skip (no size)', callback_data: 'size:0' }]);
+    rows.push([{ text: '⏭️ Skip (use "One size" if available)', callback_data: 'size:0' }]);
 
     const sizeWarn = sizeConfLow ? ' ⚠️ (low confidence — verify)' : '';
     const sizeInfo = hint ? `\nAI detected: ${c.listing.size_hint}${sizeWarn}` : '';
@@ -2508,8 +2647,18 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
   async function selectSize(chatId, sizeId) {
     const c = getChat(chatId);
     if (sizeId === 0) {
-      c.listing.size_id = null;
-      c.listing.size_name = 'N/A';
+      // User skipped — try to fall back to "One size" if available for this catalog
+      const oneSizeGroup = (c.sizeCacheGroups || []).find(g => /one\s*size/i.test(g.title || ''));
+      const oneSizeFlat = (c.sizeCache || []).find(s => /one\s*size/i.test(s.title || ''));
+      const oneSize = oneSizeGroup || oneSizeFlat;
+      if (oneSize) {
+        c.listing.size_id = oneSize.id;
+        c.listing.size_name = oneSize.title;
+        console.log(`[TG] User skipped size — defaulted to "${oneSize.title}" (id=${oneSize.id})`);
+      } else {
+        c.listing.size_id = null;
+        c.listing.size_name = 'N/A';
+      }
     } else {
       c.listing.size_id = sizeId;
       const cached = c.sizeCache?.find(s => s.id === sizeId);
@@ -2912,9 +3061,10 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
         c.step = 'review';
         c.summaryMsgId = null;
         saveChatState(chatId);
+        await saveFailedListing(chatId, errorLines.join('; '));
 
         await bot.editMessageText(
-          `❌ Publishing failed. Fix the issues below and tap POST again:\n\n${errorLines.join('\n') || 'Unknown error'}`,
+          `❌ Publishing failed. Fix the issues below and tap POST again, or /retry to resume later:\n\n${errorLines.join('\n') || 'Unknown error'}`,
           { chat_id: chatId, message_id: statusMsg.message_id }
         ).catch(() => {});
 
