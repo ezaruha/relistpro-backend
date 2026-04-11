@@ -1762,6 +1762,31 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
   // Five-strategy brand lookup against /api/v2/brands. Returns {id,title}|null
   // — no UI side effect, safe to call from the fast-post path.
+  // Normalize a brand-ish string for comparison: lowercase, alphanumeric only.
+  function normBrand(s) {
+    return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  }
+
+  // Score a Vinted brand result against the user's query. Higher = better.
+  // Returns 0 when the candidate is noise (no shared token with the query).
+  function scoreBrandMatch(query, candidateTitle) {
+    const q = normBrand(query);
+    const c = normBrand(candidateTitle);
+    if (!q || !c) return 0;
+    if (q === c) return 100;
+    if (c.startsWith(q) && q.length >= 3) return 80;
+    if (q.startsWith(c) && c.length >= 3) return 60;
+    const qTokens = String(query).toLowerCase().split(/\s+/).filter(t => t.length >= 2);
+    const cTokensRaw = String(candidateTitle).toLowerCase().split(/\s+/).filter(t => t.length >= 2);
+    const cTokens = cTokensRaw.map(normBrand).filter(Boolean);
+    // Whole-token match — "Spirit" inside "Spirit Motors" qualifies, but
+    // "Spirit" inside "Inspiration" does not, because "inspiration" is a
+    // single token and its normalised form doesn't equal "spirit".
+    const qFirst = normBrand(qTokens[0] || '');
+    if (qFirst && cTokens.includes(qFirst)) return 40;
+    return 0;
+  }
+
   async function lookupVintedBrand(session, query) {
     if (!query) return null;
     const tried = new Set();
@@ -1783,7 +1808,17 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       const partsW = query.split(/\s+/);
       b = await tryQ(partsW[partsW.length - 1]);
     }
-    return b[0] ? { id: b[0].id, title: b[0].title || b[0].name } : null;
+    if (!b.length) return null;
+    // Rank by match score and take the best — Vinted's search is fuzzy and
+    // often returns unrelated brands first. Reject anything that isn't a
+    // real match so callers fall through to plain-text.
+    const ranked = b
+      .map(x => ({ raw: x, score: scoreBrandMatch(query, x.title || x.name || '') }))
+      .filter(x => x.score > 0)
+      .sort((a, b) => b.score - a.score);
+    if (!ranked.length) return null;
+    const best = ranked[0].raw;
+    return { id: best.id, title: best.title || best.name, score: ranked[0].score };
   }
 
   // Takes a draft that analyzeWithAI just enriched (brand/size/category as
@@ -1831,16 +1866,25 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       }
     }
 
-    // Brand: lookup → set id if matched, else keep plain-text brand so the
-    // draft POST sends {brand_id:null, brand:"Foo"}. That's exactly how
-    // Vinted's web form creates new brand records server-side.
-    if (!L.brand_id && L.brand && session) {
+    // Brand: if AI confidence is "low" we DO NOT trust the string at all —
+    // a low-confidence guess (e.g. "Adidas" for a three-stripe-ish pattern)
+    // is worse than no brand because we'd stamp the wrong brand onto the
+    // listing. Drop it and let promptFastBrand ask the user.
+    if (L.aiConfidence?.brand === 'low') {
+      console.log(`[TG] autoResolve brand → dropping low-confidence AI guess "${L.brand}"`);
+      L.brand = '';
+      L.brand_id = null;
+    } else if (!L.brand_id && L.brand && session) {
       const b = await lookupVintedBrand(session, L.brand);
-      if (b) {
+      // Only accept the lookup if the match is strong (exact or prefix).
+      // Weak whole-token matches like "Spirit" → "Spirit Motors" are worse
+      // than plain text, which Vinted will render as the brand name.
+      if (b && b.score >= 60) {
         L.brand_id = b.id;
         L.brand = b.title;
-        console.log(`[TG] autoResolve brand → ${b.title} (id=${b.id})`);
+        console.log(`[TG] autoResolve brand → ${b.title} (id=${b.id}, score=${b.score})`);
       } else {
+        if (b) console.log(`[TG] autoResolve brand → ignoring weak match "${b.title}" (score=${b.score}) for "${L.brand}"`);
         L.brand = normalizeText(L.brand, 'title');
         L.brand_id = null;
         console.log(`[TG] autoResolve brand → "${L.brand}" (plain text, Vinted will create on post)`);
@@ -2156,7 +2200,7 @@ TITLE: Max 60 chars. Format: [Brand] [Item] [Detail]. Search-friendly words only
 DESCRIPTION: 4-6 lines. Hook, key details (material/fit/style), measurements if visible, condition notes, hashtags. No filler. No "This is a...". Don't shout in ALL CAPS.
 PRICE: Vinted UK used prices, NOT retail. Fast fashion £3-12, mid-range £8-20, premium £15-40, sportswear £10-35, designer £40-200+. NWT=60-70% retail, very good=30-50%, good=20-35%.
 CONDITION: Check ALL photos for wear/damage. NWT=visible tags attached, NwoT=unworn no tags, Very good=minimal wear, Good=some wear, Satisfactory=visible damage.
-BRAND: Check labels, logos, tags in ALL photos. Read text on labels carefully. Guess if partial logo visible. null if truly unidentifiable.
+BRAND: ONLY return a brand if you can clearly READ the brand name on a label, tag, logo print, engraving or embroidery. Do NOT guess based on silhouette, colour scheme, stripes, or style — a three-stripe pattern is not proof of Adidas, a swoosh-like curve is not proof of Nike, and a generic sportswear look is not proof of any brand. If the only brand-like evidence is shape, style, or vibe, return null and set confidence.brand to "low". If you can partially read letters on a label and you're confident about the reading, return that brand with confidence "medium". Return the brand EXACTLY as it appears on the label (don't normalise "adidas" to "Adidas" or the opposite).
 CATEGORY: Return a structured path like "Women > Dresses > Midi dresses" or "Men > Jumpers > Hoodies" or "Kids > Girls > Tops" — use > as separator. Be as specific as possible to the leaf level.
 COLOR: Primary color. One of: Black,White,Grey,Blue,Red,Green,Yellow,Pink,Orange,Purple,Brown,Beige,Cream,Multicolour,Khaki,Turquoise,Silver,Gold,Navy,Burgundy,Coral,Light blue. If item has a pattern/print, use Multicolour.
 COLOR2: Secondary color if item is two-tone. null if single color.
@@ -3167,7 +3211,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       const lookingMsg = await bot.sendMessage(chatId, `🔎 Looking up "${raw}" in Vinted's catalogue...`);
       const b = await lookupVintedBrand(session, raw);
       bot.deleteMessage(chatId, lookingMsg.message_id).catch(() => {});
-      if (b) {
+      if (b && b.score >= 60) {
         c.listing.brand = b.title;
         c.listing.brand_id = b.id;
         clearErrorField(c, 'brand');
@@ -3176,8 +3220,13 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
         c.listing.brand = normalizeText(raw, 'title');
         c.listing.brand_id = null;
         clearErrorField(c, 'brand');
-        await bot.sendMessage(chatId,
-          `ℹ️ "${c.listing.brand}" isn't in Vinted's catalogue. I'll post it as plain text — Vinted will add it to their catalogue on your first listing with this brand.`);
+        if (b) {
+          await bot.sendMessage(chatId,
+            `ℹ️ Closest Vinted brand was "${b.title}" which doesn't look like what you typed. Posting "${c.listing.brand}" as plain text instead — Vinted will add it to their catalogue on your first listing with this brand.`);
+        } else {
+          await bot.sendMessage(chatId,
+            `ℹ️ "${c.listing.brand}" isn't in Vinted's catalogue. I'll post it as plain text — Vinted will add it to their catalogue on your first listing with this brand.`);
+        }
       }
       return proceedToReview(chatId);
     }
@@ -3669,30 +3718,63 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       brands = await tryQuery(parts[parts.length - 1]);
     }
 
+    const displayQuery = normalizeText(query, 'title');
+
     if (!brands.length) {
-      // Persist the queried brand as plain text so it still appears in the listing
       if (c.listing) {
-        c.listing.brand = normalizeText(query, 'title');
+        c.listing.brand = displayQuery;
         c.listing.brand_id = null;
         saveChatState(chatId);
       }
-      const displayBrand = (c.listing?.brand || query);
       return bot.sendMessage(chatId,
-        `🏷️ Brand "${query}" not found in Vinted's database.\n\nYour listing will be posted with "${displayBrand}" as text (no brand tag). You can search again with a different spelling.`,
+        `🏷️ "${displayQuery}" isn't in Vinted's catalogue.\n\nYour listing will be posted with "${displayQuery}" as plain text — Vinted will add it to their catalogue on the first listing with this brand.`,
         { reply_markup: { inline_keyboard: [
-          [{ text: '✅ Continue without tag', callback_data: 'brand:0:' + displayBrand.slice(0, 30) }],
+          [{ text: `✅ Post as "${displayQuery}"`, callback_data: `brand:0:${displayQuery.slice(0, 30)}` }],
           [{ text: '🔍 Search again', callback_data: 'brand:search' }]
         ]}}
       );
     }
 
-    const rows = brands.slice(0, 8).map(b => [{
-      text: b.title || b.name,
-      callback_data: `brand:${b.id}:${(b.title || b.name).slice(0, 40)}`
-    }]);
+    // Rank results so a real match beats Vinted's fuzzy noise (e.g. typing
+    // "Spirit" shouldn't surface "Spirit Motors" above nothing).
+    const ranked = brands
+      .map(b => ({ raw: b, score: scoreBrandMatch(query, b.title || b.name || '') }))
+      .sort((a, b) => b.score - a.score);
+
+    const topScore = ranked[0]?.score || 0;
+    // No result even loosely matches what the user typed — don't waste their
+    // tap on a list of unrelated brands. Offer plain-text directly.
+    if (topScore === 0) {
+      if (c.listing) {
+        c.listing.brand = displayQuery;
+        c.listing.brand_id = null;
+        saveChatState(chatId);
+      }
+      const suggestions = brands.slice(0, 3).map(b => b.title || b.name).join(', ');
+      return bot.sendMessage(chatId,
+        `🏷️ Nothing in Vinted's catalogue matches "${displayQuery}".\n\n` +
+        (suggestions ? `Closest unrelated results: ${suggestions}\n\n` : '') +
+        `I'll post "${displayQuery}" as plain text — Vinted will add it to their catalogue on the first listing with this brand.`,
+        { reply_markup: { inline_keyboard: [
+          [{ text: `✅ Post as "${displayQuery}"`, callback_data: `brand:0:${displayQuery.slice(0, 30)}` }],
+          [{ text: '🔍 Search again', callback_data: 'brand:search' }]
+        ]}}
+      );
+    }
+
+    // Have at least one reasonable match. Show the ranked list AND a
+    // prominent "use my typed text as plain text" escape hatch, so the user
+    // is never forced to pick a wrong brand.
+    const rows = ranked.slice(0, 6).map(r => {
+      const b = r.raw;
+      const title = b.title || b.name;
+      const tick = r.score >= 80 ? ' ✓' : '';
+      return [{ text: `${title}${tick}`, callback_data: `brand:${b.id}:${title.slice(0, 40)}` }];
+    });
+    rows.push([{ text: `✅ Post as "${displayQuery}" (plain text)`, callback_data: `brand:0:${displayQuery.slice(0, 30)}` }]);
     rows.push([{ text: '🚫 No brand', callback_data: 'brand:0:' }]);
 
-    bot.sendMessage(chatId, 'Select brand:', { reply_markup: { inline_keyboard: rows } });
+    bot.sendMessage(chatId, `Select a brand for "${displayQuery}":`, { reply_markup: { inline_keyboard: rows } });
   }
 
   // ──────────────────────────────────────────
