@@ -15,7 +15,12 @@
 
 const crypto = require('crypto');
 let sharp = null;
-try { sharp = require('sharp'); } catch { console.log('[TG] sharp not available — photo re-editing disabled'); }
+try {
+  sharp = require('sharp');
+  console.log('[TG] sharp loaded OK — photo re-editing enabled');
+} catch (e) {
+  console.error('[TG] CRITICAL: sharp not available — photo re-editing disabled:', e.message);
+}
 
 // Vinted usernames that get the "admin" duplicate-check prompt (case-insensitive)
 const ADMIN_VINTED_USERNAMES = ['zaruha'];
@@ -645,10 +650,9 @@ function ensureMulti(c) {
 module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app, db }) {
 
   // ── Read-only session "refresh": re-derive CSRF only, never mutate cookies ──
-  // Backend must NOT call /web/api/auth/refresh — that rotates Vinted's
-  // refresh_token server-side and invalidates the copy the user's browser
-  // still holds, logging them out of vinted.co.uk. The extension's
-  // /api/session/store is the only path that should write cookies.
+  // Used by /login, /status, and any non-post caller. Does NOT call
+  // /web/api/auth/refresh (that's performVintedRefresh below), so it can
+  // never invalidate the user's browser session.
   async function refreshVintedSession(session, userId) {
     const domain = session.domain || 'www.vinted.co.uk';
     try {
@@ -668,6 +672,81 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       console.log('[TG] CSRF re-derive failed (using existing):', e.message);
     }
     return session;
+  }
+
+  // ── Real Vinted token refresh — rotates access_token_web + refresh_token_web ──
+  // Only called from the Telegram post path, and only AFTER a cheap probe
+  // confirms the current cookies are actually 401. The browser desync this
+  // used to cause is healed by the Chrome extension's reconcileCookies(),
+  // which reads the rotated tokens from /api/session/get on its next wake
+  // and writes them back into local chrome.cookies.
+  async function performVintedRefresh(session, userId) {
+    const domain = session.domain || 'www.vinted.co.uk';
+    const resp = await fetch(`https://${domain}/web/api/auth/refresh`, {
+      method: 'POST',
+      headers: {
+        'Cookie': session.cookies,
+        'X-CSRF-Token': session.csrf || '',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json',
+      },
+    });
+    if (!resp.ok) throw new Error(`refresh failed: ${resp.status}`);
+
+    const setCookies = typeof resp.headers.getSetCookie === 'function'
+      ? resp.headers.getSetCookie()
+      : (resp.headers.raw?.()['set-cookie'] || []);
+    if (!setCookies.length) throw new Error('refresh returned no Set-Cookie');
+
+    const cookieMap = new Map();
+    session.cookies.split('; ').forEach(c => {
+      const [k, ...v] = c.split('=');
+      if (k) cookieMap.set(k.trim(), v.join('='));
+    });
+    for (const sc of setCookies) {
+      const first = sc.split(';')[0];
+      const eq = first.indexOf('=');
+      if (eq <= 0) continue;
+      const k = first.slice(0, eq).trim();
+      const v = first.slice(eq + 1).trim();
+      if (k) cookieMap.set(k, v);
+    }
+    for (const k of ['access_token_web', 'refresh_token_web']) {
+      if (!cookieMap.has(k)) throw new Error(`refresh missing ${k}`);
+    }
+    session.cookies = Array.from(cookieMap.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
+
+    await store.setSession(userId, {
+      csrf: session.csrf,
+      cookies: session.cookies,
+      domain: session.domain,
+      memberId: session.memberId,
+    });
+    console.log(`[TG] Rotated Vinted tokens for user ${userId} — extension will reconcile on next wake`);
+    return session;
+  }
+
+  // Probe-then-refresh helper: returns a session that's known-good, or
+  // throws SESSION_EXPIRED if the refresh attempt also fails. Never called
+  // speculatively — only from the post path.
+  async function ensureFreshSession(session, userId) {
+    try {
+      const probe = await vintedFetch(session, '/api/v2/users/' + (session.memberId || 'self'));
+      if (probe.ok) return session;
+      if (probe.status !== 401) return session; // non-auth error, let caller handle
+    } catch (e) {
+      // network error — let the caller deal with it, no refresh
+      return session;
+    }
+    console.log(`[TG] Probe returned 401 for user ${userId}, running performVintedRefresh`);
+    try {
+      return await performVintedRefresh(session, userId);
+    } catch (e) {
+      console.error(`[TG] performVintedRefresh failed for user ${userId}:`, e.message);
+      const err = new Error('SESSION_EXPIRED');
+      err.cause = e;
+      throw err;
+    }
   }
 
   // ── Persist chat accounts to DB so logins survive restarts ──
@@ -933,6 +1012,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     { command: 'login',  description: 'Connect your RelistPro account' },
     { command: 'switch', description: 'Switch between linked Vinted accounts' },
     { command: 'status', description: 'Check connection & Vinted session' },
+    { command: 'ready',  description: 'Continue after fixing a failed step' },
     { command: 'cancel', description: 'Abort current listing' },
     { command: 'retry',  description: 'Resume a failed listing (last 5)' },
     { command: 'logout', description: 'Disconnect current account' },
@@ -1016,6 +1096,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     text += `/login — connect a RelistPro account\n` +
       `/switch — switch between linked accounts\n` +
       `/status — check connection \\& Vinted session\n` +
+      `/ready — continue after fixing a failed step\n` +
       `/cancel — abort current listing\n` +
       `/logout — disconnect current account\n` +
       `/logout all — disconnect all accounts\n\n` +
@@ -1035,6 +1116,24 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     if (args.length >= 2) {
       // Inline login: /login username password
       return doLogin(chatId, args[0], args[1]);
+    }
+
+    // Already connected? Confirm the persistent state instead of making the
+    // user re-enter credentials. Sessions persist in the DB indefinitely, so
+    // once the extension has synced there's nothing to re-sync on each login.
+    if (args.length === 0 && c.accounts?.length) {
+      const lines = c.accounts.map((a, i) => {
+        const mark = i === c.activeIdx ? '➤' : ' ';
+        const vn = a.vintedName ? ` → 🛍️ ${a.vintedName}` : '';
+        return `${mark} ${a.username}${vn}`;
+      }).join('\n');
+      return bot.sendMessage(chatId,
+        `✅ You're already connected — no need to sync or log in again.\n\n${lines}\n\n` +
+        `📸 Send photos to list an item.\n` +
+        `🔄 /switch to change active account\n` +
+        `➕ To add another account: /login <username> <password>\n` +
+        `👋 /logout to disconnect`
+      );
     }
 
     // Conversational login — ask for username first
@@ -1217,6 +1316,30 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     bot.sendMessage(msg.chat.id, 'Listing cancelled. Send new photos whenever you\'re ready.');
   });
 
+  // ── /ready — "I'm done fixing this step, continue" ──
+  // Used by the publish-error walkthrough (user types /ready after fixing a
+  // broken field), and also as a manual advance after re-sending photos.
+  bot.onText(/\/ready(?:@\S+)?/, async (msg) => {
+    const chatId = msg.chat.id;
+    await ensureLoaded(chatId);
+    const c = getChat(chatId);
+    ensureMulti(c);
+    if (!c.listing) {
+      return bot.sendMessage(chatId, 'Nothing to continue. Send photos to start a new listing.');
+    }
+    const L = c.listing;
+    // If the photos error is still outstanding but the user has already
+    // resent photos, mark it fixed so showSummary can advance.
+    if (L._errorWalkthrough && Array.isArray(L._errorFields) &&
+        L._errorFields.includes('photos') && c.photos?.length) {
+      clearErrorField(c, 'photos');
+    }
+    c.step = 'review';
+    c.summaryMsgId = null;
+    saveChatState(chatId);
+    return showSummary(chatId);
+  });
+
   bot.onText(/^\/retry(?:@\S+)?$/i, async (msg) => {
     const chatId = msg.chat.id;
     await ensureLoaded(chatId);
@@ -1349,8 +1472,13 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       // Photos for an existing listing — go back to review, no AI re-analysis
       c.photoTimer = setTimeout(async () => {
         c.step = 'review';
+        // Walkthrough recovery: if the Vinted post was rejected for photos,
+        // the new batch clears that error field so showSummary can advance.
+        if (c.listing?._errorWalkthrough && c.listing?._errorFields?.includes('photos')) {
+          clearErrorField(c, 'photos');
+        }
         saveChatState(chatId);
-        await bot.sendMessage(chatId, `📸 Got ${c.photos.length} photo(s) for your listing. Ready to post!`);
+        await bot.sendMessage(chatId, `📸 Got ${c.photos.length} photo(s) for your listing. Type /ready to continue.`);
         showSummary(chatId);
       }, 2000);
     } else if (c.step === 'collecting_proof_photos') {
@@ -1859,6 +1987,83 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
   // SUMMARY DISPLAY
   // ──────────────────────────────────────────
 
+  // Route the user into the edit step for a specific field. Used both by the
+  // review-panel edit buttons and the publish-error walkthrough (which jumps
+  // the user directly into each broken field in turn).
+  async function enterEditStep(chatId, field) {
+    const c = getChat(chatId);
+    const L = c.listing;
+    if (!L) return;
+    const f = String(field || '').toLowerCase();
+    switch (f) {
+      case 'title':
+        c.step = 'editing_title';
+        saveChatState(chatId);
+        return bot.sendMessage(chatId, `✏️ Title needs a fix.\n\nCurrent: *${esc(L.title || '—')}*\n\nType the new title:`, { parse_mode: 'MarkdownV2' });
+      case 'description':
+      case 'desc':
+        c.step = 'editing_desc';
+        saveChatState(chatId);
+        return bot.sendMessage(chatId, `✏️ Description needs a fix.\n\nType the new description:`);
+      case 'price':
+        c.step = 'editing_price';
+        saveChatState(chatId);
+        return bot.sendMessage(chatId, `💰 Price needs a fix.\n\nCurrent: £${L.price || '—'}\n\nType the new price (number only):`);
+      case 'brand':
+        c.step = 'editing_brand';
+        saveChatState(chatId);
+        return bot.sendMessage(chatId, `🏷️ Brand needs a fix.\n\nCurrent: ${L.brand || 'None'}\n\nType the brand name to search (or "none" to clear):`);
+      case 'condition': {
+        const keyboard = CONDITIONS.map(x => ([{ text: `${x.emoji} ${x.label}`, callback_data: `cond:${x.id}` }]));
+        return bot.sendMessage(chatId, '📦 Condition needs a fix. Pick one:', { reply_markup: { inline_keyboard: keyboard } });
+      }
+      case 'color':
+      case 'colour': {
+        const rows = [];
+        for (let i = 0; i < COLORS.length; i += 3) {
+          rows.push(COLORS.slice(i, i + 3).map(x => ({ text: x.label, callback_data: `color:${x.id}` })));
+        }
+        return bot.sendMessage(chatId, '🎨 Colour needs a fix. Pick one:', { reply_markup: { inline_keyboard: rows } });
+      }
+      case 'category':
+      case 'catalog':
+        c.step = 'searching_cat';
+        saveChatState(chatId);
+        return bot.sendMessage(chatId, '📂 Category needs a fix.\n\nType a category name to search (e.g. "hoodie", "jeans", "stroller"):');
+      case 'size':
+        if (!L.catalog_id) {
+          return bot.sendMessage(chatId, '📏 Size needs a fix, but pick a category first.');
+        }
+        return showSizePicker(chatId);
+      case 'parcel':
+      case 'package':
+      case 'package_size':
+        return showPackageSizePicker(chatId);
+      case 'isbn':
+        c.step = 'editing_isbn';
+        saveChatState(chatId);
+        return bot.sendMessage(chatId,
+          `📖 ISBN needs a fix.\n\n` +
+          `Vinted requires an ISBN for books. Find it on the back cover or copyright page ` +
+          `— it's a 10 or 13 digit number (sometimes with dashes).\n\n` +
+          `Current: ${L.isbn || 'Not set'}\n\n` +
+          `Type the ISBN (or "none" if this isn't a book and you need to change category):`
+        );
+      case 'photos':
+        c.photos = [];
+        c.step = 'collecting_photos_for_review';
+        saveChatState(chatId);
+        return bot.sendMessage(chatId,
+          `📸 Photos were rejected. Send your new photos now (as a media group), ` +
+          `then type /ready when you're done.`
+        );
+      default:
+        // Unknown field — fall back to the review panel so user can pick manually.
+        c._errorWalkthroughFallback = true;
+        return showSummary(chatId);
+    }
+  }
+
   async function showSummary(chatId) {
     const c = getChat(chatId);
     const L = c.listing;
@@ -1868,6 +2073,23 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       saveChatState(chatId);
       return bot.sendMessage(chatId, 'No listing in progress. Send photos to start a new one.');
     }
+
+    // Publish-error walkthrough: if there are still error fields to fix, jump
+    // the user into the next one instead of showing the review panel. Once all
+    // are cleared, drop the walkthrough flag and render the summary below so
+    // the user can confirm with POST TO VINTED.
+    if (L._errorWalkthrough && !c._errorWalkthroughFallback) {
+      const remaining = Array.isArray(L._errorFields) ? L._errorFields : [];
+      if (remaining.length) {
+        return enterEditStep(chatId, remaining[0]);
+      }
+      delete L._errorWalkthrough;
+      bot.sendMessage(chatId,
+        '✅ All errors fixed. Review your listing below and tap *POST TO VINTED* to publish.',
+        { parse_mode: 'Markdown' }
+      ).catch(() => {});
+    }
+    delete c._errorWalkthroughFallback;
 
     // Persist full state (listing + photos) so it survives redeploys
     saveChatState(chatId);
@@ -2173,11 +2395,23 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
         c.step = 'auth_gate';
         saveChatState(chatId);
         const checklist = getProofChecklist(c.listing.category_name);
-        const listText = checklist.map(s => `• ${s}`).join('\n');
+        const listText = checklist.map(s => `• ${esc(s)}`).join('\n');
+        const brandEsc = esc(effectiveName);
         return bot.sendMessage(chatId,
-          `⚠️ *${esc(effectiveName)}* triggers Vinted's automated authenticity check\\. ` +
-          `Posting without the right proof shots can get the account banned for counterfeits\\.\n\n` +
-          `You have three options:`,
+          `⚠️ *Authenticity check — ${brandEsc}*\n\n` +
+          `Vinted automatically reviews every listing tagged with a verified brand like *${brandEsc}*\\. ` +
+          `Their system looks for counterfeits using image matching, label/tag text OCR, and seller history\\. ` +
+          `If the listing fails that check, the item is delisted and the account gets a strike — repeat strikes lead to a permanent counterfeit ban with no appeal and lost inventory\\.\n\n` +
+          `You have three ways forward, each with a different tradeoff:\n\n` +
+          `📸 *I have proof — add photos*\n` +
+          `Best option if the item is genuine\\. You'll send close\\-ups of the label, care tag, stitching, serial sticker etc\\. ` +
+          `These get attached to the listing and satisfy Vinted's check\\. Listing stays tagged as *${brandEsc}* and gets the full brand\\-search traffic\\.\n\n` +
+          `🏷️ *Post as Unbranded*\n` +
+          `Safe fallback if you don't have proof shots handy\\. The listing posts without the brand tag, so Vinted skips the counterfeit check entirely\\. ` +
+          `Downside: you lose the brand tag and the brand\\-search SEO — the item sells slower and usually for less\\. The word *${brandEsc}* will also be stripped from the title and description\\.\n\n` +
+          `❌ *Cancel this listing*\n` +
+          `Drops the draft completely\\. Pick this if you want to gather proof shots first and come back later\\.\n\n` +
+          `Vinted usually wants these proof shots for this category:\n${listText}`,
           {
             parse_mode: 'MarkdownV2',
             reply_markup: { inline_keyboard: [
@@ -2186,10 +2420,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
               [{ text: '❌ Cancel this listing', callback_data: 'auth:cancel' }],
             ]}
           }
-        ).then(() => bot.sendMessage(chatId,
-          `Vinted typically wants these shots for this category:\n${listText}\n\n` +
-          `Tap "I have proof" to add them now.`
-        ));
+        );
       }
 
       if (c.step.startsWith('wiz_')) return wizardNext(chatId);
@@ -2576,6 +2807,25 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       if (isNaN(price) || price <= 0) return bot.sendMessage(chatId, 'Enter a valid price (e.g. 25 or 14.50):');
       c.listing.price = Math.round(price * 100) / 100;
       clearErrorField(c, 'price');
+      c.step = 'review';
+      return showSummary(chatId);
+    }
+
+    if (c.step === 'editing_isbn') {
+      const raw = msg.text.trim();
+      if (/^(none|skip|no)$/i.test(raw)) {
+        c.listing.isbn = null;
+        clearErrorField(c, 'isbn');
+        c.step = 'review';
+        await bot.sendMessage(chatId, 'OK, ISBN cleared. If the category is Books you may still need to fix that.');
+        return showSummary(chatId);
+      }
+      const digits = raw.replace(/[^0-9Xx]/g, '');
+      if (digits.length !== 10 && digits.length !== 13) {
+        return bot.sendMessage(chatId, 'ISBN must be 10 or 13 digits (dashes OK). Try again, or type "none" to clear:');
+      }
+      c.listing.isbn = digits;
+      clearErrorField(c, 'isbn');
       c.step = 'review';
       return showSummary(chatId);
     }
@@ -3150,32 +3400,67 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       return bot.sendMessage(chatId, '⚠️ No Vinted session found.\n\nTo fix:\n1. Open vinted.co.uk in Chrome\n2. Click RelistPro extension → Sync\n3. Come back here and tap POST again');
     }
 
-    // Refresh session before posting to ensure cookies are fresh
+    // Refresh CSRF (read-only), then probe cookies and rotate tokens if 401.
     try {
       session = await refreshVintedSession(session, acct.userId);
-      console.log('[TG] Session refreshed before posting');
+      console.log('[TG] CSRF re-derived before posting');
     } catch (e) {
-      console.log('[TG] Pre-post session refresh failed:', e.message);
+      console.log('[TG] Pre-post CSRF re-derive failed:', e.message);
+    }
+    try {
+      session = await ensureFreshSession(session, acct.userId);
+    } catch (e) {
+      if (e.message === 'SESSION_EXPIRED') {
+        c.step = 'review';
+        saveChatState(chatId);
+        const acctName = activeAccount(c)?.vintedName || activeAccount(c)?.username || 'your account';
+        return bot.sendMessage(chatId,
+          `⚠️ Vinted session expired for ${acctName} and auto-refresh failed.\n\n` +
+          `To fix this:\n` +
+          `1. Open vinted.co.uk in Chrome and log in again\n` +
+          `2. Click RelistPro extension → Sync\n` +
+          `3. Come back here and tap POST again`
+        );
+      }
+      console.log('[TG] ensureFreshSession non-auth error:', e.message);
     }
 
     console.log(`[TG] Posting for ${acct.username}, domain=${session.domain}, csrf=${session.csrf?.slice(0,12)}..., cookies=${session.cookies?.length} chars`);
 
     try {
-      // ── Step 0: Optional photo re-editing (admin duplicate avoidance) ──
-      if (c._dupEdit && sharp) {
+      // ── Step 0: Mandatory photo re-editing when user tapped "edit duplicates" ──
+      // Fail LOUD — never silently upload originals when the user asked for edits.
+      if (c._dupEdit) {
+        if (!sharp) {
+          c.step = 'review';
+          saveChatState(chatId);
+          return bot.sendMessage(chatId,
+            '❌ Photo re-editing is unavailable on this server (sharp module missing). ' +
+            'Cannot safely post duplicates. Tell the operator to check Railway logs for "sharp".'
+          );
+        }
         await bot.editMessageText(`🎨 Re-editing ${c.photos.length} photo(s) to avoid duplicate detection...`, {
           chat_id: chatId, message_id: statusMsg.message_id
         }).catch(() => {});
+        const editedPhotos = [];
         for (let i = 0; i < c.photos.length; i++) {
           try {
             const edited = await processPhotoForReupload(c.photos[i].base64);
-            c.photos[i].base64 = edited;
-            console.log(`[TG] Photo ${i + 1}/${c.photos.length} re-edited`);
+            editedPhotos.push({ ...c.photos[i], base64: edited });
+            console.log(`[TG] Photo ${i + 1}/${c.photos.length} re-edited OK`);
           } catch (e) {
             console.error(`[TG] Photo ${i + 1} re-edit failed:`, e.message);
+            c.step = 'review';
+            saveChatState(chatId);
+            return bot.sendMessage(chatId,
+              `❌ Photo ${i + 1} re-edit failed: ${e.message}\n\n` +
+              `I stopped the post instead of silently uploading the original — that would have flagged as duplicate. ` +
+              `Try re-sending the photos, or post with "No — as-is" if you're sure this item isn't duplicated.`
+            );
           }
         }
-        c._dupEdit = false; // don't re-edit on retry
+        c.photos = editedPhotos;
+        c._dupEdit = false;
         await bot.editMessageText(`Uploading ${c.photos.length} photo(s) to Vinted...`, {
           chat_id: chatId, message_id: statusMsg.message_id
         }).catch(() => {});
@@ -3252,7 +3537,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
         color_ids: L.color1_id ? [L.color1_id] : [],
         assigned_photos: photoIds,
         is_unisex: null,
-        isbn: null,
+        isbn: L.isbn || null,
         video_game_rating_id: null,
         shipment_prices: { domestic: null, international: null },
         measurement_length: null,
@@ -3319,6 +3604,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
           completionDraft.brand_id = L.brand_id || refreshed.brand_id || null;
           completionDraft.brand = L.brand ? normalizeText(L.brand, 'title') : (refreshed.brand || null);
           completionDraft.size_id = L.size_id || refreshed.size_id || null;
+          if (L.isbn) completionDraft.isbn = L.isbn;
         }
       }
       completionDraft.id = draftId; // String, matching DOTB
@@ -3341,7 +3627,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
           const f = String(field).toLowerCase();
           if (/color|colour/.test(f)) errorFields.add('color');
           else if (/catalog|category/.test(f)) errorFields.add('category');
-          else if (/size/.test(f)) errorFields.add('size');
+          else if (/\bsize\b/.test(f)) errorFields.add('size');
           else if (/brand/.test(f)) errorFields.add('brand');
           else if (/price/.test(f)) errorFields.add('price');
           else if (/title/.test(f)) errorFields.add('title');
@@ -3349,6 +3635,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
           else if (/package|parcel|shipping/.test(f)) errorFields.add('parcel');
           else if (/status|condition/.test(f)) errorFields.add('condition');
           else if (/photo/.test(f)) errorFields.add('photos');
+          else if (/isbn/.test(f)) errorFields.add('isbn');
         };
 
         if (Array.isArray(errors)) {
@@ -3365,13 +3652,17 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
         // PRESERVE state — let user fix and retry from bot
         c.listing._failedDraftId = draftId;
         c.listing._errorFields = Array.from(errorFields);
+        // Walkthrough mode: showSummary will route the user into each broken
+        // field's edit step one at a time, then return to the review panel
+        // with POST TO VINTED once everything is cleared.
+        c.listing._errorWalkthrough = errorFields.size > 0;
         c.step = 'review';
         c.summaryMsgId = null;
         saveChatState(chatId);
         await saveFailedListing(chatId, errorLines.join('; '));
 
         await bot.editMessageText(
-          `❌ Publishing failed. Fix the issues below and tap POST again, or /retry to resume later:\n\n${errorLines.join('\n') || 'Unknown error'}`,
+          `❌ Publishing failed. Let's fix these:\n\n${errorLines.join('\n') || 'Unknown error'}\n\nI'll walk you through each one.`,
           { chat_id: chatId, message_id: statusMsg.message_id }
         ).catch(() => {});
 
@@ -3416,19 +3707,20 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
 
       // Vinted session expired — try auto-refresh, then guide user
       if (e.message === 'SESSION_EXPIRED') {
-        // Try refreshing the session automatically
+        // Try rotating tokens via the real refresh endpoint (once).
         let refreshed = false;
         try {
           if (session) {
-            await refreshVintedSession(session, acct.userId);
-            // Quick test if refresh worked
+            session = await performVintedRefresh(session, acct.userId);
             const testResp = await vintedFetch(session, '/api/v2/users/' + (session.memberId || 'self'));
             if (testResp.ok) {
               refreshed = true;
               console.log('[TG] Auto-refresh after SESSION_EXPIRED succeeded');
             }
           }
-        } catch {}
+        } catch (re) {
+          console.error('[TG] performVintedRefresh after SESSION_EXPIRED failed:', re.message);
+        }
 
         if (refreshed && !c._retried) {
           // Retry posting with refreshed session (once only)
@@ -3715,7 +4007,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
   // Applies geometric (rotate/skew/crop) + colour edits to break Vinted's
   // perceptual hash, then re-encodes as JPEG. Input & output are base64 strings.
   async function processPhotoForReupload(base64) {
-    if (!sharp) return base64;
+    if (!sharp) throw new Error('sharp module not loaded on this server');
     const rand = (a, b) => Math.random() * (b - a) + a;
     const ri = (a, b) => Math.floor(rand(a, b + 1));
     try {
@@ -3772,7 +4064,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       return out.toString('base64');
     } catch (e) {
       console.error('[TG] processPhotoForReupload error:', e.message);
-      return base64; // fall back to original
+      throw new Error(`photo re-edit failed: ${e.message}`);
     }
   }
 

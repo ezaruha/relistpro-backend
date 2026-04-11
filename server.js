@@ -363,6 +363,23 @@ app.get('/api/session/status', auth, async (req, res) => {
   res.json({ active:true, memberId:s.memberId, domain:s.domain, storedAt:s.storedAt });
 });
 
+// Returns the currently stored session so the extension can reconcile its
+// local chrome.cookies against backend-side rotations (from the Telegram
+// post path). Auth-gated by the user token — the response contains the full
+// Vinted session, so don't remove the auth middleware.
+app.get('/api/session/get', auth, async (req, res) => {
+  const s = await store.getSession(req.user.id);
+  if (!s) return res.status(404).json({ active:false });
+  res.json({
+    active: true,
+    csrf: s.csrf,
+    cookies: s.cookies,
+    domain: s.domain,
+    memberId: s.memberId,
+    storedAt: s.storedAt,
+  });
+});
+
 // ═══ SYNC (extension posts all data here after each scrape) ═══
 app.post('/api/sync', auth, async (req, res) => {
   if (!db.hasDb()) return res.json({ ok:true, stored:false, reason:'no-db' });
