@@ -14,6 +14,11 @@
 //   e.g. TELEGRAM_WEBHOOK_URL=https://relistpro-backend-production.up.railway.app/api/telegram/webhook
 
 const crypto = require('crypto');
+let sharp = null;
+try { sharp = require('sharp'); } catch { console.log('[TG] sharp not available — photo re-editing disabled'); }
+
+// Vinted usernames that get the "admin" duplicate-check prompt (case-insensitive)
+const ADMIN_VINTED_USERNAMES = ['zaruha'];
 
 // ── Vinted condition statuses (UK) ──
 const CONDITIONS = [
@@ -1340,6 +1345,9 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         if (pkgMatch) { pkgId = pkgMatch.id; pkgName = pkgMatch.title; }
       }
 
+      // Reset dup-prompt flags — each new listing must answer again
+      delete c._dupChecked;
+      delete c._dupEdit;
       c.listing = {
         title: analysis.title || 'Untitled item',
         description: analysis.description || '',
@@ -1954,6 +1962,36 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
 
     // ── POST ──
     if (data === 'post') {
+      // Admin-only duplicate check: ask if this listing exists on another account.
+      // If yes, photos are rewritten via sharp to defeat Vinted's perceptual hash.
+      if (isAdminAccount(c) && !c._dupChecked) {
+        c.step = 'confirm_dup';
+        saveChatState(chatId);
+        return bot.sendMessage(chatId,
+          '🔍 Is this listing already posted on another account?\n\n' +
+          'If yes, I will re-edit all photos (rotate/crop/colour tweaks) before posting, so Vinted won\'t flag them as duplicates.',
+          { reply_markup: { inline_keyboard: [
+            [{ text: '✅ Yes — edit photos first', callback_data: 'dup:yes' }],
+            [{ text: '❌ No — post as-is', callback_data: 'dup:no' }]
+          ]}}
+        );
+      }
+      return createListing(chatId);
+    }
+
+    // ── Duplicate prompt response (admin-only) ──
+    if (data === 'dup:yes') {
+      c._dupChecked = true;
+      c._dupEdit = true;
+      c.step = 'review';
+      saveChatState(chatId);
+      return createListing(chatId);
+    }
+    if (data === 'dup:no') {
+      c._dupChecked = true;
+      c._dupEdit = false;
+      c.step = 'review';
+      saveChatState(chatId);
       return createListing(chatId);
     }
     } catch (e) {
@@ -2673,6 +2711,26 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
     console.log(`[TG] Posting for ${acct.username}, domain=${session.domain}, csrf=${session.csrf?.slice(0,12)}..., cookies=${session.cookies?.length} chars`);
 
     try {
+      // ── Step 0: Optional photo re-editing (admin duplicate avoidance) ──
+      if (c._dupEdit && sharp) {
+        await bot.editMessageText(`🎨 Re-editing ${c.photos.length} photo(s) to avoid duplicate detection...`, {
+          chat_id: chatId, message_id: statusMsg.message_id
+        }).catch(() => {});
+        for (let i = 0; i < c.photos.length; i++) {
+          try {
+            const edited = await processPhotoForReupload(c.photos[i].base64);
+            c.photos[i].base64 = edited;
+            console.log(`[TG] Photo ${i + 1}/${c.photos.length} re-edited`);
+          } catch (e) {
+            console.error(`[TG] Photo ${i + 1} re-edit failed:`, e.message);
+          }
+        }
+        c._dupEdit = false; // don't re-edit on retry
+        await bot.editMessageText(`Uploading ${c.photos.length} photo(s) to Vinted...`, {
+          chat_id: chatId, message_id: statusMsg.message_id
+        }).catch(() => {});
+      }
+
       // ── Step 1: Upload photos ──
       const photoIds = [];
       const domain = session.domain || 'www.vinted.co.uk';
@@ -2895,6 +2953,8 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       c.catalogCache = null;
       delete c._lastDraftId;
       delete c._retried;
+      delete c._dupChecked;
+      delete c._dupEdit;
       saveChatState(chatId);
 
     } catch (e) {
@@ -3187,6 +3247,79 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
   function esc(text) {
     if (!text) return '';
     return String(text).replace(/([_*\[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
+  }
+
+  // True if the active Vinted account is on the admin allow-list.
+  function isAdminAccount(c) {
+    const acct = activeAccount(c);
+    if (!acct) return false;
+    const names = [acct.vintedName, acct.username].filter(Boolean).map(s => String(s).toLowerCase());
+    return names.some(n => ADMIN_VINTED_USERNAMES.includes(n));
+  }
+
+  // Port of chrome-extension/src/photo-engine.js to sharp.
+  // Applies geometric (rotate/skew/crop) + colour edits to break Vinted's
+  // perceptual hash, then re-encodes as JPEG. Input & output are base64 strings.
+  async function processPhotoForReupload(base64) {
+    if (!sharp) return base64;
+    const rand = (a, b) => Math.random() * (b - a) + a;
+    const ri = (a, b) => Math.floor(rand(a, b + 1));
+    try {
+      const buf = Buffer.from(base64, 'base64');
+      let img = sharp(buf, { failOn: 'none' });
+      const meta = await img.metadata();
+      let w = meta.width || 1000;
+      let h = meta.height || 1000;
+
+      // 1. Rotation (0.8–2.8 degrees, random direction)
+      const deg = rand(0.8, 2.8) * (Math.random() > 0.5 ? 1 : -1);
+      img = img.rotate(deg, { background: { r: 0, g: 0, b: 0, alpha: 0 } });
+
+      // Let sharp compute new dims after rotation
+      let rotated = await img.png().toBuffer({ resolveWithObject: true });
+      w = rotated.info.width;
+      h = rotated.info.height;
+      img = sharp(rotated.data);
+
+      // 2. Skew (affine) — small both axes
+      const skx = rand(-0.025, 0.025);
+      const sky = rand(-0.025, 0.025);
+      img = img.affine([[1, skx], [sky, 1]], { background: { r: 0, g: 0, b: 0, alpha: 0 } });
+
+      let affined = await img.png().toBuffer({ resolveWithObject: true });
+      w = affined.info.width;
+      h = affined.info.height;
+      img = sharp(affined.data);
+
+      // 3. Crop (2–9% off each side)
+      const cropT = Math.floor(h * rand(0.04, 0.09));
+      const cropB = Math.floor(h * rand(0.04, 0.09));
+      const cropL = Math.floor(w * rand(0.04, 0.09));
+      const cropR = Math.floor(w * rand(0.04, 0.09));
+      const newW = Math.max(1, w - cropL - cropR);
+      const newH = Math.max(1, h - cropT - cropB);
+      img = img.extract({ left: cropL, top: cropT, width: newW, height: newH });
+
+      // 4. Colour edits — pick 4–6 random from the pool (matches PhotoEngine chain count)
+      const brightness = 1 + rand(-0.10, 0.10);  // ±10%
+      const saturation = rand(0.90, 1.10);       // ±10%
+      const hue = ri(-8, 8);                     // small hue drift (proxy for temp)
+      img = img.modulate({ brightness, saturation, hue });
+
+      // Gamma 0.92–1.08 — sharp gamma accepts 1.0–3.0, so map to allowed range
+      const gamma = rand(1.00, 1.20);
+      img = img.gamma(gamma);
+
+      // Light sharpen
+      img = img.sharpen({ sigma: 0.5 + rand(0, 0.5) });
+
+      // 5. Re-encode JPEG at 0.92 quality (matches PhotoEngine)
+      const out = await img.jpeg({ quality: 92, mozjpeg: true }).toBuffer();
+      return out.toString('base64');
+    } catch (e) {
+      console.error('[TG] processPhotoForReupload error:', e.message);
+      return base64; // fall back to original
+    }
   }
 
   console.log('[TG] All handlers registered');
