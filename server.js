@@ -43,12 +43,12 @@ function saveData() {
 // repostsPerMonth: hard cap on reposts per calendar month (null = unlimited).
 // Free is generous enough to try everything; Pro removes all caps.
 const PLANS = {
-  free:    { name:'Free',    price:0,    itemLimit:10,   scheduleLimit:0,    repostsPerMonth:5,    backupLimit:10,   autoReply:false, telegramPosting:false, analyticsMonths:1,  photoEditing:'basic',
-             features:['Up to 10 active items','5 reposts / month','No schedules','10 backups','Basic photo editing'] },
-  starter: { name:'Starter', price:4.99, itemLimit:50,   scheduleLimit:2,    repostsPerMonth:30,   backupLimit:50,   autoReply:false, telegramPosting:false, analyticsMonths:3,  photoEditing:'full',
-             features:['Up to 50 active items','30 reposts / month','2 schedules','50 backups','Full photo editing','3 months analytics'] },
-  pro:     { name:'Pro',     price:9.99, itemLimit:null, scheduleLimit:null, repostsPerMonth:null, backupLimit:null, autoReply:true,  telegramPosting:true,  analyticsMonths:24, photoEditing:'full',
-             features:['Unlimited items','Unlimited reposts','Unlimited schedules','Unlimited backups','Auto-reply to messages','Telegram bot posting','Full analytics history','Priority support'] }
+  free:    { name:'Free',    price:0,    itemLimit:10,   scheduleLimit:0,    repostsPerMonth:5,    backupLimit:10,   vintedAccountCap:1,        autoReply:false, telegramPosting:false, analyticsMonths:1,  photoEditing:'basic',
+             features:['Up to 10 active items','5 reposts / month','No schedules','10 backups','Basic photo editing','1 Vinted account'] },
+  starter: { name:'Starter', price:4.99, itemLimit:50,   scheduleLimit:2,    repostsPerMonth:30,   backupLimit:50,   vintedAccountCap:3,        autoReply:false, telegramPosting:false, analyticsMonths:3,  photoEditing:'full',
+             features:['Up to 50 active items','30 reposts / month','2 schedules','50 backups','Full photo editing','3 months analytics','3 Vinted accounts'] },
+  pro:     { name:'Pro',     price:9.99, itemLimit:null, scheduleLimit:null, repostsPerMonth:null, backupLimit:null, vintedAccountCap:Infinity, autoReply:true,  telegramPosting:true,  analyticsMonths:24, photoEditing:'full',
+             features:['Unlimited items','Unlimited reposts','Unlimited schedules','Unlimited backups','Auto-reply to messages','Telegram bot posting','Full analytics history','Unlimited Vinted accounts','Priority support'] }
 };
 
 // Compute usage stats for a user across the current month
@@ -150,18 +150,71 @@ const store = {
       if (users[id]) { users[id].plan = plan; saveData(); }
     }
   },
-  async getSession(userId) {
+  async getSession(userId, memberId = null) {
     if (db.hasDb()) {
-      const r = await db.query('SELECT * FROM rp_sessions WHERE user_id=$1', [userId]);
+      if (memberId) {
+        const r = await db.query('SELECT * FROM rp_sessions WHERE user_id=$1 AND member_id=$2', [userId, memberId]);
+        return r.rows[0] ? { csrf:r.rows[0].csrf, cookies:r.rows[0].cookies, domain:r.rows[0].domain, memberId:r.rows[0].member_id, storedAt:r.rows[0].stored_at } : null;
+      }
+      // No memberId — return the user's active Vinted row, falling back to
+      // the most recently stored row if no active pointer is set.
+      const r = await db.query(`
+        SELECT s.*
+          FROM rp_sessions s
+          JOIN rp_users u ON u.id = s.user_id
+         WHERE s.user_id = $1
+         ORDER BY (u.active_member_id IS NOT NULL AND u.active_member_id = s.member_id) DESC,
+                  s.stored_at DESC
+         LIMIT 1`, [userId]);
       return r.rows[0] ? { csrf:r.rows[0].csrf, cookies:r.rows[0].cookies, domain:r.rows[0].domain, memberId:r.rows[0].member_id, storedAt:r.rows[0].stored_at } : null;
     }
     return sessions[userId] || null;
   },
+  async listUserSessions(userId) {
+    if (!db.hasDb()) return sessions[userId] ? [sessions[userId]] : [];
+    const r = await db.query(`
+      SELECT s.*, (u.active_member_id = s.member_id) AS is_active
+        FROM rp_sessions s
+        JOIN rp_users u ON u.id = s.user_id
+       WHERE s.user_id = $1
+       ORDER BY s.stored_at DESC`, [userId]);
+    return r.rows.map(row => ({
+      csrf: row.csrf, cookies: row.cookies, domain: row.domain,
+      memberId: row.member_id, storedAt: row.stored_at, active: !!row.is_active,
+    }));
+  },
   async setSession(userId, { csrf, cookies, domain, memberId }) {
+    if (!memberId) throw new Error('memberId required for setSession');
     if (db.hasDb()) {
+      // Cap enforcement: count existing Vinted sessions on this RP user.
+      // If we're updating an already-linked memberId, no cap check.
+      const [userRow, existing] = await Promise.all([
+        db.query('SELECT plan FROM rp_users WHERE id=$1', [userId]),
+        db.query('SELECT member_id FROM rp_sessions WHERE user_id=$1', [userId]),
+      ]);
+      const plan = userRow.rows[0]?.plan || 'free';
+      const cap = PLANS[plan]?.vintedAccountCap ?? 1;
+      const alreadyLinked = existing.rows.some(r => r.member_id === memberId);
+      if (!alreadyLinked && existing.rows.length >= cap) {
+        const err = new Error('VINTED_ACCOUNT_CAP');
+        err.code = 'VINTED_ACCOUNT_CAP';
+        err.cap = cap; err.plan = plan;
+        throw err;
+      }
       await db.query(
-        'INSERT INTO rp_sessions (user_id,csrf,cookies,domain,member_id,stored_at) VALUES ($1,$2,$3,$4,$5,NOW()) ON CONFLICT (user_id) DO UPDATE SET csrf=$2,cookies=$3,domain=$4,member_id=$5,stored_at=NOW()',
-        [userId, csrf, cookies, domain||'www.vinted.co.uk', memberId||null]
+        `INSERT INTO rp_sessions (user_id, member_id, csrf, cookies, domain, stored_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())
+         ON CONFLICT (user_id, member_id) DO UPDATE
+            SET csrf = EXCLUDED.csrf,
+                cookies = EXCLUDED.cookies,
+                domain = EXCLUDED.domain,
+                stored_at = NOW()`,
+        [userId, memberId, csrf, cookies, domain || 'www.vinted.co.uk']
+      );
+      // First linked Vinted auto-becomes active; later writes don't disturb the active pointer.
+      await db.query(
+        'UPDATE rp_users SET active_member_id = COALESCE(active_member_id, $2) WHERE id = $1',
+        [userId, memberId]
       );
     } else {
       sessions[userId] = { csrf, cookies, domain:domain||'www.vinted.co.uk', memberId, storedAt:new Date().toISOString() }; saveData();
@@ -397,14 +450,28 @@ app.post('/api/auth/reset-password', async (req, res) => {
 // ═══ SESSION ═══
 app.post('/api/session/store', auth, async (req, res) => {
   const { csrf, cookies, domain, memberId } = req.body;
+  if (!memberId) return res.status(400).json({ error:'memberId required' });
   try {
     await store.setSession(req.user.id, { csrf, cookies, domain, memberId });
+    touchExtensionPoll(req.user.id);
     console.log(`[RP] Session stored for ${req.user.username} (member ${memberId})`);
     res.json({ ok:true });
-  } catch(e) { res.status(500).json({ error:e.message }); }
+  } catch(e) {
+    if (e.code === 'VINTED_ACCOUNT_CAP') {
+      const capLabel = e.cap === Infinity ? 'unlimited' : e.cap;
+      return res.status(409).json({
+        error: 'VINTED_ACCOUNT_CAP',
+        cap: e.cap === Infinity ? null : e.cap,
+        plan: e.plan,
+        message: `Your ${e.plan} plan allows ${capLabel} Vinted account${e.cap === 1 ? '' : 's'}. Remove one from the Telegram bot (🛍 Manage) or upgrade to add more.`,
+      });
+    }
+    res.status(500).json({ error:e.message });
+  }
 });
 
 app.get('/api/session/status', auth, async (req, res) => {
+  touchExtensionPoll(req.user.id);
   const s = await store.getSession(req.user.id);
   if (!s) return res.json({ active:false });
   res.json({ active:true, memberId:s.memberId, domain:s.domain, storedAt:s.storedAt });
@@ -415,7 +482,9 @@ app.get('/api/session/status', auth, async (req, res) => {
 // post path). Auth-gated by the user token — the response contains the full
 // Vinted session, so don't remove the auth middleware.
 app.get('/api/session/get', auth, async (req, res) => {
-  const s = await store.getSession(req.user.id);
+  touchExtensionPoll(req.user.id);
+  const memberId = req.query.memberId || null;
+  const s = await store.getSession(req.user.id, memberId);
   if (!s) return res.status(404).json({ active:false });
   res.json({
     active: true,
@@ -427,8 +496,98 @@ app.get('/api/session/get', auth, async (req, res) => {
   });
 });
 
+// ═══ MULTI-VINTED-ACCOUNT MANAGEMENT ═══
+// Per-process cache of { memberId → { name, fetchedAt } }. Re-fetched hourly;
+// failures return null and the UI falls back to "ID <memberId>".
+const _vintedNameCache = new Map();
+async function resolveVintedName(userId, memberId) {
+  const now = Date.now();
+  const hit = _vintedNameCache.get(memberId);
+  if (hit && (now - hit.fetchedAt) < 60 * 60 * 1000) return hit.name;
+  try {
+    const session = await store.getSession(userId, memberId);
+    if (!session) return null;
+    const resp = await vintedFetch(session, `/api/v2/users/${memberId}`);
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const name = data?.user?.login || data?.user?.real_name || null;
+    if (name) _vintedNameCache.set(memberId, { name, fetchedAt: now });
+    return name;
+  } catch { return null; }
+}
+
+app.get('/api/vinted-accounts', auth, async (req, res) => {
+  touchExtensionPoll(req.user.id);
+  if (!db.hasDb()) {
+    const s = sessions[req.user.id];
+    return res.json({ ok:true, accounts: s ? [{ memberId:s.memberId, domain:s.domain, active:true, storedAt:s.storedAt, vintedName:null, cookiesFresh:true }] : [] });
+  }
+  try {
+    const r = await db.query(`
+      SELECT s.member_id, s.domain, s.stored_at,
+             (u.active_member_id = s.member_id) AS is_active
+        FROM rp_sessions s
+        JOIN rp_users u ON u.id = s.user_id
+       WHERE s.user_id = $1
+       ORDER BY s.stored_at DESC`, [req.user.id]);
+    const accounts = await Promise.all(r.rows.map(async row => ({
+      memberId: row.member_id,
+      domain: row.domain,
+      active: !!row.is_active,
+      storedAt: row.stored_at,
+      vintedName: await resolveVintedName(req.user.id, row.member_id).catch(() => null),
+      cookiesFresh: row.stored_at ? (Date.now() - new Date(row.stored_at).getTime() < 30 * 60 * 1000) : false,
+    })));
+    const plan = req.user.plan || 'free';
+    const cap = PLANS[plan]?.vintedAccountCap ?? 1;
+    res.json({ ok:true, accounts, cap: cap === Infinity ? null : cap, plan });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
+app.post('/api/vinted-accounts/:memberId/activate', auth, async (req, res) => {
+  if (!db.hasDb()) return res.status(501).json({ error:'DB required' });
+  try {
+    const exists = await db.query(
+      'SELECT 1 FROM rp_sessions WHERE user_id=$1 AND member_id=$2',
+      [req.user.id, req.params.memberId]
+    );
+    if (!exists.rows.length) return res.status(404).json({ error:'NOT_LINKED' });
+    await db.query(
+      'UPDATE rp_users SET active_member_id=$1 WHERE id=$2',
+      [req.params.memberId, req.user.id]
+    );
+    res.json({ ok:true, activeMemberId: req.params.memberId });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
+app.delete('/api/vinted-accounts/:memberId', auth, async (req, res) => {
+  if (!db.hasDb()) return res.status(501).json({ error:'DB required' });
+  try {
+    await db.query(
+      'DELETE FROM rp_sessions WHERE user_id=$1 AND member_id=$2',
+      [req.user.id, req.params.memberId]
+    );
+    // If we just killed the active row, promote the most recently stored
+    // remaining row — or clear the pointer if none remain.
+    await db.query(`
+      UPDATE rp_users u
+         SET active_member_id = (
+           SELECT member_id FROM rp_sessions
+            WHERE user_id = u.id
+            ORDER BY stored_at DESC
+            LIMIT 1
+         )
+       WHERE u.id = $1 AND (u.active_member_id = $2 OR u.active_member_id IS NULL)`,
+      [req.user.id, req.params.memberId]
+    );
+    _vintedNameCache.delete(req.params.memberId);
+    res.json({ ok:true });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
 // ═══ SYNC (extension posts all data here after each scrape) ═══
 app.post('/api/sync', auth, async (req, res) => {
+  touchExtensionPoll(req.user.id);
   if (!db.hasDb()) return res.json({ ok:true, stored:false, reason:'no-db' });
   const { items, sold, snapshots, messages, schedules, settings } = req.body || {};
   const userId = req.user.id;
@@ -922,11 +1081,37 @@ async function saveItemBackup(userId, item, planName) {
 }
 
 // ═══ VINTED PROXY ═══
+// Full browser header set — the stripped 5-header version was one of the
+// bot-signature tells Vinted was flagging. Matches what a real Chrome on
+// Windows sends from /items/new.
+function browserHeaders(domain, referPath = '/') {
+  return {
+    'Referer': `https://${domain}${referPath}`,
+    'Origin': `https://${domain}`,
+    'Accept-Language': 'en-GB,en;q=0.9',
+    'sec-ch-ua': '"Google Chrome";v="120", "Chromium";v="120", "Not=A?Brand";v="24"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"',
+    'sec-fetch-dest': 'empty',
+    'sec-fetch-mode': 'cors',
+    'sec-fetch-site': 'same-origin',
+    'X-Requested-With': 'XMLHttpRequest',
+  };
+}
+
 async function vintedFetch(session, urlPath, options = {}) {
   const domain = session.domain || 'www.vinted.co.uk';
   const resp = await fetch(`https://${domain}${urlPath}`, {
     method: options.method || 'GET',
-    headers: { 'Cookie':session.cookies, 'X-CSRF-Token':session.csrf, 'Content-Type':'application/json', 'Accept':'application/json', 'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
+    headers: {
+      'Cookie': session.cookies,
+      'X-CSRF-Token': session.csrf,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json, text/plain, */*',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      ...browserHeaders(domain, options.referPath || '/'),
+      ...(options.headers || {})
+    },
     body: options.body ? JSON.stringify(options.body) : undefined
   });
   return resp;
@@ -1026,7 +1211,12 @@ async function reuploadPhotos(session, photos) {
       form.append('photo[file]', new Blob([imgBuffer], { type:'image/jpeg' }), 'photo.jpg');
       const uploadResp = await fetch(`https://${domain}/api/v2/photos`, {
         method:'POST',
-        headers:{ 'Cookie':session.cookies, 'X-CSRF-Token':session.csrf, 'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+        headers:{
+          'Cookie': session.cookies,
+          'X-CSRF-Token': session.csrf,
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          ...browserHeaders(domain, '/items/new')
+        },
         body:form
       });
       if (uploadResp.ok) {
@@ -1418,7 +1608,12 @@ app.post('/api/vinted/photos/upload', auth, async (req, res) => {
     form.append('photo[file]', new Blob([buffer], { type: mimeType }), 'photo.jpg');
     const resp = await fetch(`https://${domain}/api/v2/photos`, {
       method: 'POST',
-      headers: { 'Cookie':session.cookies, 'X-CSRF-Token':session.csrf, 'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
+      headers: {
+        'Cookie': session.cookies,
+        'X-CSRF-Token': session.csrf,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        ...browserHeaders(domain, '/items/new')
+      },
       body: form
     });
     if (!resp.ok) { const t = await resp.text(); return res.status(resp.status).json({ error:'Vinted photo upload failed', detail:t.slice(0,200) }); }
@@ -1794,6 +1989,265 @@ app.post('/api/referral/apply', async (req, res) => {
     }
     res.json({ ok:true });
   } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
+// ═══ EXTENSION ↔ TELEGRAM COMMAND CHANNEL ═══
+// Touched by every extension-authenticated endpoint below so the Telegram bot
+// can use "extension has polled recently" as a liveness signal for auto-login.
+async function touchExtensionPoll(userId) {
+  if (!db.hasDb()) return;
+  try { await db.query('UPDATE rp_users SET last_extension_poll_at=NOW() WHERE id=$1', [userId]); }
+  catch (e) { /* ignore */ }
+}
+
+// Returns an ETA (ms) for a post_new command based on the mid-point of each
+// human-paced stage in the extension's state machine.
+function estimateCommandEta(type, photoCount) {
+  if (type !== 'post_new') return 60000;
+  const n = Math.max(1, photoCount || 1);
+  // Stage mids: warming 7.5s + photos (upload ~1s + 3.5s gap ~ 4.5s each, minus last gap)
+  // + review 14s + title-linger 30s + desc-linger 40s + details-linger 60s
+  // + final 82s + pre-publish 10s + publish 2s
+  const warming = 7500;
+  const photos  = n * 1500 + (n - 1) * 3500;
+  const review  = 14000;
+  const title   = 30000;
+  const desc    = 40000;
+  const details = 60000;
+  const final   = 82000;
+  const prePub  = 10000;
+  const publish = 2000;
+  return warming + photos + review + title + desc + details + final + prePub + publish;
+}
+
+// POST /api/commands — Telegram bot enqueues a post_new command.
+// Body is JSON with base64 photos (simpler than multipart; stays under 50mb cap
+// that's already in express.json limit).
+app.post('/api/commands', auth, async (req, res) => {
+  if (!db.hasDb()) return res.status(503).json({ error:'DB required for command channel' });
+  const { type, target_member_id, idempotency_key, source, payload, photos } = req.body || {};
+  if (type !== 'post_new' && type !== 'repost') return res.status(400).json({ error:'Invalid type' });
+  if (!Array.isArray(photos)) return res.status(400).json({ error:'photos array required' });
+  if (!payload || typeof payload !== 'object') return res.status(400).json({ error:'payload required' });
+
+  const photoCount = photos.length;
+  const enrichedPayload = { ...payload, photo_count: photoCount };
+  const eta_ms = estimateCommandEta(type, photoCount);
+
+  try {
+    // Idempotency — if the bot retries with the same key, return the existing command.
+    if (idempotency_key) {
+      const existing = await db.query(
+        'SELECT id, eta_ms FROM rp_commands WHERE user_id=$1 AND idempotency_key=$2',
+        [req.user.id, idempotency_key]
+      );
+      if (existing.rows[0]) {
+        return res.json({ ok:true, id: existing.rows[0].id, eta_ms: existing.rows[0].eta_ms });
+      }
+    }
+
+    const ins = await db.query(
+      `INSERT INTO rp_commands
+        (user_id, target_member_id, type, payload, eta_ms, source, idempotency_key)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id`,
+      [req.user.id, target_member_id || null, type, enrichedPayload, eta_ms,
+       source || 'telegram', idempotency_key || null]
+    );
+    const cmdId = ins.rows[0].id;
+
+    for (let i = 0; i < photos.length; i++) {
+      const ph = photos[i];
+      const b64 = ph && typeof ph === 'object' ? ph.base64 || ph.data : ph;
+      const mime = (ph && typeof ph === 'object' ? ph.mime : null) || 'image/jpeg';
+      if (!b64) continue;
+      const buf = Buffer.from(b64, 'base64');
+      await db.query(
+        'INSERT INTO rp_command_photos (command_id, idx, mime, data) VALUES ($1,$2,$3,$4)',
+        [cmdId, i, mime, buf]
+      );
+    }
+    res.json({ ok:true, id: cmdId, eta_ms });
+  } catch (e) {
+    console.error('[CMD] enqueue error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/commands/pending — extension polling. Returns the oldest queued row.
+app.get('/api/commands/pending', auth, async (req, res) => {
+  if (!db.hasDb()) return res.status(204).end();
+  await touchExtensionPoll(req.user.id);
+  try {
+    const r = await db.query(
+      `SELECT id, type, target_member_id, payload, eta_ms, created_at
+         FROM rp_commands
+        WHERE user_id=$1 AND status='queued'
+        ORDER BY created_at ASC
+        LIMIT 1`,
+      [req.user.id]
+    );
+    if (!r.rows[0]) return res.status(204).end();
+    res.json(r.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/commands/:id/claim — atomic transition queued → claimed.
+app.post('/api/commands/:id/claim', auth, async (req, res) => {
+  if (!db.hasDb()) return res.status(503).json({ error:'DB required' });
+  await touchExtensionPoll(req.user.id);
+  try {
+    const r = await db.query(
+      `UPDATE rp_commands
+          SET status='claimed', claimed_at=NOW(), updated_at=NOW()
+        WHERE id=$1 AND user_id=$2 AND status='queued'
+        RETURNING id, type, target_member_id, payload, eta_ms`,
+      [req.params.id, req.user.id]
+    );
+    if (!r.rows[0]) return res.status(409).json({ error:'Already claimed or not found' });
+    res.json(r.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/commands/:id/progress — extension reports stage events.
+app.post('/api/commands/:id/progress', auth, async (req, res) => {
+  if (!db.hasDb()) return res.status(503).json({ error:'DB required' });
+  const { stage, stage_label, progress_pct, eta_ms } = req.body || {};
+  try {
+    // Check for terminal state first so we can 409 the extension and it aborts.
+    const cur = await db.query(
+      'SELECT status FROM rp_commands WHERE id=$1 AND user_id=$2',
+      [req.params.id, req.user.id]
+    );
+    if (!cur.rows[0]) return res.status(404).json({ error:'Not found' });
+    if (['cancelled','failed','completed'].includes(cur.rows[0].status)) {
+      return res.status(409).json({ error: cur.rows[0].status });
+    }
+    await db.query(
+      `UPDATE rp_commands
+          SET status='in_progress',
+              stage=COALESCE($3, stage),
+              stage_label=COALESCE($4, stage_label),
+              progress_pct=COALESCE($5, progress_pct),
+              eta_ms=COALESCE($6, eta_ms),
+              updated_at=NOW()
+        WHERE id=$1 AND user_id=$2`,
+      [req.params.id, req.user.id, stage || null, stage_label || null,
+       (progress_pct==null ? null : progress_pct), (eta_ms==null ? null : eta_ms)]
+    );
+    res.json({ ok:true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/commands/:id/complete — terminal write from extension.
+app.post('/api/commands/:id/complete', auth, async (req, res) => {
+  if (!db.hasDb()) return res.status(503).json({ error:'DB required' });
+  const { status, result } = req.body || {};
+  if (!['completed','failed','cancelled'].includes(status)) {
+    return res.status(400).json({ error:'Invalid status' });
+  }
+  try {
+    await db.query(
+      `UPDATE rp_commands
+          SET status=$3,
+              result=$4,
+              completed_at=NOW(),
+              updated_at=NOW(),
+              progress_pct=CASE WHEN $3='completed' THEN 100 ELSE progress_pct END
+        WHERE id=$1 AND user_id=$2`,
+      [req.params.id, req.user.id, status, result || {}]
+    );
+    // Drop staged photos — the row itself is kept for the ticker + audit.
+    try { await db.query('DELETE FROM rp_command_photos WHERE command_id=$1', [req.params.id]); } catch(_) {}
+    res.json({ ok:true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/commands/:id/cancel — user tapped the cancel button.
+app.post('/api/commands/:id/cancel', auth, async (req, res) => {
+  if (!db.hasDb()) return res.status(503).json({ error:'DB required' });
+  try {
+    await db.query(
+      `UPDATE rp_commands
+          SET status='cancelled', updated_at=NOW()
+        WHERE id=$1 AND user_id=$2 AND status NOT IN ('completed','failed','cancelled')`,
+      [req.params.id, req.user.id]
+    );
+    res.json({ ok:true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/commands/:id — bot ticker reads this every ~3.5s.
+app.get('/api/commands/:id', auth, async (req, res) => {
+  if (!db.hasDb()) return res.status(503).json({ error:'DB required' });
+  try {
+    const r = await db.query(
+      `SELECT id, type, status, stage, stage_label, progress_pct, eta_ms,
+              result, created_at, claimed_at, updated_at, completed_at,
+              target_member_id
+         FROM rp_commands
+        WHERE id=$1 AND user_id=$2`,
+      [req.params.id, req.user.id]
+    );
+    if (!r.rows[0]) return res.status(404).json({ error:'Not found' });
+    res.json(r.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/commands/:id/photos/:idx — extension streams one staged photo.
+app.get('/api/commands/:id/photos/:idx', auth, async (req, res) => {
+  if (!db.hasDb()) return res.status(503).json({ error:'DB required' });
+  await touchExtensionPoll(req.user.id);
+  try {
+    const r = await db.query(
+      `SELECT p.mime, p.data
+         FROM rp_command_photos p
+         JOIN rp_commands c ON c.id = p.command_id
+        WHERE p.command_id=$1 AND p.idx=$2 AND c.user_id=$3`,
+      [req.params.id, parseInt(req.params.idx,10), req.user.id]
+    );
+    if (!r.rows[0]) return res.status(404).end();
+    res.setHeader('Content-Type', r.rows[0].mime || 'image/jpeg');
+    res.send(r.rows[0].data);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/telegram/extension-status — internal, used by the Telegram bot to
+// check whether the extension has polled recently (→ auto-login instead of /login).
+// Uses the same auth middleware; the token belongs to the user whose Telegram
+// chat is asking.
+app.get('/api/telegram/extension-status', auth, async (req, res) => {
+  if (!db.hasDb()) return res.json({ extensionAlive:false, linkedVintedAccounts: [] });
+  try {
+    const u = await db.query(
+      'SELECT last_extension_poll_at FROM rp_users WHERE id=$1',
+      [req.user.id]
+    );
+    const last = u.rows[0]?.last_extension_poll_at;
+    const lastMs = last ? Date.parse(last) : 0;
+    const lastPollMsAgo = lastMs ? Date.now() - lastMs : null;
+    const extensionAlive = lastMs ? (Date.now() - lastMs < 5 * 60 * 1000) : false;
+
+    const s = await db.query(
+      `SELECT member_id, domain, stored_at
+         FROM rp_sessions WHERE user_id=$1`,
+      [req.user.id]
+    );
+    const linkedVintedAccounts = s.rows.map(row => ({
+      memberId: row.member_id,
+      domain: row.domain,
+      cookiesFresh: row.stored_at
+        ? (Date.now() - Date.parse(row.stored_at) < 30 * 60 * 1000)
+        : false
+    }));
+    res.json({
+      ok:true,
+      userId: req.user.id,
+      extensionAlive,
+      lastPollMsAgo,
+      linkedVintedAccounts
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ═══ TELEGRAM BOT ═══

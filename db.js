@@ -135,6 +135,28 @@ async function initSchema() {
         ALTER TABLE rp_users ADD COLUMN IF NOT EXISTS referral_code TEXT;
         ALTER TABLE rp_users ADD COLUMN IF NOT EXISTS referred_by UUID;
         ALTER TABLE rp_users ADD COLUMN IF NOT EXISTS referral_rewards INTEGER DEFAULT 0;
+        -- Multi-Vinted-account support: which Vinted account is the current target for this RP user
+        ALTER TABLE rp_users ADD COLUMN IF NOT EXISTS active_member_id TEXT;
+      EXCEPTION WHEN OTHERS THEN NULL;
+      END $$;
+
+      -- Multi-Vinted-account: rp_sessions PK flips from (user_id) to (user_id, member_id).
+      -- Idempotent: if the PK is already composite, the DROP+ADD is a no-op-equivalent; the
+      -- DELETE clears any pre-migration rows with NULL member_id that can't be addressed.
+      DO $$
+      DECLARE
+        pk_cols TEXT;
+      BEGIN
+        SELECT string_agg(a.attname, ',' ORDER BY array_position(i.indkey, a.attnum))
+          INTO pk_cols
+          FROM pg_index i
+          JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+         WHERE i.indrelid = 'rp_sessions'::regclass AND i.indisprimary;
+        IF pk_cols IS DISTINCT FROM 'user_id,member_id' THEN
+          DELETE FROM rp_sessions WHERE member_id IS NULL;
+          EXECUTE 'ALTER TABLE rp_sessions DROP CONSTRAINT IF EXISTS rp_sessions_pkey';
+          EXECUTE 'ALTER TABLE rp_sessions ADD PRIMARY KEY (user_id, member_id)';
+        END IF;
       EXCEPTION WHEN OTHERS THEN NULL;
       END $$;
       -- Unique index on referral_code (nulls excluded so only one constraint per non-null code)
@@ -192,7 +214,51 @@ async function initSchema() {
         locked_at TIMESTAMPTZ DEFAULT NOW(),
         PRIMARY KEY (item_id, user_id)
       );
+
+      -- Extension <-> Telegram command channel
+      CREATE TABLE IF NOT EXISTS rp_commands (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES rp_users(id) ON DELETE CASCADE,
+        target_member_id TEXT,
+        type TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued',
+        stage TEXT,
+        stage_label TEXT,
+        progress_pct INTEGER DEFAULT 0,
+        eta_ms INTEGER,
+        payload JSONB NOT NULL DEFAULT '{}',
+        result JSONB DEFAULT '{}',
+        source TEXT DEFAULT 'telegram',
+        idempotency_key TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        claimed_at TIMESTAMPTZ,
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        completed_at TIMESTAMPTZ
+      );
+      CREATE INDEX IF NOT EXISTS idx_rp_commands_user_status
+        ON rp_commands(user_id, status, created_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_rp_commands_idempo
+        ON rp_commands(user_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+
+      CREATE TABLE IF NOT EXISTS rp_command_photos (
+        command_id UUID NOT NULL REFERENCES rp_commands(id) ON DELETE CASCADE,
+        idx INTEGER NOT NULL,
+        mime TEXT,
+        data BYTEA NOT NULL,
+        PRIMARY KEY (command_id, idx)
+      );
+
+      DO $$ BEGIN
+        ALTER TABLE rp_users ADD COLUMN IF NOT EXISTS last_extension_poll_at TIMESTAMPTZ;
+      EXCEPTION WHEN OTHERS THEN NULL;
+      END $$;
     `);
+
+    // Prune stale commands (>48h). Fire-and-forget; cascades to staged photos.
+    try {
+      await query(`DELETE FROM rp_commands WHERE created_at < NOW() - interval '48 hours'`);
+    } catch (e) { /* ignore */ }
     console.log('[DB] Schema ready');
   } catch (e) {
     console.error('[DB] Schema init error:', e.message);

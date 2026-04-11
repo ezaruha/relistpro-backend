@@ -14,6 +14,24 @@
 //   e.g. TELEGRAM_WEBHOOK_URL=https://relistpro-backend-production.up.railway.app/api/telegram/webhook
 
 const crypto = require('crypto');
+
+// Full browser header set — matches real Chrome on Windows at /items/new.
+// Used for every direct fetch() to Vinted from the fallback post path.
+function browserHeaders(domain, referPath = '/') {
+  return {
+    'Referer': `https://${domain}${referPath}`,
+    'Origin': `https://${domain}`,
+    'Accept-Language': 'en-GB,en;q=0.9',
+    'sec-ch-ua': '"Google Chrome";v="120", "Chromium";v="120", "Not=A?Brand";v="24"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"',
+    'sec-fetch-dest': 'empty',
+    'sec-fetch-mode': 'cors',
+    'sec-fetch-site': 'same-origin',
+    'X-Requested-With': 'XMLHttpRequest',
+  };
+}
+
 let sharp = null;
 try {
   sharp = require('sharp');
@@ -689,6 +707,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         'X-CSRF-Token': session.csrf || '',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'application/json',
+        ...browserHeaders(domain, '/'),
       },
     });
     if (!resp.ok) throw new Error(`refresh failed: ${resp.status}`);
@@ -755,6 +774,15 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     if (!db || !db.hasDb()) return;
     const c = chats.get(chatId);
     if (!c) return;
+    // Race guard: never overwrite persisted accounts with []. Any
+    // saveChatState firing while c.accounts is empty is almost
+    // certainly a handler running before ensureLoaded finished
+    // restoring. Legitimate "clear accounts" paths (/logout all,
+    // last-account logout) call saveChatAccounts directly instead.
+    if (!c.accounts?.length) {
+      console.log(`[TG] saveChatState skip: chat=${chatId} accounts=0 (race guard)`);
+      return;
+    }
     await tableReady; // ensure table exists before writing
     try {
       const accts = JSON.stringify(c.accounts || []);
@@ -843,32 +871,40 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
   async function loadChatState(chatId) {
     if (!db || !db.hasDb()) return null;
     await tableReady;
-    try {
-      const r = await db.query(
-        'SELECT accounts, active_idx, listing, photos, wizard_idx, step FROM rp_telegram_chats WHERE chat_id=$1',
-        [String(chatId)]
-      );
-      if (r.rows[0]) {
-        const row = r.rows[0];
-        // pg returns JSONB as parsed objects, but handle string fallback too
-        const parseJsonb = (val, fallback) => {
-          if (!val) return fallback;
-          if (typeof val === 'string') { try { return JSON.parse(val); } catch { return fallback; } }
-          return val;
-        };
-        const result = {
-          accounts: parseJsonb(row.accounts, []),
-          activeIdx: row.active_idx,
-          listing: parseJsonb(row.listing, null),
-          photos: parseJsonb(row.photos, null),
-          wizardIdx: row.wizard_idx ?? 0,
-          step: row.step || 'idle'
-        };
-        console.log(`[TG] Loaded state: chat=${chatId} accounts=${result.accounts.length} idx=${result.activeIdx} step=${result.step}`);
-        return result;
+    // Two attempts with 500ms between — survives Railway cold-start
+    // pool races where the first connect hits connectionTimeoutMillis.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const r = await db.query(
+          'SELECT accounts, active_idx, listing, photos, wizard_idx, step FROM rp_telegram_chats WHERE chat_id=$1',
+          [String(chatId)]
+        );
+        if (r.rows[0]) {
+          const row = r.rows[0];
+          // pg returns JSONB as parsed objects, but handle string fallback too
+          const parseJsonb = (val, fallback) => {
+            if (!val) return fallback;
+            if (typeof val === 'string') { try { return JSON.parse(val); } catch { return fallback; } }
+            return val;
+          };
+          const result = {
+            accounts: parseJsonb(row.accounts, []),
+            activeIdx: row.active_idx,
+            listing: parseJsonb(row.listing, null),
+            photos: parseJsonb(row.photos, null),
+            wizardIdx: row.wizard_idx ?? 0,
+            step: row.step || 'idle'
+          };
+          console.log(`[TG] Loaded state: chat=${chatId} accounts=${result.accounts.length} idx=${result.activeIdx} step=${result.step}`);
+          return result;
+        }
+        console.log(`[TG] No saved state for chat ${chatId}`);
+        return null;
+      } catch (e) {
+        console.error(`[TG] Load state error (attempt ${attempt + 1}):`, e.message);
+        if (attempt === 0) await new Promise(r => setTimeout(r, 500));
       }
-      console.log(`[TG] No saved state for chat ${chatId}`);
-    } catch (e) { console.error('[TG] Load state error:', e.message); }
+    }
     return null;
   }
 
@@ -913,6 +949,158 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
   }
   const tableReady = initTelegramTable();
 
+  // ── Extension-presence auto-login helpers ──
+  //
+  // Why this exists: the user's Chrome extension is already polling the
+  // backend every minute (reconcileCookies + pollCommands). Every one of
+  // those calls stamps rp_users.last_extension_poll_at. If that stamp is
+  // recent and the user's rp_sessions row was just written, we trust the
+  // cookies are alive and skip any forced /login / re-CSRF dance.
+  //
+  // Cached per-user for 60 s so a single wizard step doesn't hit the DB
+  // multiple times in a row.
+  const _extStatusCache = new Map(); // userId → { at, data }
+  async function getExtensionStatus(userId) {
+    if (!db || !db.hasDb() || !userId) return { alive: false, sessions: [] };
+    const cached = _extStatusCache.get(userId);
+    if (cached && Date.now() - cached.at < 60 * 1000) return cached.data;
+    try {
+      const u = await db.query(
+        'SELECT last_extension_poll_at FROM rp_users WHERE id=$1',
+        [userId]
+      );
+      const last = u.rows[0]?.last_extension_poll_at;
+      const lastMs = last ? Date.parse(last) : 0;
+      const alive = lastMs ? (Date.now() - lastMs < 5 * 60 * 1000) : false;
+      const s = await db.query(
+        'SELECT member_id, domain, stored_at FROM rp_sessions WHERE user_id=$1',
+        [userId]
+      );
+      const sessions = s.rows.map(r => ({
+        memberId: r.member_id,
+        domain: r.domain,
+        cookiesFresh: r.stored_at ? (Date.now() - Date.parse(r.stored_at) < 30 * 60 * 1000) : false
+      }));
+      const data = { alive, lastPollMsAgo: lastMs ? Date.now() - lastMs : null, sessions };
+      _extStatusCache.set(userId, { at: Date.now(), data });
+      return data;
+    } catch (e) {
+      console.log('[TG] getExtensionStatus error:', e.message);
+      return { alive: false, sessions: [] };
+    }
+  }
+
+  // For any account missing vintedName, if the extension is live and
+  // cookies are fresh, probe /users/:memberId once to pick up the display
+  // name. Writes back to rp_telegram_chats so the next /start shows the
+  // proper welcome line without needing /status.
+  async function hydrateVintedNamesFromExtension(c, chatId) {
+    if (!c?.accounts?.length) return;
+    let changed = false;
+    for (const acct of c.accounts) {
+      if (acct.vintedName) continue;
+      const status = await getExtensionStatus(acct.userId);
+      if (!status.alive) continue;
+      const freshSession = status.sessions.find(s => s.cookiesFresh);
+      if (!freshSession) continue;
+      // Prefer the session's memberId if acct doesn't have one yet
+      if (!acct.memberId && freshSession.memberId) acct.memberId = freshSession.memberId;
+      if (!acct.vintedDomain && freshSession.domain) acct.vintedDomain = freshSession.domain;
+      try {
+        const session = await store.getSession(acct.userId).catch(() => null);
+        if (!session) continue;
+        const probe = await vintedFetch(session, '/api/v2/users/' + (acct.memberId || session.memberId || 'self'));
+        if (!probe.ok) continue;
+        const profile = await probe.json().catch(() => ({}));
+        const vintedName = profile?.user?.login || profile?.user?.username || null;
+        if (vintedName && vintedName !== acct.vintedName) {
+          acct.vintedName = vintedName;
+          changed = true;
+          console.log(`[TG] Auto-hydrated vintedName=${vintedName} for chat ${chatId} via extension presence`);
+        }
+      } catch (_) { /* non-fatal — fall back to "_not detected_" */ }
+    }
+    if (changed) {
+      try { await saveChatAccounts(chatId, c.accounts, c.activeIdx ?? 0); } catch (_) {}
+    }
+  }
+
+  // ── Multi-Vinted-account helpers ──
+  // Per-chat 30s cache of the /api/vinted-accounts list so menu renders
+  // don't re-query on every tap. Keyed by chatId; value is
+  // { at: Date.now(), data: [...accounts] }.
+  const _vintedAcctCache = new Map();
+  async function fetchVintedAccounts(chatId) {
+    const c = getChat(chatId);
+    const acct = activeAccount(c);
+    if (!acct) return { accounts: [], plan: 'free', cap: 1 };
+    const cached = _vintedAcctCache.get(chatId);
+    if (cached && (Date.now() - cached.at) < 30_000) return cached.data;
+    if (!db || !db.hasDb()) {
+      // JSON fallback: return whatever the single session looks like.
+      const s = await store.getSession(acct.userId).catch(() => null);
+      const data = {
+        accounts: s ? [{ memberId: s.memberId, domain: s.domain, active: true, storedAt: s.storedAt, vintedName: acct.vintedName || null, cookiesFresh: true }] : [],
+        plan: 'free', cap: 1,
+      };
+      _vintedAcctCache.set(chatId, { at: Date.now(), data });
+      return data;
+    }
+    try {
+      const r = await db.query(`
+        SELECT s.member_id, s.domain, s.stored_at,
+               (u.active_member_id = s.member_id) AS is_active,
+               u.plan
+          FROM rp_sessions s
+          JOIN rp_users u ON u.id = s.user_id
+         WHERE s.user_id = $1
+         ORDER BY s.stored_at DESC`, [acct.userId]);
+      const plan = r.rows[0]?.plan || 'free';
+      const PLANS = { free: 1, starter: 3, pro: Infinity };
+      const cap = PLANS[plan] ?? 1;
+      const accounts = r.rows.map(row => ({
+        memberId: row.member_id,
+        domain: row.domain,
+        active: !!row.is_active,
+        storedAt: row.stored_at,
+        vintedName: null,
+        cookiesFresh: row.stored_at ? (Date.now() - new Date(row.stored_at).getTime() < 30 * 60 * 1000) : false,
+      }));
+      // Lazy-resolve display names via existing hydration cache — cheap
+      // /users/:memberId probe reusing the per-member session.
+      for (const a of accounts) {
+        if (!a.memberId) continue;
+        try {
+          const sess = await store.getSession(acct.userId, a.memberId);
+          if (!sess) continue;
+          const probe = await vintedFetch(sess, '/api/v2/users/' + a.memberId);
+          if (!probe.ok) continue;
+          const profile = await probe.json().catch(() => ({}));
+          a.vintedName = profile?.user?.login || profile?.user?.username || null;
+        } catch { /* best-effort */ }
+      }
+      const data = { accounts, plan, cap };
+      _vintedAcctCache.set(chatId, { at: Date.now(), data });
+      return data;
+    } catch (e) {
+      console.log('[TG] fetchVintedAccounts error:', e.message);
+      return { accounts: [], plan: 'free', cap: 1 };
+    }
+  }
+
+  function invalidateVintedAcctCache(chatId) {
+    _vintedAcctCache.delete(chatId);
+  }
+
+  // Returns the currently-active Vinted memberId for the given chat's RP
+  // user, or null if none are linked. Hits the cache; fresh reads happen
+  // via fetchVintedAccounts.
+  async function activeVintedMemberId(chatId) {
+    const { accounts } = await fetchVintedAccounts(chatId);
+    const active = accounts.find(a => a.active);
+    return active?.memberId || accounts[0]?.memberId || null;
+  }
+
   // Load full chat state from DB if not yet loaded this session.
   //
   // The accounts restore runs whenever c.accounts is empty — so a transient
@@ -937,9 +1125,60 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     }
 
     if (saved?.accounts?.length && !c.accounts.length) {
-      c.accounts = saved.accounts;
-      c.activeIdx = saved.activeIdx ?? 0;
-      console.log(`[TG] Restored ${c.accounts.length} account(s) for chat ${chatId}`);
+      // Multi-Vinted migration: a chat now tracks ONE RelistPro login.
+      // Collapse any legacy multi-RP state to just the previously-active user.
+      const savedIdx = saved.activeIdx ?? 0;
+      const keep = saved.accounts[savedIdx] || saved.accounts[0];
+      c.accounts = [keep];
+      c.activeIdx = 0;
+      if (saved.accounts.length > 1) {
+        console.log(`[TG] Collapsed ${saved.accounts.length} RP accounts → 1 for chat ${chatId} (kept ${keep.username})`);
+        // Persist the collapse so next load is clean.
+        saveChatState(chatId).catch(() => {});
+      } else {
+        console.log(`[TG] Restored account for chat ${chatId}`);
+      }
+    }
+
+    // Fallback recovery: if rp_telegram_chats was wiped, corrupted,
+    // or returned empty, rehydrate from rp_users.telegram_chat_id —
+    // the authoritative anchor written at doLogin (:1249). One row
+    // per linked RelistPro user, never touched by wizard saves.
+    if (needAccounts && !c.accounts.length && db && db.hasDb()) {
+      try {
+        const userRows = await db.query(
+          'SELECT id, username, token FROM rp_users WHERE telegram_chat_id=$1',
+          [String(chatId)]
+        );
+        if (userRows.rows.length) {
+          const recovered = [];
+          for (const row of userRows.rows) {
+            const sess = await store.getSession(row.id).catch(() => null);
+            recovered.push({
+              userId: row.id,
+              token: row.token,
+              username: row.username,
+              vintedName: null, // re-derived on first /status
+              vintedDomain: sess?.domain || null,
+              memberId: sess?.memberId || null,
+            });
+          }
+          if (recovered.length) {
+            c.accounts = recovered;
+            c.activeIdx = 0;
+            console.log(`[TG] Recovered ${recovered.length} account(s) for chat ${chatId} via rp_users fallback`);
+            saveChatState(chatId).catch(() => {});
+          }
+        }
+      } catch (e) {
+        console.error(`[TG] rp_users fallback failed for chat ${chatId}:`, e.message);
+      }
+    }
+
+    // Extension-presence hydration: if a browser is actively syncing we can
+    // fill in missing Vinted display names + memberIds without forcing /status.
+    if (c.accounts?.length) {
+      try { await hydrateVintedNamesFromExtension(c, chatId); } catch (_) {}
     }
 
     if (needListing) {
@@ -1099,26 +1338,32 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     const active = activeAccount(c);
     if (!active) return sendSetupGuide(chatId);
 
+    // Fetch linked Vinted accounts for the active RelistPro user.
+    const { accounts: vintedAccounts, plan, cap } = await fetchVintedAccounts(chatId);
+    const activeVinted = vintedAccounts.find(a => a.active) || vintedAccounts[0];
+
     const rpName = esc(active.username);
-    const vtName = esc(active.vintedName || '_not detected_');
-    const countLine = c.accounts.length > 1
-      ? `\n\n${c.accounts.length} accounts linked`
+    const vtName = activeVinted
+      ? esc(activeVinted.vintedName || ('ID ' + activeVinted.memberId))
+      : esc('_not linked_');
+    const linkedLine = vintedAccounts.length > 1
+      ? `\n${vintedAccounts.length} Vinted accounts linked`
       : '';
 
     const rows = [
-      [{ text: `📸 Continue as ${active.username}`, callback_data: 'menu:continue' }],
+      [{ text: `📸 Continue posting`, callback_data: 'menu:continue' }],
     ];
-    if (c.accounts.length > 1) {
-      rows.push([{ text: '🔄 Switch account', callback_data: 'menu:switch' }]);
+    if (vintedAccounts.length > 1) {
+      rows.push([{ text: '🔄 Switch Vinted account', callback_data: 'menu:switch' }]);
     }
-    rows.push([{ text: '➕ Add another account', callback_data: 'menu:add' }]);
-    rows.push([{ text: '👋 Log out this account', callback_data: 'menu:logout' }]);
+    rows.push([{ text: '🛍️ Manage Vinted accounts', callback_data: 'menu:vmanage' }]);
+    rows.push([{ text: '👋 Log out RelistPro', callback_data: 'menu:logout' }]);
     rows.push([{ text: '🧹 Clean up chat', callback_data: 'menu:clean' }]);
 
     return bot.sendMessage(chatId,
       `👋 *Welcome back*\n\n` +
       `👤 RelistPro: *${rpName}*\n` +
-      `🛍️ Vinted: *${vtName}*${countLine}\n\n` +
+      `🛍️ Vinted: *${vtName}*${linkedLine}\n\n` +
       `What do you want to do?`,
       { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: rows } }
     );
@@ -1153,12 +1398,11 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     }
 
     text += `/login — connect a RelistPro account\n` +
-      `/switch — switch between linked accounts\n` +
+      `/menu — switch Vinted account, manage, or clean up\n` +
       `/status — check connection \\& Vinted session\n` +
       `/ready — continue after fixing a failed step\n` +
       `/cancel — abort current listing\n` +
-      `/logout — disconnect current account\n` +
-      `/logout all — disconnect all accounts\n\n` +
+      `/logout — disconnect RelistPro from this chat\n\n` +
       `*To list an item:* just send photos\\!`;
 
     bot.sendMessage(msg.chat.id, text, { parse_mode: 'MarkdownV2' });
@@ -1317,43 +1561,40 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     await ensureLoaded(chatId);
     const c = getChat(chatId);
     ensureMulti(c);
-    if (c.accounts.length < 2) return bot.sendMessage(chatId, c.accounts.length ? 'Only one account linked. Use /login to add another.' : 'No accounts linked. Use /login first.');
-
-    const rows = [];
-    for (const [i, a] of c.accounts.entries()) {
-      const vt = a.vintedName || '(no Vinted name)';
-      const label = `${a.username} → ${vt}${i === c.activeIdx ? ' [current]' : ''}`;
-      rows.push([{ text: label.slice(0, 64), callback_data: `sw:${i}` }]);
+    if (!c.accounts.length) return bot.sendMessage(chatId, 'Not connected. Use /login first.');
+    const { accounts: vintedAccounts } = await fetchVintedAccounts(chatId);
+    if (vintedAccounts.length < 2) {
+      return bot.sendMessage(chatId,
+        "You've only linked one Vinted account.\n\n" +
+        "To add another: log into a different Vinted account in Chrome with the RelistPro extension running. " +
+        "It'll sync automatically."
+      );
     }
-    bot.sendMessage(chatId, 'Switch to which account?\n(RelistPro → Vinted)', { reply_markup: { inline_keyboard: rows } });
+    const rows = vintedAccounts.map(v => {
+      const name = v.vintedName || ('ID ' + v.memberId);
+      const staleTag = v.cookiesFresh ? '' : ' (stale)';
+      return [{
+        text: `${v.active ? '✅ ' : ''}${name}${staleTag}`.slice(0, 64),
+        callback_data: `vswitch:${v.memberId}`,
+      }];
+    });
+    rows.push([{ text: '⬅️ Back', callback_data: 'menu:back' }]);
+    bot.sendMessage(chatId, 'Pick which Vinted account to post on:', { reply_markup: { inline_keyboard: rows } });
   });
 
-  bot.onText(/\/logout(?:@\S+)?(.*)/, async (msg, match) => {
+  bot.onText(/\/logout(?:@\S+)?/, async (msg) => {
     const chatId = msg.chat.id;
     await ensureLoaded(chatId);
     const c = getChat(chatId);
     ensureMulti(c);
-    const arg = (match[1] || '').trim().toLowerCase();
-
-    if (arg === 'all') {
-      chats.delete(chatId);
-      saveChatAccounts(chatId, [], -1);
-      return bot.sendMessage(chatId, 'All accounts disconnected.');
-    }
-
     if (!c.accounts.length) return bot.sendMessage(chatId, 'Not connected.');
-
-    // Remove the active account
-    const removed = c.accounts.splice(c.activeIdx, 1)[0];
-    if (c.accounts.length) {
-      c.activeIdx = 0;
-      bot.sendMessage(chatId, `Removed ${removed.username}. Switched to ${c.accounts[0].username}.`);
-    } else {
-      c.activeIdx = -1;
-      c.step = 'idle';
-      bot.sendMessage(chatId, `Removed ${removed.username}. No accounts left.`);
-    }
-    saveChatAccounts(chatId, c.accounts, c.activeIdx);
+    const removed = c.accounts[0];
+    c.accounts = [];
+    c.activeIdx = -1;
+    c.step = 'idle';
+    await saveChatAccounts(chatId, c.accounts, c.activeIdx);
+    invalidateVintedAcctCache(chatId);
+    bot.sendMessage(chatId, `👋 Logged out of ${removed.username}. Use /login to connect a different RelistPro account.`);
   });
 
   bot.onText(/\/cancel(?:@\S+)?/, async (msg) => {
@@ -1879,6 +2120,17 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
   // strings) and resolves every ID silently before handing off to
   // showSummary. Fires the authenticity gate for high-risk brands so the
   // user still sees it before reaching the review screen.
+  // Vinted autocomplete endpoints occasionally hang from Railway's datacenter
+  // IP. Wrap each resolve step so a single slow call can't freeze the whole
+  // "Resolving category, size and brand…" stage. On timeout we log + skip and
+  // let the wizard ask the user for that field manually.
+  function withTimeout(promise, ms, label) {
+    return Promise.race([
+      promise,
+      new Promise((_, rej) => setTimeout(() => rej(new Error(`${label} timed out after ${ms}ms`)), ms)),
+    ]);
+  }
+
   async function autoResolveListing(chatId) {
     const c = getChat(chatId);
     const L = c.listing;
@@ -1886,37 +2138,68 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     const acct = activeAccount(c);
     const session = acct ? await store.getSession(acct.userId).catch(() => null) : null;
 
-    // Category first — size lookup needs catalog_id.
+    // If there's no backend-side Vinted session we can't query Vinted for
+    // sizes or brands — silently skipping that used to leave the user
+    // staring at "🤖 Resolving category, size and brand…" forever. Tell
+    // them up front and fall through to the wizard, which will ask each
+    // field manually.
+    if (!session) {
+      await bot.sendMessage(chatId,
+        '⚠️ No Vinted session stored yet — I can\'t auto-resolve size or brand.\n\n' +
+        'Open Vinted in Chrome with the RelistPro extension and sync, then post again for full auto-fill. ' +
+        'Continuing with manual entry…'
+      );
+    }
+
+    const warnings = [];
+
+    // Category first — size lookup needs catalog_id. Category resolver is
+    // offline (uses a local catalog), so no timeout needed here, but we
+    // still protect the live-catalog refresh call since that hits Vinted.
     if (!L.catalog_id) {
       try {
-        if (session) await ensureLiveCatalog(session);
-      } catch {}
-      const cat = await autoResolveCategory(L);
-      if (cat) {
-        L.catalog_id = cat.id;
-        L.category_name = cat.path || cat.title || `ID: ${cat.id}`;
-        console.log(`[TG] autoResolve category → ${L.category_name} (id=${cat.id})`);
-      } else {
-        console.log('[TG] autoResolve category → no match');
+        if (session) await withTimeout(ensureLiveCatalog(session), 12000, 'live catalog refresh');
+      } catch (e) {
+        console.log(`[TG] autoResolve ensureLiveCatalog skipped: ${e.message}`);
+      }
+      try {
+        const cat = await autoResolveCategory(L);
+        if (cat) {
+          L.catalog_id = cat.id;
+          L.category_name = cat.path || cat.title || `ID: ${cat.id}`;
+          console.log(`[TG] autoResolve category → ${L.category_name} (id=${cat.id})`);
+        } else {
+          console.log('[TG] autoResolve category → no match');
+          warnings.push('category');
+        }
+      } catch (e) {
+        console.log(`[TG] autoResolve category → error: ${e.message}`);
+        warnings.push('category');
       }
     }
 
     // Size: AI hint → Vinted size match → fall back to "One size" if catalog allows.
     if (!L.size_id && L.catalog_id && session) {
-      const s = await autoResolveSize(session, L);
-      if (s) {
-        L.size_id = s.id;
-        L.size_name = s.title;
-        console.log(`[TG] autoResolve size → ${s.title} (id=${s.id})`);
-      } else {
-        const one = await findOneSize(session, L.catalog_id);
-        if (one) {
-          L.size_id = one.id;
-          L.size_name = one.title;
-          console.log(`[TG] autoResolve size → fallback One size (id=${one.id})`);
+      try {
+        const s = await withTimeout(autoResolveSize(session, L), 15000, 'size lookup');
+        if (s) {
+          L.size_id = s.id;
+          L.size_name = s.title;
+          console.log(`[TG] autoResolve size → ${s.title} (id=${s.id})`);
         } else {
-          console.log('[TG] autoResolve size → no match, user must pick manually');
+          const one = await withTimeout(findOneSize(session, L.catalog_id), 10000, 'one-size lookup');
+          if (one) {
+            L.size_id = one.id;
+            L.size_name = one.title;
+            console.log(`[TG] autoResolve size → fallback One size (id=${one.id})`);
+          } else {
+            console.log('[TG] autoResolve size → no match, user must pick manually');
+            warnings.push('size');
+          }
         }
+      } catch (e) {
+        console.log(`[TG] autoResolve size → error: ${e.message}`);
+        warnings.push('size');
       }
     }
 
@@ -1929,20 +2212,34 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       L.brand = '';
       L.brand_id = null;
     } else if (!L.brand_id && L.brand && session) {
-      const b = await lookupVintedBrand(session, L.brand);
-      // Only accept the lookup if the match is strong (exact or prefix).
-      // Weak whole-token matches like "Spirit" → "Spirit Motors" are worse
-      // than plain text, which Vinted will render as the brand name.
-      if (b && b.score >= 60) {
-        L.brand_id = b.id;
-        L.brand = b.title;
-        console.log(`[TG] autoResolve brand → ${b.title} (id=${b.id}, score=${b.score})`);
-      } else {
-        if (b) console.log(`[TG] autoResolve brand → ignoring weak match "${b.title}" (score=${b.score}) for "${L.brand}"`);
+      try {
+        const b = await withTimeout(lookupVintedBrand(session, L.brand), 12000, 'brand lookup');
+        // Only accept the lookup if the match is strong (exact or prefix).
+        // Weak whole-token matches like "Spirit" → "Spirit Motors" are worse
+        // than plain text, which Vinted will render as the brand name.
+        if (b && b.score >= 60) {
+          L.brand_id = b.id;
+          L.brand = b.title;
+          console.log(`[TG] autoResolve brand → ${b.title} (id=${b.id}, score=${b.score})`);
+        } else {
+          if (b) console.log(`[TG] autoResolve brand → ignoring weak match "${b.title}" (score=${b.score}) for "${L.brand}"`);
+          L.brand = normalizeText(L.brand, 'title');
+          L.brand_id = null;
+          console.log(`[TG] autoResolve brand → "${L.brand}" (plain text, Vinted will create on post)`);
+        }
+      } catch (e) {
+        console.log(`[TG] autoResolve brand → error: ${e.message}`);
+        // Keep the AI-detected brand string as plain text so the user still
+        // sees something at review instead of an empty field.
         L.brand = normalizeText(L.brand, 'title');
         L.brand_id = null;
-        console.log(`[TG] autoResolve brand → "${L.brand}" (plain text, Vinted will create on post)`);
       }
+    }
+
+    if (warnings.length) {
+      await bot.sendMessage(chatId,
+        `⚠️ Couldn't auto-resolve: ${warnings.join(', ')}. I'll ask you for ${warnings.length > 1 ? 'those' : 'that'} in the next step.`
+      );
     }
 
     saveChatState(chatId);
@@ -2060,12 +2357,29 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       console.log(`[TG] AI analysis: brand=${analysis.brand}, size=${analysis.size_hint}, color=${analysis.color}/${analysis.color2}, material=${analysis.material}, parcel=${analysis.parcel_size}, gender=${analysis.gender}`);
 
       saveChatState(chatId);
-      await bot.sendMessage(chatId, '🤖 Resolving category, size and brand…');
-      await autoResolveListing(chatId);
     } catch (e) {
       console.error('[TG] AI analysis error:', e.message);
       c.step = 'idle';
       bot.sendMessage(chatId, 'AI analysis failed: ' + e.message + '\nTry sending the photos again.');
+      return;
+    }
+
+    // Resolve runs outside the AI try/catch so a Vinted autocomplete hang
+    // or error gets reported as itself, not as "AI analysis failed".
+    try {
+      await bot.sendMessage(chatId, '🤖 Resolving category, size and brand…');
+      await autoResolveListing(chatId);
+    } catch (e) {
+      console.error('[TG] autoResolveListing error:', e.message);
+      // Fall through to the wizard so the user can finish manually.
+      await bot.sendMessage(chatId,
+        `⚠️ Auto-resolve failed: ${e.message}\n\nI'll ask you for the missing fields in the wizard.`
+      );
+      try { await proceedToReview(chatId); }
+      catch (e2) {
+        c.step = 'idle';
+        await bot.sendMessage(chatId, `Couldn't recover: ${e2.message}. Try /cancel and start over.`);
+      }
     }
   }
 
@@ -2571,27 +2885,71 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
     bot.answerCallbackQuery(query.id);
     await ensureLoaded(chatId);
     const c = getChat(chatId);
+    console.log(`[TG] callback: "${data}" chat=${chatId} accounts=${c.accounts?.length || 0} idx=${c.activeIdx} step=${c.step}`);
 
-    // ── Switch account ──
-    if (data.startsWith('sw:')) {
-      ensureMulti(c);
-      const idx = parseInt(data.split(':')[1]);
-      if (idx >= 0 && idx < c.accounts.length) {
-        c.activeIdx = idx;
-        c.step = 'idle';
-        c.photos = [];
-        c.listing = null;
-        c.summaryMsgId = null;
-        c.catalogCache = null;
-        const a = c.accounts[idx];
-        saveChatAccounts(chatId, c.accounts, c.activeIdx);
-        const vt = a.vintedName || 'not detected';
-        return bot.editMessageText(
-          `✅ Switched account\n\n👤 RelistPro: ${a.username}\n🛍️ Vinted: ${vt}\n\n📸 Send photos to list on this account.`,
-          { chat_id: chatId, message_id: query.message.message_id }
+    // ── Command channel: cancel an in-flight post ──
+    if (data.startsWith('cmd:cancel:')) {
+      const cmdId = data.slice('cmd:cancel:'.length);
+      const acct = activeAccount(c);
+      if (!acct) return;
+      try {
+        await db.query(
+          `UPDATE rp_commands
+              SET status = 'cancelled', updated_at = NOW(), completed_at = NOW()
+            WHERE id = $1 AND user_id = $2
+              AND status IN ('queued','claimed','in_progress')`,
+          [cmdId, acct.userId]
         );
+      } catch (e) {
+        console.log('[TG] cmd:cancel error:', e.message);
       }
+      // Ticker will pick up the cancelled row on its next tick and collapse the bar.
       return;
+    }
+
+    // ── Command channel: retry a failed post ──
+    if (data.startsWith('cmd:retry:')) {
+      const cmdId = data.slice('cmd:retry:'.length);
+      const acct = activeAccount(c);
+      if (!acct) return;
+      try {
+        const r = await db.query(
+          `SELECT payload FROM rp_commands WHERE id = $1 AND user_id = $2`,
+          [cmdId, acct.userId]
+        );
+        if (!r.rows.length) return bot.sendMessage(chatId, 'That command is gone from the queue — send new photos to start fresh.');
+        const payload = r.rows[0].payload || {};
+        const draft = payload.draft || {};
+        c.listing = {
+          title: draft.title, description: draft.description,
+          brand_id: draft.brand_id, brand: draft.brand,
+          size_id: draft.size_id,
+          catalog_id: draft.catalog_id, status_id: draft.status_id,
+          price: draft.price,
+          package_size_id: draft.package_size_id,
+          color1_id: draft.color_ids?.[0] || null,
+          color2_id: draft.color_ids?.[1] || null,
+          isbn: draft.isbn || null,
+          custom_parcel: draft.custom_parcel || null,
+        };
+        c.step = 'review';
+        c.photos = []; // photos have to be re-sent
+        saveChatState(chatId);
+        await bot.sendMessage(chatId,
+          '🔁 Reloaded the listing details. Re-send your photos, then tap 🚀 POST TO VINTED to try again.');
+        return showSummary(chatId);
+      } catch (e) {
+        console.log('[TG] cmd:retry error:', e.message);
+        return;
+      }
+    }
+
+    // ── Legacy sw: shim (stale inline keyboards from pre-multi-Vinted builds) ──
+    // The old switcher picked an index into c.accounts[]; those keyboards may
+    // still be cached on user clients. Silently redirect to the main menu so
+    // they don't crash on the collapsed single-RP state.
+    if (data.startsWith('sw:')) {
+      return showMainMenu(chatId);
     }
 
     // ── Main menu actions (from showMainMenu) ──
@@ -2600,27 +2958,105 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
     }
 
     if (data === 'menu:switch') {
-      ensureMulti(c);
-      if (c.accounts.length < 2) {
-        return bot.sendMessage(chatId, 'Only one account linked. Use ➕ Add another account from /menu.');
+      const { accounts: vintedAccounts } = await fetchVintedAccounts(chatId);
+      if (vintedAccounts.length < 2) {
+        return bot.sendMessage(chatId,
+          "You've only linked one Vinted account.\n\n" +
+          "To add another: log into a different Vinted account in Chrome with the RelistPro extension running. " +
+          "It'll sync automatically on the next extension poll."
+        );
       }
-      const rows = [];
-      for (const [i, a] of c.accounts.entries()) {
-        const vt = a.vintedName || '(no Vinted name)';
-        const label = `${a.username} → ${vt}${i === c.activeIdx ? ' [current]' : ''}`;
-        rows.push([{ text: label.slice(0, 64), callback_data: `menu:switch:${i}` }]);
-      }
+      const rows = vintedAccounts.map(v => {
+        const name = v.vintedName || ('ID ' + v.memberId);
+        const staleTag = v.cookiesFresh ? '' : ' (stale)';
+        return [{
+          text: `${v.active ? '✅ ' : ''}${name}${staleTag}`.slice(0, 64),
+          callback_data: `vswitch:${v.memberId}`,
+        }];
+      });
       rows.push([{ text: '⬅️ Back', callback_data: 'menu:back' }]);
-      return bot.sendMessage(chatId, 'Switch to which account?\n(RelistPro → Vinted)', { reply_markup: { inline_keyboard: rows } });
+      return bot.sendMessage(chatId, 'Pick which Vinted account to post on:',
+        { reply_markup: { inline_keyboard: rows } });
     }
 
-    if (data.startsWith('menu:switch:')) {
-      ensureMulti(c);
-      const idx = parseInt(data.split(':')[2]);
-      if (idx >= 0 && idx < c.accounts.length) {
-        c.activeIdx = idx;
-        saveChatAccounts(chatId, c.accounts, c.activeIdx);
+    if (data.startsWith('vswitch:')) {
+      const memberId = data.slice('vswitch:'.length);
+      const acct = activeAccount(c);
+      if (!acct) return;
+      try {
+        const resp = await fetch(`http://localhost:${process.env.PORT || 3456}/api/vinted-accounts/${encodeURIComponent(memberId)}/activate`, {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + acct.token, 'Content-Type': 'application/json' },
+        });
+        if (!resp.ok) {
+          const body = await resp.json().catch(() => ({}));
+          return bot.sendMessage(chatId, `❌ Couldn't switch: ${body.error || resp.status}`);
+        }
+      } catch (e) {
+        return bot.sendMessage(chatId, `❌ Switch failed: ${e.message}`);
       }
+      invalidateVintedAcctCache(chatId);
+      return showMainMenu(chatId);
+    }
+
+    if (data === 'menu:vmanage') {
+      const { accounts: vintedAccounts, plan, cap } = await fetchVintedAccounts(chatId);
+      if (!vintedAccounts.length) {
+        return bot.sendMessage(chatId,
+          'No Vinted accounts linked yet.\n\n' +
+          'Log into Vinted in Chrome with the RelistPro extension and it will sync automatically.'
+        );
+      }
+      const capLabel = cap === Infinity || cap === null ? 'unlimited' : String(cap);
+      const rows = vintedAccounts.map(v => {
+        const name = v.vintedName || ('ID ' + v.memberId);
+        return [{
+          text: `${v.active ? '✅ ' : '⚪ '}${name}`.slice(0, 64),
+          callback_data: `vmanage:${v.memberId}`,
+        }];
+      });
+      rows.push([{ text: '⬅️ Back', callback_data: 'menu:back' }]);
+      return bot.sendMessage(chatId,
+        `🛍️ *Linked Vinted accounts* (${vintedAccounts.length}/${esc(capLabel)} on *${esc(plan)}*)\n\n` +
+        `Tap an account to activate it or remove it.\n` +
+        `To add another: log into Vinted in Chrome — it syncs automatically.`,
+        { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: rows } }
+      );
+    }
+
+    if (data.startsWith('vmanage:')) {
+      const memberId = data.slice('vmanage:'.length);
+      const { accounts: vintedAccounts } = await fetchVintedAccounts(chatId);
+      const v = vintedAccounts.find(a => a.memberId === memberId);
+      if (!v) return showMainMenu(chatId);
+      const name = v.vintedName || ('ID ' + v.memberId);
+      const rows = [];
+      if (!v.active) rows.push([{ text: '✅ Set as active', callback_data: `vswitch:${memberId}` }]);
+      rows.push([{ text: '🗑️ Remove', callback_data: `vremove:${memberId}` }]);
+      rows.push([{ text: '⬅️ Back', callback_data: 'menu:vmanage' }]);
+      return bot.sendMessage(chatId,
+        `*${esc(name)}*\n_Member ID: ${esc(memberId)}_${v.active ? '\n\n✅ Currently active' : ''}`,
+        { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: rows } });
+    }
+
+    if (data.startsWith('vremove:')) {
+      const memberId = data.slice('vremove:'.length);
+      const acct = activeAccount(c);
+      if (!acct) return;
+      try {
+        const resp = await fetch(`http://localhost:${process.env.PORT || 3456}/api/vinted-accounts/${encodeURIComponent(memberId)}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': 'Bearer ' + acct.token },
+        });
+        if (!resp.ok) {
+          const body = await resp.json().catch(() => ({}));
+          return bot.sendMessage(chatId, `❌ Couldn't remove: ${body.error || resp.status}`);
+        }
+      } catch (e) {
+        return bot.sendMessage(chatId, `❌ Remove failed: ${e.message}`);
+      }
+      invalidateVintedAcctCache(chatId);
+      await bot.sendMessage(chatId, '🗑️ Removed.');
       return showMainMenu(chatId);
     }
 
@@ -2628,28 +3064,22 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       return showMainMenu(chatId);
     }
 
-    if (data === 'menu:add') {
-      ensureMulti(c);
-      c.step = 'login_username';
-      return bot.sendMessage(chatId, 'Type the RelistPro username you want to add:');
-    }
-
     if (data === 'menu:logout') {
       ensureMulti(c);
       if (!c.accounts.length) {
         return sendSetupGuide(chatId);
       }
-      const removed = c.accounts.splice(c.activeIdx, 1)[0];
-      if (c.accounts.length) {
-        c.activeIdx = 0;
-        await bot.sendMessage(chatId, `Removed ${removed.username}. Switched to ${c.accounts[0].username}.`);
-        saveChatAccounts(chatId, c.accounts, c.activeIdx);
-        return showMainMenu(chatId);
-      }
+      const removed = c.accounts[0];
+      // Multi-Vinted: one chat tracks one RelistPro login. /logout clears
+      // the chat binding only — the Vinted sessions stored under that
+      // rp_users row are untouched and re-hydrate on next /login.
+      c.accounts = [];
       c.activeIdx = -1;
       c.step = 'idle';
-      await bot.sendMessage(chatId, `Removed ${removed.username}. No accounts left.`);
-      saveChatAccounts(chatId, c.accounts, c.activeIdx);
+      await saveChatAccounts(chatId, c.accounts, c.activeIdx);
+      invalidateVintedAcctCache(chatId);
+      await bot.sendMessage(chatId, `👋 Logged out of *${esc(removed.username)}*\\.\n\nUse /login to connect a different RelistPro account\\.`,
+        { parse_mode: 'MarkdownV2' });
       return sendSetupGuide(chatId);
     }
 
@@ -3968,7 +4398,307 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
   // CREATE LISTING
   // ──────────────────────────────────────────
 
+  // ──────────────────────────────────────────
+  // NEW: enqueue a post_new command for the extension to execute in the
+  // user's real browser. Falls through to createListingViaBackend only
+  // when the user has opted in to the server-side fallback.
+  // ──────────────────────────────────────────
+
   async function createListing(chatId) {
+    const c = getChat(chatId);
+    ensureMulti(c);
+    const L = c.listing;
+    const acct = activeAccount(c);
+
+    if (!L) {
+      c.step = 'idle';
+      return bot.sendMessage(chatId, 'No listing data found. Send photos to start a new listing.');
+    }
+    if (!L.catalog_id || !L.status_id) {
+      c.step = 'review';
+      return showSummary(chatId);
+    }
+    if (!acct) {
+      c.step = 'idle';
+      return bot.sendMessage(chatId, 'Not connected. Use /login first, then send photos.');
+    }
+    if (!c.photos || !c.photos.length) {
+      c.step = 'review';
+      return bot.sendMessage(chatId,
+        '📸 No photos attached. Send your photos for this listing first, then tap 🚀 POST TO VINTED again.',
+        { reply_markup: { inline_keyboard: [
+          [{ text: '❌ Cancel listing', callback_data: 'cancel' }]
+        ]}}
+      );
+    }
+
+    // Sort photos by Telegram message_id and drop failed downloads
+    c.photos = c.photos.filter(p => p && p.base64).sort((a, b) => (a._mid || 0) - (b._mid || 0));
+
+    // ── Mandatory photo re-editing when user opted in to duplicate defeat ──
+    if (c._dupEdit) {
+      if (!sharp) {
+        c.step = 'review'; saveChatState(chatId);
+        return bot.sendMessage(chatId,
+          '❌ Photo re-editing is unavailable on this server (sharp module missing). Cannot safely post duplicates.');
+      }
+      const prep = await bot.sendMessage(chatId, `🎨 Re-editing ${c.photos.length} photo(s) to avoid duplicate detection...`);
+      const edited = [];
+      for (let i = 0; i < c.photos.length; i++) {
+        try {
+          const b64 = await processPhotoForReupload(c.photos[i].base64);
+          edited.push({ ...c.photos[i], base64: b64 });
+        } catch (e) {
+          c.step = 'review'; saveChatState(chatId);
+          return bot.sendMessage(chatId,
+            `❌ Photo ${i + 1} re-edit failed: ${e.message}\n\nStopped the post instead of uploading originals that would flag as duplicates.`);
+        }
+      }
+      c.photos = edited;
+      c._dupEdit = false;
+      bot.deleteMessage(chatId, prep.message_id).catch(() => {});
+    }
+
+    c.step = 'posting';
+
+    // Build the draft spec the extension will replay into Vinted
+    const draftSpec = {
+      title: titleWithSize(L),
+      description: normalizeText(L.description, 'sentence'),
+      brand_id: L.brand_id || null,
+      brand: L.brand ? normalizeText(L.brand, 'title') : null,
+      size_id: L.size_id || null,
+      catalog_id: L.catalog_id,
+      status_id: L.status_id,
+      price: L.price,
+      currency: 'GBP',
+      package_size_id: L.package_size_id || null,
+      color_ids: [L.color1_id, L.color2_id].filter(Boolean),
+      isbn: L.isbn || null,
+      custom_parcel: L.custom_parcel || null,
+    };
+
+    const photoCount = c.photos.length;
+    const eta_ms = estimatePostEta(photoCount);
+    const idempotencyKey = `tg:${chatId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+
+    // Resolve the currently-active Vinted account for this RelistPro user.
+    // The command gets pinned to that memberId so the extension only runs
+    // it when the browser is logged into the matching Vinted account.
+    const targetMemberId = await activeVintedMemberId(chatId).catch(() => null);
+    if (!targetMemberId) {
+      c.step = 'review';
+      return bot.sendMessage(chatId,
+        '⚠️ No Vinted account linked yet.\n\n' +
+        'Log into Vinted in Chrome with the RelistPro extension running, then tap POST again.');
+    }
+
+    let cmdId;
+    try {
+      // Enqueue the command row
+      const ins = await db.query(
+        `INSERT INTO rp_commands
+           (user_id, target_member_id, type, status, eta_ms, payload, source, idempotency_key)
+         VALUES ($1, $2, 'post_new', 'queued', $3, $4, 'telegram', $5)
+         RETURNING id`,
+        [acct.userId, targetMemberId, eta_ms,
+         JSON.stringify({ draft: draftSpec, photo_count: photoCount }),
+         idempotencyKey]
+      );
+      cmdId = ins.rows[0].id;
+
+      // Stage photos as bytea rows
+      for (let i = 0; i < c.photos.length; i++) {
+        const buf = Buffer.from(c.photos[i].base64, 'base64');
+        await db.query(
+          `INSERT INTO rp_command_photos (command_id, idx, mime, data) VALUES ($1, $2, $3, $4)`,
+          [cmdId, i, 'image/jpeg', buf]
+        );
+      }
+    } catch (e) {
+      console.error('[TG] createListing enqueue failed:', e.message);
+      c.step = 'review';
+      return bot.sendMessage(chatId, `❌ Couldn't queue post: ${e.message}`);
+    }
+
+    // Initial status message with cancel button
+    const initialText = renderProgress({ stage_label: 'Queued', progress_pct: 0, eta_ms });
+    let statusMsg;
+    try {
+      statusMsg = await bot.sendMessage(chatId, initialText, {
+        parse_mode: 'MarkdownV2',
+        reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: `cmd:cancel:${cmdId}` }]] }
+      });
+    } catch (e) {
+      // MarkdownV2 can blow up on stray chars — fall back to plain
+      statusMsg = await bot.sendMessage(chatId, `📤 Queued — posting via your browser…`, {
+        reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: `cmd:cancel:${cmdId}` }]] }
+      });
+    }
+
+    // Track the in-flight command on the chat so the user can pipeline another
+    c._activeCommands = c._activeCommands || {};
+    c._activeCommands[cmdId] = { msgId: statusMsg.message_id, startedAt: Date.now() };
+
+    // Reset wizard state — photos now owned by the command. Pipelining allowed.
+    c.step = 'idle';
+    c.photos = [];
+    c.listing = null;
+    c.summaryMsgId = null;
+    c.catalogCache = null;
+    delete c._lastDraftId;
+    delete c._retried;
+    delete c._dupChecked;
+    delete c._dupEdit;
+    saveChatState(chatId);
+
+    startCommandTicker(chatId, cmdId, statusMsg.message_id, acct);
+  }
+
+  // Per-stage midpoints in ms, mirroring content.js executePostCommand.
+  function estimatePostEta(photoCount) {
+    const warming = 7500;
+    const perPhoto = 3500;
+    const betweenPhoto = 3500 * Math.max(0, photoCount - 1);
+    const reviewPhotos = 14000;
+    const title = 30000;
+    const desc = 40000;
+    const details = 60000;
+    const finalReview = 82500;
+    const prePublish = 10000;
+    const publish = 2250;
+    return warming + perPhoto * photoCount + betweenPhoto +
+           reviewPhotos + title + desc + details + finalReview + prePublish + publish;
+  }
+
+  // MarkdownV2 escape for dynamic fields inside renderProgress / renderFinal
+  function escMd2(s) {
+    return String(s == null ? '' : s).replace(/[_*\[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
+  }
+
+  function fmtDur(ms) {
+    const s = Math.max(0, Math.round(ms / 1000));
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m}:${String(r).padStart(2, '0')}`;
+  }
+
+  function renderProgress({ stage_label, progress_pct, eta_ms, stuckInQueue }) {
+    const pct = Math.max(0, Math.min(100, progress_pct || 0));
+    const filled = Math.round(pct / 5);
+    const bar = '█'.repeat(filled) + '░'.repeat(20 - filled);
+    const eta = fmtDur(eta_ms || 0);
+    const subtitle = stuckInQueue
+      ? '_⏳ Waiting for Chrome to pick this up\\. Open a Vinted tab if your browser is asleep\\._'
+      : '_Running in your real browser with human pacing — this is the safest way to post\\. Each listing takes 3–6 min; feel free to start the next one while this runs\\._';
+    return (
+      `📤 *Posting to Vinted* — ${escMd2(stage_label || 'Working')}\n\n` +
+      `\\[${bar}\\] ${pct}%\n` +
+      `⏱ ~${escMd2(eta)} remaining\n\n` +
+      subtitle
+    );
+  }
+
+  function renderFinal(cmd, elapsedMs) {
+    const dur = fmtDur(elapsedMs || 0);
+    if (cmd.status === 'completed') {
+      const title = cmd.result?.title || cmd.result?.new_item_id || 'listing';
+      return `✅ *Posted in ${escMd2(dur)}*\n\n${escMd2(title)}`;
+    }
+    if (cmd.status === 'cancelled') {
+      return `❌ *Cancelled after ${escMd2(dur)}* — partial data cleaned up\\.`;
+    }
+    const err = cmd.result?.error || 'unknown error';
+    return `❌ *Post failed after ${escMd2(dur)}*\n\n${escMd2(err)}`;
+  }
+
+  // Poll the command row and edit the status message every ~3.5 s.
+  // One ticker per command; a single chat can run several in parallel.
+  function startCommandTicker(chatId, cmdId, msgId, acct) {
+    const startedAt = Date.now();
+    let lastText = '';
+    let tenMinNagSent = false;
+    const intervalId = setInterval(async () => {
+      try {
+        const r = await db.query(
+          `SELECT id, status, stage, stage_label, progress_pct, eta_ms, result, created_at
+             FROM rp_commands WHERE id = $1 AND user_id = $2`,
+          [cmdId, acct.userId]
+        );
+        if (!r.rows.length) { clearInterval(intervalId); return; }
+        const cmd = r.rows[0];
+
+        if (['completed', 'failed', 'cancelled'].includes(cmd.status)) {
+          clearInterval(intervalId);
+          const c = getChat(chatId);
+          if (c._activeCommands) delete c._activeCommands[cmdId];
+          const elapsed = Date.now() - startedAt;
+          const finalText = renderFinal(cmd, elapsed);
+          let kb;
+          if (cmd.status === 'completed' && cmd.result?.listing_url) {
+            kb = { inline_keyboard: [[{ text: '🔗 View on Vinted', url: cmd.result.listing_url }]] };
+          } else if (cmd.status === 'failed') {
+            kb = { inline_keyboard: [[{ text: '🔁 Retry', callback_data: `cmd:retry:${cmdId}` }]] };
+          }
+          await bot.editMessageText(finalText, {
+            chat_id: chatId, message_id: msgId, parse_mode: 'MarkdownV2', reply_markup: kb
+          }).catch(() => {});
+          saveChatState(chatId);
+          // Completion follow-ups
+          if (cmd.status === 'completed') {
+            bot.sendMessage(chatId, '📸 Send more photos to list another item, or use /help to see all commands.').catch(() => {});
+          }
+          return;
+        }
+
+        // Stuck in queue >45 s? Swap subtitle to the "open Chrome" hint.
+        const ageMs = Date.now() - new Date(cmd.created_at).getTime();
+        const stuckInQueue = cmd.status === 'queued' && ageMs > 45000;
+
+        // One-time nag at 10 min stuck — the user's browser is genuinely offline.
+        if (cmd.status === 'queued' && ageMs > 10 * 60 * 1000 && !tenMinNagSent) {
+          tenMinNagSent = true;
+          bot.sendMessage(chatId,
+            '⏳ Still waiting for Chrome to pick up this post.\n\n' +
+            'Open your browser and make sure the RelistPro extension is active, ' +
+            'or cancel this post with ❌ Cancel above and try again once Chrome is running.'
+          ).catch(() => {});
+        }
+
+        // Synthesise a smooth local countdown — reuse ETA from the row but
+        // subtract elapsed, so the timer doesn't jump when the extension
+        // updates stage mid-way through.
+        const elapsed = Date.now() - startedAt;
+        const totalEta = cmd.eta_ms || estimatePostEta(4);
+        const remain = Math.max(0, totalEta - elapsed);
+
+        const text = renderProgress({
+          stage_label: cmd.stage_label || (stuckInQueue ? 'Waiting for Chrome' : 'Queued'),
+          progress_pct: cmd.progress_pct || 0,
+          eta_ms: remain,
+          stuckInQueue
+        });
+        if (text === lastText) return; // nothing changed — skip the edit
+        lastText = text;
+        await bot.editMessageText(text, {
+          chat_id: chatId, message_id: msgId, parse_mode: 'MarkdownV2',
+          reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: `cmd:cancel:${cmdId}` }]] }
+        }).catch(e => {
+          if (/429/.test(e.message)) { /* Telegram rate limit, next tick will catch up */ }
+          else if (/message is not modified/i.test(e.message)) { /* ignore */ }
+          else console.log('[TG] ticker edit error:', e.message);
+        });
+      } catch (e) {
+        console.log('[TG] ticker poll error:', e.message);
+      }
+    }, 3500);
+  }
+
+  // ──────────────────────────────────────────
+  // LEGACY BACKEND-SIDE POST PATH (fallback only)
+  // ──────────────────────────────────────────
+
+  async function createListingViaBackend(chatId) {
     const c = getChat(chatId);
     ensureMulti(c);
     const L = c.listing;
@@ -4106,6 +4836,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
             'Cookie': session.cookies,
             'X-CSRF-Token': session.csrf,
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            ...browserHeaders(domain, '/items/new'),
           },
           body: form
         });
@@ -4341,7 +5072,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
           // Retry posting with refreshed session (once only)
           c._retried = true;
           bot.sendMessage(chatId, '🔄 Session refreshed automatically. Retrying...');
-          return createListing(chatId);
+          return createListingViaBackend(chatId);
         }
         delete c._retried;
 
