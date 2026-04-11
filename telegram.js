@@ -2501,12 +2501,15 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
     // If an edit just finished, confirm it. In the error-walkthrough path
     // we keep the field grid visible so the user can chew through each
     // broken field; otherwise we show a clear two-button prompt asking
-    // whether to POST now or edit more.
+    // whether to POST now or edit more. Always send as a NEW message on
+    // edit so the user sees a fresh confirmation at the bottom of the chat.
     let justEditedPrompt = false;
+    let forceNewMessage = false;
     if (c._justEdited) {
       const fieldLabel = c._justEdited;
       text = `✅ Updated ${esc(fieldLabel)}\\.\n\n🚀 *Post to Vinted now, or edit more?*\n\n` + text;
       if (errFields.size === 0) justEditedPrompt = true;
+      forceNewMessage = true;
     }
     delete c._justEdited;
 
@@ -2532,8 +2535,10 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
 
     const opts = { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: keyboard } };
 
-    // Edit existing summary or send new one
-    if (c.summaryMsgId) {
+    // Edit existing summary or send new one. After a user edit we always
+    // send a fresh message so the confirmation appears at the bottom of
+    // the chat instead of silently mutating a scrolled-up message.
+    if (c.summaryMsgId && !forceNewMessage) {
       try {
         await bot.editMessageText(text, { chat_id: chatId, message_id: c.summaryMsgId, ...opts });
         return;
