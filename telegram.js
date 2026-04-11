@@ -1697,12 +1697,18 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
 
     if (stepName === 'brand') {
       c.step = 'wiz_brand';
-      const kb = [];
-      if (L.brand) kb.push([{ text: `✅ Keep: ${L.brand}`, callback_data: 'wiz:accept' }]);
-      kb.push([{ text: '⏭️ No brand / Skip', callback_data: 'wiz:accept' }]);
+      // If AI detected a brand, auto-search Vinted with it. This resolves
+      // a real brand_id (blind "Keep" used to leave brand_id=null → untagged
+      // listings) AND lets the authenticity gate fire for verified brands.
+      if (L.brand) {
+        await bot.sendMessage(chatId, `🏷️ Step 8/9 — Brand\n\nAI detected: ${L.brand}\n\nLooking up in Vinted...`);
+        return searchBrands(chatId, L.brand);
+      }
       return bot.sendMessage(chatId,
-        `🏷️ Step 8/9 — Brand\n\nAI detected: ${L.brand || 'None'}\n\nTap Keep/Skip, or type a brand name below to search:`,
-        { reply_markup: { inline_keyboard: kb } }
+        `🏷️ Step 8/9 — Brand\n\nNo brand detected.\n\nType a brand name to search, or tap Skip:`,
+        { reply_markup: { inline_keyboard: [
+          [{ text: '⏭️ No brand / Skip', callback_data: 'brand:0:' }]
+        ]}}
       );
     }
 
@@ -2149,10 +2155,12 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       const parts = data.split(':');
       const bid = parseInt(parts[1]);
       c.listing.brand_id = bid > 0 ? bid : null;
-      // Keep existing text-only brand if user chose "continue without tag"
+      // brand:<id>:<textName> — with text = keep it as plain text brand.
+      // brand:0: (empty text) = explicit "No brand", clear any AI-detected
+      // brand so it doesn't leak into the listing.
       const textName = parts.slice(2).join(':');
       if (textName) c.listing.brand = textName;
-      else if (bid === 0 && !c.listing.brand) c.listing.brand = '';
+      else if (bid === 0) c.listing.brand = '';
       clearErrorField(c, 'brand');
 
       // Authenticity gate: if this is a Vinted-verified brand and we haven't
@@ -2745,19 +2753,41 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
     if (c.listing?.category_hint) {
       const pathParts = c.listing.category_hint.split(/\s*[>\/]\s*/).map(p => p.trim()).filter(Boolean);
       if (pathParts.length >= 2) {
+        // The AI analysis also carries a `gender` field — cross-check it so
+        // a men's item with a sloppy hint doesn't land under a women's category.
+        const hintGender = (c.listing?.gender || '').toLowerCase();
+        const genderSection = hintGender === 'women' ? 'women'
+          : hintGender === 'men' ? 'men'
+          : hintGender === 'kids' ? 'kids'
+          : null;
         for (let i = pathParts.length - 1; i >= 0; i--) {
           const partMatches = searchCategoriesByKeyword(pathParts[i]);
           if (partMatches.length) {
             matches = partMatches
               .map(m => {
                 const mTitle = (m.path || m.title || '').toLowerCase();
-                const score = pathParts.reduce((acc, part) =>
-                  acc + (mTitle.includes(part.toLowerCase()) ? 1 : 0), 0);
+                // Weighted scoring: section (first part) and leaf (last part)
+                // matter far more than middle parts. Middle parts are
+                // cosmetic; section sets the department and leaf identifies
+                // the actual item type.
+                let score = pathParts.reduce((acc, part, idx) => {
+                  if (!mTitle.includes(part.toLowerCase())) return acc;
+                  if (idx === 0) return acc + 10;
+                  if (idx === pathParts.length - 1) return acc + 5;
+                  return acc + 1;
+                }, 0);
+                // Strong gender cross-check: if AI gave us a gender and the
+                // candidate's section doesn't match, heavily penalise it.
+                if (genderSection) {
+                  const mSection = mTitle.split('>')[0].trim();
+                  if (mSection.includes(genderSection)) score += 8;
+                  else score -= 12;
+                }
                 return { ...m, _score: score };
               })
               .sort((a, b) => b._score - a._score)
               .slice(0, 8);
-            console.log(`[TG] Structured path match via "${pathParts[i]}": ${matches.length}`);
+            console.log(`[TG] Structured path match via "${pathParts[i]}": ${matches.length} (gender=${genderSection || 'none'})`);
             break;
           }
         }
