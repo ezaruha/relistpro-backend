@@ -913,46 +913,66 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
   }
   const tableReady = initTelegramTable();
 
-  // Load full chat state from DB if not yet loaded this session
+  // Load full chat state from DB if not yet loaded this session.
+  //
+  // The accounts restore runs whenever c.accounts is empty — so a transient
+  // DB failure on the first message doesn't leave the user perpetually
+  // logged out for the rest of the process lifetime. The listing +
+  // photo-redownload path only runs ONCE per process (gated by
+  // loadedFromDb), since re-downloading photos on every message would be
+  // wasteful and the in-memory listing is the source of truth after the
+  // first restore.
   async function ensureLoaded(chatId) {
-    if (loadedFromDb.has(chatId)) return;
-    loadedFromDb.add(chatId);
-    const saved = await loadChatState(chatId);
-    if (!saved) return;
     const c = getChat(chatId);
-    if (saved.accounts.length && !c.accounts.length) {
+    const needAccounts = !c.accounts?.length;
+    const needListing = !loadedFromDb.has(chatId);
+    if (!needAccounts && !needListing) return;
+
+    let saved;
+    try {
+      saved = await loadChatState(chatId);
+    } catch (e) {
+      console.error(`[TG] ensureLoaded DB error for chat ${chatId}:`, e.message);
+      return; // leave loadedFromDb unset so the next message retries
+    }
+
+    if (saved?.accounts?.length && !c.accounts.length) {
       c.accounts = saved.accounts;
       c.activeIdx = saved.activeIdx ?? 0;
       console.log(`[TG] Restored ${c.accounts.length} account(s) for chat ${chatId}`);
     }
-    if (saved.listing && !c.listing) {
-      c.listing = saved.listing;
-      c.wizardIdx = saved.wizardIdx ?? 0;
-      c.step = saved.step || 'idle';
-      // Re-download photos from Telegram using saved fileIds
-      const photoRefs = saved.photos || [];
-      if (photoRefs.length && photoRefs[0].fileId) {
-        console.log(`[TG] Re-downloading ${photoRefs.length} photo(s) from Telegram...`);
-        c.photos = [];
-        const os = require('os');
-        const fs = require('fs');
-        for (const ref of photoRefs) {
-          try {
-            const filePath = await bot.downloadFile(ref.fileId, os.tmpdir());
-            const buffer = fs.readFileSync(filePath);
-            try { fs.unlinkSync(filePath); } catch (_) {}
-            if (buffer.length) {
-              c.photos.push({ base64: buffer.toString('base64'), fileId: ref.fileId, _mid: ref._mid });
+
+    if (needListing) {
+      loadedFromDb.add(chatId);
+      if (saved?.listing && !c.listing) {
+        c.listing = saved.listing;
+        c.wizardIdx = saved.wizardIdx ?? 0;
+        c.step = saved.step || 'idle';
+        // Re-download photos from Telegram using saved fileIds
+        const photoRefs = saved.photos || [];
+        if (photoRefs.length && photoRefs[0].fileId) {
+          console.log(`[TG] Re-downloading ${photoRefs.length} photo(s) from Telegram...`);
+          c.photos = [];
+          const os = require('os');
+          const fs = require('fs');
+          for (const ref of photoRefs) {
+            try {
+              const filePath = await bot.downloadFile(ref.fileId, os.tmpdir());
+              const buffer = fs.readFileSync(filePath);
+              try { fs.unlinkSync(filePath); } catch (_) {}
+              if (buffer.length) {
+                c.photos.push({ base64: buffer.toString('base64'), fileId: ref.fileId, _mid: ref._mid });
+              }
+            } catch (e) {
+              console.error(`[TG] Re-download failed for ${ref.fileId}: ${e.message}`);
             }
-          } catch (e) {
-            console.error(`[TG] Re-download failed for ${ref.fileId}: ${e.message}`);
           }
+          console.log(`[TG] Restored ${c.photos.length}/${photoRefs.length} photo(s) for chat ${chatId}`);
+        } else {
+          c.photos = [];
         }
-        console.log(`[TG] Restored ${c.photos.length}/${photoRefs.length} photo(s) for chat ${chatId}`);
-      } else {
-        c.photos = [];
+        console.log(`[TG] Restored listing for chat ${chatId} (step=${c.step})`);
       }
-      console.log(`[TG] Restored listing for chat ${chatId} (step=${c.step})`);
     }
   }
   let TelegramBot;
@@ -1119,8 +1139,8 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     }
 
     // Already connected? Confirm the persistent state instead of making the
-    // user re-enter credentials. Sessions persist in the DB indefinitely, so
-    // once the extension has synced there's nothing to re-sync on each login.
+    // user re-enter credentials. The Telegram login is permanent — it only
+    // ever clears when the user runs /logout.
     if (args.length === 0 && c.accounts?.length) {
       const lines = c.accounts.map((a, i) => {
         const mark = i === c.activeIdx ? '➤' : ' ';
@@ -1128,11 +1148,11 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         return `${mark} ${a.username}${vn}`;
       }).join('\n');
       return bot.sendMessage(chatId,
-        `✅ You're already connected — no need to sync or log in again.\n\n${lines}\n\n` +
+        `✅ You're already connected — this login is permanent until you run /logout.\n\n${lines}\n\n` +
         `📸 Send photos to list an item.\n` +
         `🔄 /switch to change active account\n` +
-        `➕ To add another account: /login <username> <password>\n` +
-        `👋 /logout to disconnect`
+        `➕ Add another account: /login <username> <password>\n\n` +
+        `ℹ️ If Vinted says your session expired, that's separate from this login — just open Vinted in Chrome, tap the RelistPro extension → Sync. You don't need to /login again here.`
       );
     }
 
