@@ -644,70 +644,28 @@ function ensureMulti(c) {
 // ═══ MAIN INIT ═══
 module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app, db }) {
 
-  // ── Refresh Vinted session server-side (get fresh CSRF + cookies) ──
+  // ── Read-only session "refresh": re-derive CSRF only, never mutate cookies ──
+  // Backend must NOT call /web/api/auth/refresh — that rotates Vinted's
+  // refresh_token server-side and invalidates the copy the user's browser
+  // still holds, logging them out of vinted.co.uk. The extension's
+  // /api/session/store is the only path that should write cookies.
   async function refreshVintedSession(session, userId) {
     const domain = session.domain || 'www.vinted.co.uk';
     try {
-      // 1) Try the auth refresh endpoint (like DOTB does in-browser)
-      const refreshResp = await fetch(`https://${domain}/web/api/auth/refresh`, {
-        method: 'POST',
+      const pageResp = await fetch(`https://${domain}/`, {
         headers: {
           'Cookie': session.cookies,
-          'X-CSRF-Token': session.csrf,
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'application/json',
         },
-        redirect: 'manual', // capture Set-Cookie before redirect
       });
-
-      // Parse existing cookies into a map (always — we may only rotate CSRF)
-      const cookieMap = {};
-      session.cookies.split(';').forEach(c => {
-        const [k, ...v] = c.trim().split('=');
-        if (k) cookieMap[k.trim()] = v.join('=');
-      });
-
-      // Merge any Set-Cookie from the refresh endpoint itself
-      const setCookies = refreshResp.headers.getSetCookie?.() || [];
-      for (const sc of setCookies) {
-        const [pair] = sc.split(';');
-        const [k, ...v] = pair.split('=');
-        if (k) cookieMap[k.trim()] = v.join('=');
+      const html = await pageResp.text();
+      const csrfMatch = html.match(/"CSRF_TOKEN\\?":\\?"([^"\\]+)\\?"/);
+      if (csrfMatch) {
+        session.csrf = csrfMatch[1];
+        console.log(`[TG] Re-derived CSRF for user ${userId} (read-only, no cookie mutation)`);
       }
-      if (setCookies.length) {
-        session.cookies = Object.entries(cookieMap).map(([k,v]) => `${k}=${v}`).join('; ');
-      }
-
-      // Defensive check: if the merge wiped our auth markers, bail without
-      // writing back. This catches Vinted 302→login responses and similar.
-      const AUTH_MARKERS = ['_vinted_fr_session', 'access_token_web', 'refresh_token_web', 'v_sid'];
-      const stillAuthed = AUTH_MARKERS.some(k => cookieMap[k]);
-      if (!stillAuthed) {
-        console.warn(`[TG] refreshVintedSession aborted — merged cookies missing auth markers for user ${userId}`);
-        return session;
-      }
-
-      // Try to extract new CSRF from a page fetch — DO NOT merge the page's
-      // Set-Cookie back into session.cookies. The homepage returns anonymous
-      // cookies that would overwrite our authenticated ones and invalidate
-      // the session on the next request.
-      try {
-        const pageResp = await fetch(`https://${domain}/`, {
-          headers: { 'Cookie': session.cookies, 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-        });
-        const html = await pageResp.text();
-        const csrfMatch = html.match(/"CSRF_TOKEN\\?":\\?"([^"\\]+)\\?"/);
-        if (csrfMatch) {
-          session.csrf = csrfMatch[1];
-          console.log('[TG] Refreshed CSRF token from page');
-        }
-      } catch {}
-
-      // Save updated session (cookies and/or rotated CSRF)
-      await store.setSession(userId, session);
-      console.log(`[TG] Session refreshed for user ${userId} (setCookies=${setCookies.length})`);
     } catch (e) {
-      console.log('[TG] Session refresh failed:', e.message);
+      console.log('[TG] CSRF re-derive failed (using existing):', e.message);
     }
     return session;
   }
@@ -1091,7 +1049,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       const user = await store.getUser(username);
       if (!user) {
         c.step = 'idle';
-        return bot.sendMessage(chatId, 'User not found. Register via the Chrome extension first, then come back here.');
+        return bot.sendMessage(chatId, `No RelistPro account found for "${username}". Double-check the spelling — usernames are the ones you picked when registering in the Chrome extension. If you haven't registered yet, do that first, then come back and /login.`);
       }
 
       let valid = false;

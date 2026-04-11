@@ -90,11 +90,19 @@ function generateToken() { return 'rp_' + crypto.randomBytes(24).toString('base6
 // ═══ STORAGE ADAPTER (DB preferred, JSON fallback) ═══
 const store = {
   async getUser(username) {
+    if (!username) return null;
+    const trimmed = String(username).trim();
     if (db.hasDb()) {
-      const r = await db.query('SELECT * FROM rp_users WHERE username=$1', [username]);
+      // Case-insensitive match so users can log in regardless of how they
+      // typed their username in the extension vs Telegram.
+      const r = await db.query('SELECT * FROM rp_users WHERE LOWER(username)=LOWER($1) LIMIT 1', [trimmed]);
       return r.rows[0] || null;
     }
-    const u = users[username]; return u ? { id:username, username, ...u } : null;
+    // JSON fallback: try exact then case-insensitive
+    if (users[trimmed]) return { id: trimmed, username: trimmed, ...users[trimmed] };
+    const lower = trimmed.toLowerCase();
+    const found = Object.entries(users).find(([k]) => k.toLowerCase() === lower);
+    return found ? { id: found[0], username: found[0], ...found[1] } : null;
   },
   async getUserByToken(token) {
     if (db.hasDb()) {
