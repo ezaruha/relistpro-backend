@@ -2013,11 +2013,42 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         if (m.length) { matches = m; break; }
       }
     }
-    if (!matches.length) {
-      const itemDesc = `${L.title || ''} ${hint}`.trim();
-      matches = await aiPickCategory(itemDesc);
+
+    // If keyword scoring has a clear, unambiguous winner — take it and skip
+    // the AI round trip. Otherwise, build a shortlist of the top candidates
+    // across the whole catalog and let the AI pick. "Clear winner" = top score
+    // ≥15 AND a ≥5 gap over second place; anything less is likely a substring
+    // collision that the AI can disambiguate from the item description.
+    const top = matches[0];
+    const second = matches[1];
+    const clearWinner = top && (top._score || 0) >= 15
+      && (!second || (top._score - (second._score || 0)) >= 5);
+
+    if (clearWinner) return top;
+
+    // Build shortlist: existing matches + broader keyword search for every
+    // part of the hint + title words, deduped by id, capped at 40.
+    const shortlistMap = new Map();
+    const addAll = (rows) => {
+      for (const r of rows || []) {
+        if (r && r.id && !shortlistMap.has(r.id)) shortlistMap.set(r.id, r);
+      }
+    };
+    addAll(matches);
+    for (const p of parts) addAll(searchCategoriesByKeyword(p));
+    if (L.title) {
+      for (const w of L.title.split(/\s+/).filter(w => w.length >= 3)) {
+        addAll(searchCategoriesByKeyword(w));
+      }
     }
-    return matches[0] || null;
+    const shortlist = Array.from(shortlistMap.values()).slice(0, 40);
+
+    const itemDesc = `${L.title || ''} — ${hint}${gSection ? ' (' + gSection + ')' : ''}`.trim();
+    const aiPicks = await aiPickCategory(itemDesc, shortlist.length ? shortlist : null);
+    if (aiPicks.length) return aiPicks[0];
+
+    // Last resort: whatever the keyword scoring turned up, even if weak.
+    return top || null;
   }
 
   // Try to match AI size_hint against Vinted's size_groups for the current
@@ -2026,6 +2057,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     if (!L.catalog_id || !L.size_hint) return null;
     if (L.aiConfidence?.size === 'low') return null;
     const hint = L.size_hint.trim().toUpperCase();
+    const candidates = normaliseSizeHint(hint);
     try {
       const resp = await vintedFetch(session, `/api/v2/size_groups?catalog_ids=${L.catalog_id}`);
       if (!resp.ok) return null;
@@ -2037,11 +2069,44 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
           if (s.id && s.title) all.push({ id: s.id, title: s.title });
         }
       }
-      let m = all.find(s => s.title.toUpperCase() === hint);
-      if (!m) m = all.find(s => s.title.toUpperCase().includes(hint));
+      // Try exact match against every normalised candidate first.
+      for (const cand of candidates) {
+        const m = all.find(s => s.title.toUpperCase() === cand);
+        if (m) return m;
+      }
+      // Fallback: substring / reverse-substring against the raw hint (legacy behaviour).
+      let m = all.find(s => s.title.toUpperCase().includes(hint));
       if (!m) m = all.find(s => hint.includes(s.title.toUpperCase()) && s.title.length > 1);
       return m || null;
     } catch { return null; }
+  }
+
+  // Map common size-label variants onto what Vinted's size groups actually store.
+  // Vinted uses letter sizes (S/M/L) and bare numerics — not "Medium" or "EU 38".
+  // Returns an array of candidates to try in order; always includes the raw hint.
+  function normaliseSizeHint(hint) {
+    const h = hint.trim().toUpperCase();
+    const out = [];
+    const wordMap = {
+      'EXTRA SMALL': 'XS', 'X SMALL': 'XS', 'XSMALL': 'XS',
+      'SMALL': 'S',
+      'MEDIUM': 'M', 'MED': 'M',
+      'LARGE': 'L',
+      'EXTRA LARGE': 'XL', 'X LARGE': 'XL', 'XLARGE': 'XL',
+      'XX LARGE': 'XXL', 'XXLARGE': 'XXL', '2XL': 'XXL',
+      'XXX LARGE': 'XXXL', '3XL': 'XXXL',
+    };
+    if (wordMap[h]) out.push(wordMap[h]);
+    // "EU 38" / "UK 10" / "US 6" → bare number
+    const sys = h.match(/^(?:EU|UK|US)\s*([\d.]+)$/);
+    if (sys) out.push(sys[1]);
+    // "6-8" or "6/8" → try each end individually
+    const range = h.match(/^(\d+)\s*[-/]\s*(\d+)$/);
+    if (range) { out.push(range[1]); out.push(range[2]); }
+    // "ONE SIZE" variants → let Vinted's row match on its own title
+    if (/^(ONE\s*SIZE|OS|ONESIZE)$/.test(h)) out.push('ONE SIZE');
+    out.push(h);
+    return Array.from(new Set(out));
   }
 
   // Fallback: "One size" lookup for categories that support it.
@@ -2315,13 +2380,17 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         x.label.toLowerCase() === (analysis.condition || '').toLowerCase()
       );
 
-      // Auto-match primary color (fuzzy — aliases + partial)
-      const c1Match = matchColor(analysis.color);
+      // Auto-match primary color (fuzzy — aliases + partial).
+      // Symmetric with brand/size: if AI confidence is 'low', leave blank
+      // so the review card surfaces it as missing instead of posting a guess.
+      const colorConf = analysis.confidence?.color || 'medium';
+      const c1Match = colorConf === 'low' ? null : matchColor(analysis.color);
       let colorId = c1Match?.id || null;
-      let colorName = c1Match?.label || analysis.color || '';
+      let colorName = c1Match?.label || (colorConf === 'low' ? '' : (analysis.color || ''));
 
-      // Auto-match secondary color (fuzzy)
-      const c2Match = matchColor(analysis.color2);
+      // Secondary colour — same gate. A low-confidence primary usually means
+      // the secondary is even less reliable, so drop it too in that case.
+      const c2Match = colorConf === 'low' ? null : matchColor(analysis.color2);
       let color2Id = c2Match?.id || null;
       let color2Name = c2Match?.label || '';
 
@@ -2584,53 +2653,111 @@ SIZE: Read size labels/tags carefully. Return EXACTLY what the label says (e.g. 
 MATERIAL: Read care labels. Return composition (e.g. "100% cotton", "80% polyester 20% elastane", "faux leather"). null if not visible.
 PARCEL: Estimate weight category. "Small" (under 2kg, fits large letter), "Medium" (2-5kg, shoebox), "Large" (5-10kg, large box).
 GENDER: "women", "men", "kids", "unisex" based on the item style and any labels.
-CONFIDENCE: For each of brand, size, color — return "high" if you're sure from a clear label/logo, "medium" if inferring from context, "low" if not visible in any photo.`;
+CONFIDENCE: For each of brand, size, color — return "high" if you're sure from a clear label/logo, "medium" if inferring from context, "low" if not visible in any photo.
 
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 1200,
-        system: systemPrompt,
-        messages: [{
-          role: 'user',
-          content: [
-            ...imageBlocks,
-            { type: 'text', text:
-              `Analyze ${imageBlocks.length > 1 ? `these ${imageBlocks.length} photos` : 'this photo'} thoroughly and create a Vinted listing. Check EVERY photo for labels, tags, size info, brand logos, damage, etc.${captionCtx}\n\n` +
-              `Return ONLY valid JSON (no markdown, no backticks, no explanation):\n` +
-              `{\n` +
-              `  "title": "searchable title max 60 chars (no ALL CAPS)",\n` +
-              `  "description": "4-6 line description with hashtags (no ALL CAPS)",\n` +
-              `  "suggested_price": <realistic used price in GBP as number>,\n` +
-              `  "brand": "detected brand or null",\n` +
-              `  "condition": "New with tags|New without tags|Very good|Good|Satisfactory",\n` +
-              `  "category_hint": "Section > Category > Subcategory (e.g. Women > Tops > T-shirts)",\n` +
-              `  "color": "primary color from allowed list",\n` +
-              `  "color2": "secondary color or null",\n` +
-              `  "material": "fabric composition or null",\n` +
-              `  "size_hint": "EXACTLY what size label says or null",\n` +
-              `  "gender": "women|men|kids|unisex",\n` +
-              `  "parcel_size": "Small|Medium|Large",\n` +
-              `  "confidence": { "brand": "high|medium|low", "size": "high|medium|low", "color": "high|medium|low" },\n` +
-              `  "style_tags": ["up to 5 relevant style keywords for description"]\n` +
-              `}`
-            }
-          ]
-        }]
-      })
-    });
+EXAMPLES — these show the exact output shape you must return. Don't copy the values; just match the structure and tone.
 
-    const data = await resp.json();
-    const text = data.content?.[0]?.text || '';
-    const match = text.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error('AI returned no JSON');
-    return JSON.parse(match[0]);
+EXAMPLE 1 — Women's H&M black midi dress, 3 photos (front, back, inside label):
+{
+  "title": "H&M Black Midi Dress Size 10",
+  "description": "Elegant black midi dress from H&M in a flattering A-line cut.\\nSoft polyester fabric with a subtle stretch — comfortable for all-day wear.\\nWorn twice, no marks or damage, comes from a smoke-free home.\\n#hm #blackdress #midi #smart",
+  "suggested_price": 12,
+  "brand": "H&M",
+  "condition": "Very good",
+  "category_hint": "Women > Dresses > Midi dresses",
+  "color": "Black",
+  "color2": null,
+  "material": "95% polyester 5% elastane",
+  "size_hint": "UK 10",
+  "gender": "women",
+  "parcel_size": "Small",
+  "confidence": { "brand": "high", "size": "high", "color": "high" },
+  "style_tags": ["smart", "office", "evening", "classic", "a-line"]
+}
+
+EXAMPLE 2 — Men's unbranded grey hoodie, 2 photos (front, inside label showing "M"):
+{
+  "title": "Grey Pullover Hoodie Size M",
+  "description": "Classic grey pullover hoodie, perfect everyday staple.\\nSoft cotton-blend fleece inside, kangaroo pocket at the front.\\nGood condition with minimal wear — the drawcord is intact.\\n#hoodie #grey #menswear #basics",
+  "suggested_price": 10,
+  "brand": null,
+  "condition": "Good",
+  "category_hint": "Men > Jumpers & sweaters > Hoodies",
+  "color": "Grey",
+  "color2": null,
+  "material": "80% cotton 20% polyester",
+  "size_hint": "M",
+  "gender": "men",
+  "parcel_size": "Small",
+  "confidence": { "brand": "low", "size": "high", "color": "high" },
+  "style_tags": ["casual", "everyday", "basics", "streetwear", "loungewear"]
+}`;
+
+    const userContent = [
+      ...imageBlocks,
+      { type: 'text', text:
+        `Analyze ${imageBlocks.length > 1 ? `these ${imageBlocks.length} photos` : 'this photo'} thoroughly and create a Vinted listing. Check EVERY photo for labels, tags, size info, brand logos, damage, etc.${captionCtx}\n\n` +
+        `Return ONLY valid JSON (no markdown, no backticks, no explanation):\n` +
+        `{\n` +
+        `  "title": "searchable title max 60 chars (no ALL CAPS)",\n` +
+        `  "description": "4-6 line description with hashtags (no ALL CAPS)",\n` +
+        `  "suggested_price": <realistic used price in GBP as number>,\n` +
+        `  "brand": "detected brand or null",\n` +
+        `  "condition": "New with tags|New without tags|Very good|Good|Satisfactory",\n` +
+        `  "category_hint": "Section > Category > Subcategory (e.g. Women > Tops > T-shirts)",\n` +
+        `  "color": "primary color from allowed list",\n` +
+        `  "color2": "secondary color or null",\n` +
+        `  "material": "fabric composition or null",\n` +
+        `  "size_hint": "EXACTLY what size label says or null",\n` +
+        `  "gender": "women|men|kids|unisex",\n` +
+        `  "parcel_size": "Small|Medium|Large",\n` +
+        `  "confidence": { "brand": "high|medium|low", "size": "high|medium|low", "color": "high|medium|low" },\n` +
+        `  "style_tags": ["up to 5 relevant style keywords for description"]\n` +
+        `}`
+      }
+    ];
+
+    async function callApi(temperature) {
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 2500,
+          temperature,
+          system: systemPrompt,
+          messages: [{ role: 'user', content: userContent }]
+        })
+      });
+      const data = await resp.json();
+      return data.content?.[0]?.text || '';
+    }
+
+    // First attempt at low temperature; one retry at temp 0 if parse fails.
+    let text = await callApi(0.2);
+    try {
+      return extractJson(text);
+    } catch (e) {
+      console.warn('[TG] analyzeWithAI: first parse failed (' + e.message + '), retrying at temp=0');
+      text = await callApi(0);
+      try {
+        return extractJson(text);
+      } catch (e2) {
+        throw new Error('AI returned no valid JSON: ' + e2.message);
+      }
+    }
+  }
+
+  // Tolerant JSON extractor: handles fenced blocks, prose wrappers, and raw objects.
+  function extractJson(text) {
+    if (!text) throw new Error('empty response');
+    const fenced = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+    const raw = fenced ? fenced[1] : (text.match(/\{[\s\S]*\}/)?.[0] || text);
+    return JSON.parse(raw);
   }
 
   // ──────────────────────────────────────────
@@ -3974,14 +4101,20 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
     return scored.slice(0, 8);
   }
 
-  // Use AI to pick the best category from our list
-  async function aiPickCategory(itemDescription) {
+  // Use AI to pick the best category from our list.
+  // Optional `shortlist`: pre-filtered rows from keyword scoring. When supplied,
+  // the AI chooses from just those rows — much more accurate than a full-catalog scan.
+  async function aiPickCategory(itemDescription, shortlist = null) {
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) return [];
     try {
-      const cats = getCategories();
-      // Cap at 400 to keep prompt small; prefer live catalog when present
-      const catList = cats.slice(0, 400).map(c => `${c.id}: ${c.path || c.title}`).join('\n');
+      const allCats = getCategories();
+      let catList;
+      if (shortlist && shortlist.length) {
+        catList = shortlist.map(c => `${c.id}: ${c.path || c.title}`).join('\n');
+      } else {
+        catList = allCats.slice(0, 400).map(c => `${c.id}: ${c.path || c.title}`).join('\n');
+      }
       const resp = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
@@ -3990,9 +4123,10 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
           'anthropic-version': '2023-06-01'
         },
         body: JSON.stringify({
-          model: 'claude-haiku-4-5-20251001',
+          model: 'claude-sonnet-4-6',
           max_tokens: 200,
-          system: `You are a Vinted category matcher. Given an item description, pick the 3 best matching categories from the list below. Return ONLY a JSON array of category IDs (numbers).\n\nCategories:\n${catList}`,
+          temperature: 0,
+          system: `You are a Vinted category matcher. Given an item description, pick the 3 best matching categories from the list below. Prefer the most specific leaf category that matches the actual item type. Match the correct section (Women/Men/Kids) based on the description. Return ONLY a JSON array of category IDs (numbers), best first.\n\nCategories:\n${catList}`,
           messages: [{ role: 'user', content: `Item: ${itemDescription}` }]
         })
       });
@@ -4000,7 +4134,6 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       const text = data.content?.[0]?.text?.trim() || '';
       const arr = JSON.parse(text.match(/\[[\s\S]*\]/)?.[0] || '[]');
       const ids = arr.filter(id => typeof id === 'number');
-      const allCats = getCategories();
       return ids.map(id => {
         const found = allCats.find(c => c.id === id);
         if (!found) return null;
@@ -4696,7 +4829,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
     return (
       `📤 *Posting to Vinted* — ${escMd2(stage_label || 'Running in your browser')}\n\n` +
       `\\[${bar}\\] ${pct}%\n` +
-      `⏱ ~${escMd2(eta)} remaining\n\n` +
+      `⏱ \\~${escMd2(eta)} remaining\n\n` +
       subtitle
     );
   }
