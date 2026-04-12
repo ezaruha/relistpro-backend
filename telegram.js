@@ -4721,8 +4721,58 @@ EXAMPLE 2 — Men's unbranded grey hoodie, 2 photos (front, inside label showing
     if (!targetMemberId) {
       c.step = 'review';
       return bot.sendMessage(chatId,
-        '⚠️ No Vinted account linked yet.\n\n' +
-        'Log into Vinted in Chrome with the RelistPro extension running, then tap POST again.');
+        '❌ *No Vinted account linked yet.*\n\n' +
+        'To connect:\n' +
+        '1. Open *vinted.co.uk* in Chrome and sign in\n' +
+        '2. Click the RelistPro extension icon → *Sync*\n' +
+        '3. Come back here and tap *POST* again',
+        { parse_mode: 'Markdown' });
+    }
+
+    // ── P6 preflight gate ──
+    // Read-only DB check: is there a stored session, is the extension
+    // polling right now, and are the cookies fresh? No Vinted network
+    // calls from Railway — those are the datacenter-IP signal we killed
+    // in P1. If any layer fails, refuse to enqueue so the post can't
+    // burn the session (or a 400-cooldown on the new account).
+    try {
+      const session = await store.getSession(acct.userId, targetMemberId).catch(() => null);
+      if (!session) {
+        c.step = 'review'; saveChatState(chatId);
+        return bot.sendMessage(chatId,
+          '❌ *No Vinted account linked yet.*\n\n' +
+          'To connect:\n' +
+          '1. Open *vinted.co.uk* in Chrome and sign in\n' +
+          '2. Click the RelistPro extension icon → *Sync*\n' +
+          '3. Come back here and tap *POST* again',
+          { parse_mode: 'Markdown' });
+      }
+
+      const extStatus = await getExtensionStatus(acct.userId).catch(() => ({ alive: false }));
+      if (!extStatus.alive) {
+        c.step = 'review'; saveChatState(chatId);
+        return bot.sendMessage(chatId,
+          '⚠️ *Your RelistPro extension isn\'t online.*\n\n' +
+          'The bot can\'t run the post without the extension polling from Chrome. To fix:\n' +
+          '1. Open *vinted.co.uk* in Chrome\n' +
+          '2. Make sure RelistPro is enabled at chrome://extensions\n' +
+          '3. Click the extension icon → *Sync*\n' +
+          '4. Wait ~60s, then tap *POST* again',
+          { parse_mode: 'Markdown' });
+      }
+
+      const storedMs = session.storedAt ? new Date(session.storedAt).getTime() : 0;
+      if (!storedMs || (Date.now() - storedMs) > 30 * 60 * 1000) {
+        c.step = 'review'; saveChatState(chatId);
+        return bot.sendMessage(chatId,
+          '⚠️ *Your Vinted session is stale* (>30 min old).\n\n' +
+          'Click the RelistPro extension → *Sync* to refresh it, then tap *POST* again. Posting with a stale session risks getting flagged.',
+          { parse_mode: 'Markdown' });
+      }
+    } catch (e) {
+      console.error('[TG] createListing P6 preflight error:', e.message);
+      // Fall through — don't block on preflight bug, let the post proceed
+      // and rely on P3's client-side cooldown to catch a bad session.
     }
 
     let cmdId;
