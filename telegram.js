@@ -1015,25 +1015,17 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     let changed = false;
     for (const acct of c.accounts) {
       if (acct.vintedName) continue;
-      const status = await getExtensionStatus(acct.userId);
-      if (!status.alive) continue;
-      const freshSession = status.sessions.find(s => s.cookiesFresh);
-      if (!freshSession) continue;
-      // Prefer the session's memberId if acct doesn't have one yet
-      if (!acct.memberId && freshSession.memberId) acct.memberId = freshSession.memberId;
-      if (!acct.vintedDomain && freshSession.domain) acct.vintedDomain = freshSession.domain;
       try {
+        // Preferred path: read the name the extension wrote during sync.
         const session = await store.getSession(acct.userId).catch(() => null);
         if (!session) continue;
-        const probe = await vintedFetch(session, '/api/v2/users/' + (acct.memberId || session.memberId || 'self'));
-        if (!probe.ok) continue;
-        const profile = await probe.json().catch(() => ({}));
-        const vintedName = profile?.user?.login || profile?.user?.username || null;
-        if (vintedName && vintedName !== acct.vintedName) {
-          acct.vintedName = vintedName;
+        if (!acct.memberId && session.memberId) acct.memberId = session.memberId;
+        if (!acct.vintedDomain && session.domain) acct.vintedDomain = session.domain;
+        if (session.vintedName && session.vintedName !== acct.vintedName) {
+          acct.vintedName = session.vintedName;
           changed = true;
         }
-      } catch (_) { /* non-fatal — fall back to "_not detected_" */ }
+      } catch (_) { /* non-fatal */ }
     }
     if (changed) {
       try { await saveChatAccounts(chatId, c.accounts, c.activeIdx ?? 0); } catch (_) {}
@@ -1063,7 +1055,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     }
     try {
       const r = await db.query(`
-        SELECT s.member_id, s.domain, s.stored_at,
+        SELECT s.member_id, s.domain, s.stored_at, s.vinted_name,
                (u.active_member_id = s.member_id) AS is_active,
                u.plan
           FROM rp_sessions s
@@ -1078,22 +1070,9 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         domain: row.domain,
         active: !!row.is_active,
         storedAt: row.stored_at,
-        vintedName: null,
+        vintedName: row.vinted_name || null,
         cookiesFresh: row.stored_at ? (Date.now() - new Date(row.stored_at).getTime() < 30 * 60 * 1000) : false,
       }));
-      // Lazy-resolve display names via existing hydration cache — cheap
-      // /users/:memberId probe reusing the per-member session.
-      for (const a of accounts) {
-        if (!a.memberId) continue;
-        try {
-          const sess = await store.getSession(acct.userId, a.memberId);
-          if (!sess) continue;
-          const probe = await vintedFetch(sess, '/api/v2/users/' + a.memberId);
-          if (!probe.ok) continue;
-          const profile = await probe.json().catch(() => ({}));
-          a.vintedName = profile?.user?.login || profile?.user?.username || null;
-        } catch { /* best-effort */ }
-      }
       const data = { accounts, plan, cap };
       _vintedAcctCache.set(chatId, { at: Date.now(), data });
       return data;
@@ -1365,6 +1344,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       rows.push([{ text: '🔄 Switch Vinted account', callback_data: 'menu:switch' }]);
     }
     rows.push([{ text: '🛍️ Manage Vinted accounts', callback_data: 'menu:vmanage' }]);
+    rows.push([{ text: '🔁 Switch RelistPro account', callback_data: 'menu:switchrp' }]);
     rows.push([{ text: '👋 Log out RelistPro', callback_data: 'menu:logout' }]);
     rows.push([{ text: '🧹 Clean up chat', callback_data: 'menu:clean' }]);
 
@@ -1466,48 +1446,31 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         return bot.sendMessage(chatId, 'No Vinted session found.\n\nOpen Vinted in your Chrome browser, click the RelistPro extension and sync first. Then come back and /login again.');
       }
 
-      // Fetch Vinted profile to show the real Vinted username
-      let vintedName = null;
-      if (session.memberId) {
-        try {
-          // Try refreshing session first to ensure fresh cookies
-          const freshSession = await refreshVintedSession(session, user.id);
-          const profileResp = await vintedFetch(freshSession, `/api/v2/users/${session.memberId}`);
-          if (profileResp.ok) {
-            const profileData = await profileResp.json();
-            vintedName = profileData.user?.login || profileData.user?.username || null;
-          }
-        } catch (e) {
-          console.log('[TG] Profile fetch failed:', e.message);
-        }
-      }
+      // Vinted display name comes from rp_sessions.vinted_name, written by
+      // the extension during sync from the user's own IP. No Railway→Vinted
+      // probe here — that was the P1 datacenter-IP signal we killed.
+      const vintedName = session.vintedName || null;
 
-      // Check if already linked
-      const existing = c.accounts.findIndex(a => a.username === username);
-      if (existing >= 0) {
-        c.accounts[existing].token = user.token;
-        c.accounts[existing].userId = user.id;
-        c.accounts[existing].vintedName = vintedName || c.accounts[existing].vintedName;
-        c.accounts[existing].vintedDomain = session.domain;
-        c.accounts[existing].memberId = session.memberId;
-        c.activeIdx = existing;
-      } else {
-        c.accounts.push({ userId: user.id, token: user.token, username: user.username, vintedName, vintedDomain: session.domain, memberId: session.memberId });
-        c.activeIdx = c.accounts.length - 1;
-      }
+      // Clear any stale binding on the new user's row, then replace the
+      // chat's account list with just this one. Matches the "one chat =
+      // one RelistPro login" invariant (see ensureLoaded collapse).
+      c.accounts = [{ userId: user.id, token: user.token, username: user.username, vintedName, vintedDomain: session.domain, memberId: session.memberId }];
+      c.activeIdx = 0;
       c.step = 'idle';
       await saveChatState(chatId);
-      // Store telegram chat_id on the user record for dashboard linking
-      try { await db.query('UPDATE rp_users SET telegram_chat_id=$1,telegram_username=$2,updated_at=NOW() WHERE id=$3', [String(chatId), msg.from?.username||null, user.id]); } catch(e) { /* non-critical */ }
-      console.log(`[TG] Login complete: chat=${chatId} accounts=${c.accounts.length} idx=${c.activeIdx} user=${username}`);
+      // Store telegram chat_id on the user record for dashboard linking.
+      // First clear any other user currently bound to this chat so the
+      // ensureLoaded fallback doesn't resurrect the previous login.
+      try {
+        await db.query('UPDATE rp_users SET telegram_chat_id=NULL WHERE telegram_chat_id=$1 AND id<>$2', [String(chatId), user.id]);
+        await db.query('UPDATE rp_users SET telegram_chat_id=$1,updated_at=NOW() WHERE id=$2', [String(chatId), user.id]);
+      } catch(e) { /* non-critical */ }
 
-      const vintedDisplay = vintedName || '_not detected_';
-      const countMsg = c.accounts.length > 1 ? `\n${c.accounts.length} accounts linked\\. Use /switch to change\\.` : '';
+      const vintedDisplay = vintedName || '_not detected yet — sync RelistPro from Chrome_';
       bot.sendMessage(chatId,
         `✅ *Logged in*\n\n` +
         `👤 RelistPro: *${esc(username)}*\n` +
-        `🛍️ Vinted: *${esc(vintedDisplay)}* \\(${esc(session.domain)}\\)\n` +
-        `${countMsg}\n` +
+        `🛍️ Vinted: *${esc(vintedDisplay)}* \\(${esc(session.domain)}\\)\n\n` +
         `📸 Send me photos of an item to list it\\!`,
         { parse_mode: 'MarkdownV2' });
     } catch (e) {
@@ -1597,6 +1560,9 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     ensureMulti(c);
     if (!c.accounts.length) return bot.sendMessage(chatId, 'Not connected.');
     const removed = c.accounts[0];
+    if (db && db.hasDb()) {
+      try { await db.query('UPDATE rp_users SET telegram_chat_id=NULL WHERE id=$1', [removed.userId]); } catch (_) {}
+    }
     c.accounts = [];
     c.activeIdx = -1;
     c.step = 'idle';
@@ -3246,9 +3212,12 @@ EXAMPLE 2 — Men's unbranded grey hoodie, 2 photos (front, inside label showing
         return sendSetupGuide(chatId);
       }
       const removed = c.accounts[0];
-      // Multi-Vinted: one chat tracks one RelistPro login. /logout clears
-      // the chat binding only — the Vinted sessions stored under that
-      // rp_users row are untouched and re-hydrate on next /login.
+      // Clear the rp_users.telegram_chat_id anchor before clearing chat
+      // state — otherwise ensureLoaded's fallback recovery silently
+      // re-links the old user on the next /start.
+      if (db && db.hasDb()) {
+        try { await db.query('UPDATE rp_users SET telegram_chat_id=NULL WHERE id=$1', [removed.userId]); } catch (_) {}
+      }
       c.accounts = [];
       c.activeIdx = -1;
       c.step = 'idle';
@@ -3257,6 +3226,25 @@ EXAMPLE 2 — Men's unbranded grey hoodie, 2 photos (front, inside label showing
       await bot.sendMessage(chatId, `👋 Logged out of *${esc(removed.username)}*\\.\n\nUse /login to connect a different RelistPro account\\.`,
         { parse_mode: 'MarkdownV2' });
       return sendSetupGuide(chatId);
+    }
+
+    if (data === 'menu:switchrp') {
+      ensureMulti(c);
+      // Unbind the current account from this chat so the next doLogin
+      // starts fresh. Mirrors menu:logout — clears telegram_chat_id so
+      // ensureLoaded's fallback doesn't silently rehydrate the old user.
+      if (c.accounts?.length && db && db.hasDb()) {
+        try { await db.query('UPDATE rp_users SET telegram_chat_id=NULL WHERE id=$1', [c.accounts[0].userId]); } catch (_) {}
+      }
+      c.accounts = [];
+      c.activeIdx = -1;
+      c.step = 'login_username';
+      await saveChatAccounts(chatId, c.accounts, c.activeIdx);
+      invalidateVintedAcctCache(chatId);
+      return bot.sendMessage(chatId,
+        '🔁 *Switching RelistPro account*\n\n' +
+        'What\'s the username of the account you want to log into?',
+        { parse_mode: 'Markdown' });
     }
 
     if (data === 'menu:clean') {

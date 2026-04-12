@@ -166,6 +166,9 @@ async function initSchema() {
         ALTER TABLE rp_users ADD COLUMN IF NOT EXISTS referral_rewards INTEGER DEFAULT 0;
         -- Multi-Vinted-account support: which Vinted account is the current target for this RP user
         ALTER TABLE rp_users ADD COLUMN IF NOT EXISTS active_member_id TEXT;
+        -- Vinted display name, written by the extension during sync so the
+        -- Telegram bot doesn't have to probe Vinted from Railway's datacenter IP.
+        ALTER TABLE rp_sessions ADD COLUMN IF NOT EXISTS vinted_name TEXT;
       EXCEPTION WHEN OTHERS THEN NULL;
       END $$;
 

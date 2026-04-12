@@ -154,7 +154,7 @@ const store = {
     if (db.hasDb()) {
       if (memberId) {
         const r = await db.query('SELECT * FROM rp_sessions WHERE user_id=$1 AND member_id=$2', [userId, memberId]);
-        return r.rows[0] ? { csrf:r.rows[0].csrf, cookies:r.rows[0].cookies, domain:r.rows[0].domain, memberId:r.rows[0].member_id, storedAt:r.rows[0].stored_at } : null;
+        return r.rows[0] ? { csrf:r.rows[0].csrf, cookies:r.rows[0].cookies, domain:r.rows[0].domain, memberId:r.rows[0].member_id, storedAt:r.rows[0].stored_at, vintedName:r.rows[0].vinted_name } : null;
       }
       // No memberId — return the user's active Vinted row, falling back to
       // the most recently stored row if no active pointer is set.
@@ -166,7 +166,7 @@ const store = {
          ORDER BY (u.active_member_id IS NOT NULL AND u.active_member_id = s.member_id) DESC,
                   s.stored_at DESC
          LIMIT 1`, [userId]);
-      return r.rows[0] ? { csrf:r.rows[0].csrf, cookies:r.rows[0].cookies, domain:r.rows[0].domain, memberId:r.rows[0].member_id, storedAt:r.rows[0].stored_at } : null;
+      return r.rows[0] ? { csrf:r.rows[0].csrf, cookies:r.rows[0].cookies, domain:r.rows[0].domain, memberId:r.rows[0].member_id, storedAt:r.rows[0].stored_at, vintedName:r.rows[0].vinted_name } : null;
     }
     return sessions[userId] || null;
   },
@@ -181,9 +181,10 @@ const store = {
     return r.rows.map(row => ({
       csrf: row.csrf, cookies: row.cookies, domain: row.domain,
       memberId: row.member_id, storedAt: row.stored_at, active: !!row.is_active,
+      vintedName: row.vinted_name,
     }));
   },
-  async setSession(userId, { csrf, cookies, domain, memberId }) {
+  async setSession(userId, { csrf, cookies, domain, memberId, vintedName }) {
     if (!memberId) throw new Error('memberId required for setSession');
     if (db.hasDb()) {
       // Cap enforcement: count existing Vinted sessions on this RP user.
@@ -202,14 +203,15 @@ const store = {
         throw err;
       }
       await db.query(
-        `INSERT INTO rp_sessions (user_id, member_id, csrf, cookies, domain, stored_at)
-         VALUES ($1, $2, $3, $4, $5, NOW())
+        `INSERT INTO rp_sessions (user_id, member_id, csrf, cookies, domain, vinted_name, stored_at)
+         VALUES ($1, $2, $3, $4, $5, $6, NOW())
          ON CONFLICT (user_id, member_id) DO UPDATE
             SET csrf = EXCLUDED.csrf,
                 cookies = EXCLUDED.cookies,
                 domain = EXCLUDED.domain,
+                vinted_name = COALESCE(EXCLUDED.vinted_name, rp_sessions.vinted_name),
                 stored_at = NOW()`,
-        [userId, memberId, csrf, cookies, domain || 'www.vinted.co.uk']
+        [userId, memberId, csrf, cookies, domain || 'www.vinted.co.uk', vintedName || null]
       );
       // First linked Vinted auto-becomes active; later writes don't disturb the active pointer.
       await db.query(
@@ -217,7 +219,7 @@ const store = {
         [userId, memberId]
       );
     } else {
-      sessions[userId] = { csrf, cookies, domain:domain||'www.vinted.co.uk', memberId, storedAt:new Date().toISOString() }; saveData();
+      sessions[userId] = { csrf, cookies, domain:domain||'www.vinted.co.uk', memberId, vintedName:vintedName||null, storedAt:new Date().toISOString() }; saveData();
     }
   },
   async getPendingActivations(userId) {
@@ -449,10 +451,10 @@ app.post('/api/auth/reset-password', async (req, res) => {
 
 // ═══ SESSION ═══
 app.post('/api/session/store', auth, async (req, res) => {
-  const { csrf, cookies, domain, memberId } = req.body;
+  const { csrf, cookies, domain, memberId, vintedName } = req.body;
   if (!memberId) return res.status(400).json({ error:'memberId required' });
   try {
-    await store.setSession(req.user.id, { csrf, cookies, domain, memberId });
+    await store.setSession(req.user.id, { csrf, cookies, domain, memberId, vintedName });
     touchExtensionPoll(req.user.id);
     console.log(`[RP] Session stored for ${req.user.username} (member ${memberId})`);
     res.json({ ok:true });
