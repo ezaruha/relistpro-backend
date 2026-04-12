@@ -126,7 +126,9 @@ EXAMPLE 2 — Men's unbranded grey hoodie, 2 photos (front, inside label showing
     }
   ];
 
-  async function callApi(temperature) {
+  async function callApi(temperature, usePrefill) {
+    const msgs = [{ role: 'user', content: userContent }];
+    if (usePrefill) msgs.push({ role: 'assistant', content: '{' });
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -139,23 +141,30 @@ EXAMPLE 2 — Men's unbranded grey hoodie, 2 photos (front, inside label showing
         max_tokens: 1000,
         temperature,
         system: systemPrompt,
-        messages: [
-          { role: 'user', content: userContent },
-          { role: 'assistant', content: '{' }
-        ]
+        messages: msgs
       })
     });
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '');
+      throw new Error(`API ${resp.status}: ${errText.slice(0, 200)}`);
+    }
     const data = await resp.json();
     const raw = data.content?.[0]?.text || '';
-    return '{' + raw;
+    return usePrefill ? '{' + raw : raw;
   }
 
-  const text = await callApi(0.2);
+  let text;
   try {
+    text = await callApi(0.2, true);
     return extractJson(text);
   } catch (e) {
-    console.warn('[TG] analyzeWithAI: parse failed:', e.message);
-    throw new Error('AI returned no valid JSON: ' + e.message);
+    console.warn('[TG] analyzeWithAI: prefill attempt failed:', e.message, '— retrying without prefill');
+  }
+  text = await callApi(0, false);
+  try {
+    return extractJson(text);
+  } catch (e2) {
+    throw new Error('AI returned no valid JSON: ' + e2.message);
   }
 }
 
