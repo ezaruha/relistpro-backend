@@ -43,8 +43,8 @@ function saveData() {
 // repostsPerMonth: hard cap on reposts per calendar month (null = unlimited).
 // Free is generous enough to try everything; Pro removes all caps.
 const PLANS = {
-  free:    { name:'Free',    price:0,    itemLimit:10,   scheduleLimit:0,    repostsPerMonth:5,    backupLimit:10,   vintedAccountCap:1,        autoReply:false, telegramPosting:false, analyticsMonths:1,  photoEditing:'basic',
-             features:['Up to 10 active items','5 reposts / month','No schedules','10 backups','Basic photo editing','1 Vinted account'] },
+  free:    { name:'Free',    price:0,    itemLimit:10,   scheduleLimit:0,    repostsPerMonth:5,    backupLimit:10,   vintedAccountCap:3,        autoReply:false, telegramPosting:false, analyticsMonths:1,  photoEditing:'basic',
+             features:['Up to 10 active items','5 reposts / month','No schedules','10 backups','Basic photo editing','3 Vinted accounts'] },
   starter: { name:'Starter', price:4.99, itemLimit:50,   scheduleLimit:2,    repostsPerMonth:30,   backupLimit:50,   vintedAccountCap:3,        autoReply:false, telegramPosting:false, analyticsMonths:3,  photoEditing:'full',
              features:['Up to 50 active items','30 reposts / month','2 schedules','50 backups','Full photo editing','3 months analytics','3 Vinted accounts'] },
   pro:     { name:'Pro',     price:9.99, itemLimit:null, scheduleLimit:null, repostsPerMonth:null, backupLimit:null, vintedAccountCap:Infinity, autoReply:true,  telegramPosting:true,  analyticsMonths:24, photoEditing:'full',
@@ -190,11 +190,12 @@ const store = {
       // Cap enforcement: count existing Vinted sessions on this RP user.
       // If we're updating an already-linked memberId, no cap check.
       const [userRow, existing] = await Promise.all([
-        db.query('SELECT plan FROM rp_users WHERE id=$1', [userId]),
+        db.query('SELECT plan, username FROM rp_users WHERE id=$1', [userId]),
         db.query('SELECT member_id FROM rp_sessions WHERE user_id=$1', [userId]),
       ]);
       const plan = userRow.rows[0]?.plan || 'free';
-      const cap = PLANS[plan]?.vintedAccountCap ?? 1;
+      const isAdmin = (userRow.rows[0]?.username || '').toLowerCase() === 'zaruha';
+      const cap = isAdmin ? Infinity : (PLANS[plan]?.vintedAccountCap ?? 1);
       const alreadyLinked = existing.rows.some(r => r.member_id === memberId);
       if (!alreadyLinked && existing.rows.length >= cap) {
         const err = new Error('VINTED_ACCOUNT_CAP');

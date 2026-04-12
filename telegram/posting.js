@@ -63,8 +63,8 @@ async function fetchVintedAccounts(chatId) {
        WHERE s.user_id = $1
        ORDER BY s.stored_at DESC`, [acct.userId]);
     const plan = r.rows[0]?.plan || 'free';
-    const PLANS = { free: 1, starter: 3, pro: Infinity };
-    const cap = PLANS[plan] ?? 1;
+    const PLANS = { free: 3, starter: 3, pro: Infinity };
+    const cap = PLANS[plan] ?? 3;
     const accounts = r.rows.map(row => ({
       memberId: row.member_id,
       domain: row.domain,
