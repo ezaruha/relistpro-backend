@@ -2082,6 +2082,20 @@ app.get('/api/commands/pending', auth, async (req, res) => {
   if (!db.hasDb()) return res.status(204).end();
   await touchExtensionPoll(req.user.id);
   try {
+    // Auto-fail stuck commands so the ticker can show proper errors
+    await db.query(
+      `UPDATE rp_commands SET status='failed', result='{"error":"Extension did not complete in time — make sure Chrome is open with RelistPro active"}',
+       completed_at=NOW(), updated_at=NOW()
+       WHERE user_id=$1 AND status='claimed' AND claimed_at < NOW() - INTERVAL '15 minutes'`,
+      [req.user.id]
+    ).catch(() => {});
+    await db.query(
+      `UPDATE rp_commands SET status='failed', result='{"error":"Command was not picked up by Chrome extension — make sure Chrome is open with RelistPro active"}',
+       completed_at=NOW(), updated_at=NOW()
+       WHERE user_id=$1 AND status='queued' AND created_at < NOW() - INTERVAL '25 minutes'`,
+      [req.user.id]
+    ).catch(() => {});
+
     const r = await db.query(
       `SELECT id, type, target_member_id, payload, eta_ms, created_at
          FROM rp_commands

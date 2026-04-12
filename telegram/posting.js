@@ -328,8 +328,10 @@ async function createListing(chatId) {
     }
   } catch (e) {
     console.error('[TG] createListing P6 preflight error:', e.message);
-    // Fall through — don't block on preflight bug, let the post proceed
-    // and rely on P3's client-side cooldown to catch a bad session.
+    c.step = 'review'; saveChatState(chatId);
+    return bot.sendMessage(chatId,
+      '\u274C Could not verify your browser connection: ' + e.message + '\n\nMake sure Chrome is open with RelistPro active, then tap POST again.'
+    );
   }
 
   let cmdId;
@@ -417,9 +419,31 @@ async function createListing(chatId) {
 function startCommandTicker(chatId, cmdId, msgId, acct) {
   const startedAt = Date.now();
   let lastText = '';
-  let tenMinNagSent = false;
+  let fiveMinNagSent = false;
+  let fifteenMinNagSent = false;
+  const MAX_TICKER_MS = 20 * 60 * 1000; // 20 minutes
   const intervalId = setInterval(async () => {
     try {
+      // Hard timeout — auto-fail if extension never completed
+      if (Date.now() - startedAt > MAX_TICKER_MS) {
+        clearInterval(intervalId);
+        const timeoutErr = { error: 'Timed out — Chrome extension did not complete the post within 20 minutes. Make sure Chrome is open with the RelistPro extension active.' };
+        await db.query(
+          `UPDATE rp_commands SET status='failed', result=$3, completed_at=NOW(), updated_at=NOW()
+           WHERE id=$1 AND user_id=$2 AND status NOT IN ('completed','failed','cancelled')`,
+          [cmdId, acct.userId, timeoutErr]
+        ).catch(() => {});
+        const timeoutText = renderFinal({ status: 'failed', result: timeoutErr }, MAX_TICKER_MS);
+        await bot.editMessageText(timeoutText, {
+          chat_id: chatId, message_id: msgId, parse_mode: 'MarkdownV2',
+          reply_markup: { inline_keyboard: [[{ text: '\u{1F501} Retry', callback_data: `cmd:retry:${cmdId}` }]] },
+        }).catch(() => {});
+        bot.sendMessage(chatId,
+          '\u274C Post timed out after 20 minutes.\n\nMake sure Chrome is open with the RelistPro extension active on a Vinted page, then try again.'
+        ).catch(() => {});
+        return;
+      }
+
       const r = await db.query(
         `SELECT id, status, stage, stage_label, progress_pct, eta_ms, result, created_at
            FROM rp_commands WHERE id = $1 AND user_id = $2`,
@@ -479,13 +503,23 @@ function startCommandTicker(chatId, cmdId, msgId, acct) {
       const ageMs = Date.now() - new Date(cmd.created_at).getTime();
       const stuckInQueue = cmd.status === 'queued' && ageMs > 45000;
 
-      // One-time nag at 10 min stuck — the user's browser is genuinely offline.
-      if (cmd.status === 'queued' && ageMs > 10 * 60 * 1000 && !tenMinNagSent) {
-        tenMinNagSent = true;
+      // Nag at 5 min — actionable reminder
+      if (cmd.status === 'queued' && ageMs > 5 * 60 * 1000 && !fiveMinNagSent) {
+        fiveMinNagSent = true;
         bot.sendMessage(chatId,
-          '⏳ Still waiting for Chrome to pick up this post.\n\n' +
-          'Open your browser and make sure the RelistPro extension is active, ' +
-          'or cancel this post with ❌ Cancel above and try again once Chrome is running.'
+          '\u23F3 Still waiting for Chrome to pick up this post (5 min).\n\n' +
+          '1. Open Chrome on your computer\n' +
+          '2. Go to any Vinted page\n' +
+          '3. Make sure the RelistPro extension is active\n\n' +
+          'The post will start automatically once Chrome connects.'
+        ).catch(() => {});
+      }
+      // Last warning at 15 min — will timeout at 20
+      if (cmd.status === 'queued' && ageMs > 15 * 60 * 1000 && !fifteenMinNagSent) {
+        fifteenMinNagSent = true;
+        bot.sendMessage(chatId,
+          '\u26A0\uFE0F This post will time out in 5 minutes if Chrome doesn\'t connect.\n\n' +
+          'Cancel and try again later if your computer isn\'t available.'
         ).catch(() => {});
       }
 
