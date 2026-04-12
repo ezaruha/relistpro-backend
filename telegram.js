@@ -631,7 +631,14 @@ const CLOTHING_CATEGORY_IDS = new Set(
 let _liveCatalogCache = null;
 let _catalogFetchPromise = null;
 let _catalogFetchedAt = 0;
+let _liveCatalogBackoffUntil = 0;
 const CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
+
+// Model used for vision analysis + AI category picker. Set ANALYSIS_MODEL on
+// Railway to flip between Sonnet 4.6 (default, best quality) and
+// claude-haiku-4-5-20251001 (cheap but weaker label reading). All the
+// prompt/parse improvements (few-shots, temp 0.2, retry) apply to both.
+const ANALYSIS_MODEL = process.env.ANALYSIS_MODEL || 'claude-sonnet-4-6';
 
 // ── Chat sessions (in-memory, keyed by chatId) ──
 const chats = new Map();
@@ -2726,7 +2733,7 @@ EXAMPLE 2 — Men's unbranded grey hoodie, 2 photos (front, inside label showing
           'anthropic-version': '2023-06-01'
         },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
+          model: ANALYSIS_MODEL,
           max_tokens: 2500,
           temperature,
           system: systemPrompt,
@@ -4123,7 +4130,7 @@ EXAMPLE 2 — Men's unbranded grey hoodie, 2 photos (front, inside label showing
           'anthropic-version': '2023-06-01'
         },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
+          model: ANALYSIS_MODEL,
           max_tokens: 200,
           temperature: 0,
           system: `You are a Vinted category matcher. Given an item description, pick the 3 best matching categories from the list below. Prefer the most specific leaf category that matches the actual item type. Match the correct section (Women/Men/Kids) based on the description. Return ONLY a JSON array of category IDs (numbers), best first.\n\nCategories:\n${catList}`,
@@ -4670,6 +4677,9 @@ EXAMPLE 2 — Men's unbranded grey hoodie, 2 photos (front, inside label showing
       console.log('[TG] createListing: description too short, falling back to title');
       draftSpec.description = draftSpec.title;
     }
+    // Diagnostic — if Vinted rejects a draft with <5 chars, Railway logs make
+    // it obvious whether the backend side of the field is correct.
+    console.log(`[TG] enqueue draft: title="${draftSpec.title}" (${draftSpec.title?.length || 0}), description length=${draftSpec.description?.length || 0}`);
 
     const photoCount = c.photos.length;
     const eta_ms = estimatePostEta(photoCount);
@@ -4785,16 +4795,17 @@ EXAMPLE 2 — Men's unbranded grey hoodie, 2 photos (front, inside label showing
   }
 
   // Per-stage midpoints in ms, mirroring content.js executePostCommand.
+  // Numbers match the halved linger ranges in extension v4.9+.
   function estimatePostEta(photoCount) {
-    const warming = 7500;
+    const warming = 4500;
     const perPhoto = 3500;
-    const betweenPhoto = 3500 * Math.max(0, photoCount - 1);
-    const reviewPhotos = 14000;
-    const title = 30000;
-    const desc = 40000;
-    const details = 60000;
-    const finalReview = 82500;
-    const prePublish = 10000;
+    const betweenPhoto = 1750 * Math.max(0, photoCount - 1);
+    const reviewPhotos = 7000;
+    const title = 14000;
+    const desc = 17500;
+    const details = 25000;
+    const finalReview = 35000;
+    const prePublish = 5500;
     const publish = 2250;
     return warming + perPhoto * photoCount + betweenPhoto +
            reviewPhotos + title + desc + details + finalReview + prePublish + publish;
@@ -5490,9 +5501,12 @@ EXAMPLE 2 — Men's unbranded grey hoodie, 2 photos (front, inside label showing
     return false;
   }
 
-  // Build title for posting — append size for clothing, normalize case
+  // Build title for posting — append size for clothing, normalize case.
+  // 'title' mode (Title Case every word) not 'sentence', because Vinted's
+  // too-many-capitals validator rejects anything >~40% uppercase letters
+  // and the sentence mode only kicks in when the input is already >50% upper.
   function titleWithSize(L) {
-    let t = normalizeText(L.title, 'sentence');
+    let t = normalizeText(L.title, 'title');
     const sz = L.size_name;
     const hasValidSize = sz && sz !== 'N/A' && sz !== 'Not set' && sz !== '';
     if (hasValidSize && isClothingCategory(L.catalog_id)) {
@@ -5565,8 +5579,22 @@ EXAMPLE 2 — Men's unbranded grey hoodie, 2 photos (front, inside label showing
 
   async function ensureLiveCatalog(session) {
     if (_liveCatalogCache) return _liveCatalogCache;
+    // Negative cache: Vinted's catalog endpoint has been 404ing for a while.
+    // Back off for 1h after a failure instead of spamming a dead URL on
+    // every photo analysis (~1–2s latency + log noise per listing).
+    if (Date.now() < _liveCatalogBackoffUntil) return null;
     if (!_catalogFetchPromise) {
-      _catalogFetchPromise = fetchLiveCatalog(session).finally(() => { _catalogFetchPromise = null; });
+      _catalogFetchPromise = fetchLiveCatalog(session)
+        .then(r => {
+          if (!r) _liveCatalogBackoffUntil = Date.now() + 60 * 60 * 1000;
+          return r;
+        })
+        .catch(e => {
+          _liveCatalogBackoffUntil = Date.now() + 60 * 60 * 1000;
+          console.warn('[TG] live catalog fetch failed, backing off 1h:', e.message);
+          return null;
+        })
+        .finally(() => { _catalogFetchPromise = null; });
     }
     return _catalogFetchPromise;
   }
