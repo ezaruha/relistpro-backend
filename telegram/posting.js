@@ -116,7 +116,7 @@ async function getExtensionStatus(userId) {
     const sessions = s.rows.map(r => ({
       memberId: r.member_id,
       domain: r.domain,
-      cookiesFresh: r.stored_at ? (Date.now() - Date.parse(r.stored_at) < 30 * 60 * 1000) : false,
+      cookiesFresh: r.stored_at ? (Date.now() - Date.parse(r.stored_at) < 4 * 60 * 60 * 1000) : false,
     }));
     const data = { alive, lastPollMsAgo: lastMs ? Date.now() - lastMs : null, sessions };
     _extStatusCache.set(userId, { at: Date.now(), data });
@@ -326,11 +326,12 @@ async function createListing(chatId) {
     }
 
     const storedMs = session.storedAt ? new Date(session.storedAt).getTime() : 0;
-    if (!storedMs || (Date.now() - storedMs) > 30 * 60 * 1000) {
+    const sessionAgeMs = storedMs ? Date.now() - storedMs : Infinity;
+    if (sessionAgeMs > 4 * 60 * 60 * 1000) {
       c.step = 'review'; saveChatState(chatId);
       return bot.sendMessage(chatId,
-        '⚠️ *Your Vinted session is stale* (>30 min old).\n\n' +
-        'Click the RelistPro extension → *Sync* to refresh it, then tap *POST* again. Posting with a stale session risks getting flagged.',
+        '⚠️ *Your Vinted session is old* (>4 hours).\n\n' +
+        'Open Chrome with the RelistPro extension running, then tap *POST* again. The extension auto-syncs when active.',
         { parse_mode: 'Markdown' });
     }
   } catch (e) {
