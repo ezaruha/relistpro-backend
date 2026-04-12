@@ -674,11 +674,23 @@ function ensureMulti(c) {
 // ═══ MAIN INIT ═══
 module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app, db }) {
 
+  // Kill-switch for ALL backend → Vinted HTTP calls. When set to '1' on
+  // Railway, refreshVintedSession / performVintedRefresh / ensureFreshSession
+  // return the stored session unchanged and never touch Vinted. All session
+  // rotation then happens from the user's residential IP via the Chrome
+  // extension's reconcileCookies loop, which closes the datacenter-IP
+  // signal path that Vinted's fraud pipeline treats as high-risk.
+  const DISABLE_BACKEND_VINTED = process.env.DISABLE_BACKEND_VINTED === '1';
+  if (DISABLE_BACKEND_VINTED) {
+    console.log('[TG] DISABLE_BACKEND_VINTED=1 — backend will not call Vinted directly; extension handles sessions');
+  }
+
   // ── Read-only session "refresh": re-derive CSRF only, never mutate cookies ──
   // Used by /login, /status, and any non-post caller. Does NOT call
   // /web/api/auth/refresh (that's performVintedRefresh below), so it can
   // never invalidate the user's browser session.
   async function refreshVintedSession(session, userId) {
+    if (DISABLE_BACKEND_VINTED) return session;
     const domain = session.domain || 'www.vinted.co.uk';
     try {
       const pageResp = await fetch(`https://${domain}/`, {
@@ -706,6 +718,10 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
   // which reads the rotated tokens from /api/session/get on its next wake
   // and writes them back into local chrome.cookies.
   async function performVintedRefresh(session, userId) {
+    if (DISABLE_BACKEND_VINTED) {
+      console.log(`[TG] performVintedRefresh skipped (DISABLE_BACKEND_VINTED) for user ${userId}`);
+      return session;
+    }
     const domain = session.domain || 'www.vinted.co.uk';
     const resp = await fetch(`https://${domain}/web/api/auth/refresh`, {
       method: 'POST',
@@ -756,6 +772,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
   // throws SESSION_EXPIRED if the refresh attempt also fails. Never called
   // speculatively — only from the post path.
   async function ensureFreshSession(session, userId) {
+    if (DISABLE_BACKEND_VINTED) return session;
     try {
       const probe = await vintedFetch(session, '/api/v2/users/' + (session.memberId || 'self'));
       if (probe.ok) return session;
@@ -1756,10 +1773,22 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     try {
       console.log(`[TG] Downloading photo file_id=${photo.file_id} mid=${msg.message_id}`);
       // Use bot.downloadFile which uses the library's built-in HTTP client
-      // (fetch() fails on Railway for Telegram file URLs)
+      // (fetch() fails on Railway for Telegram file URLs). EFATAL errors on
+      // Railway are usually transient network blips — retry 3x with backoff.
       const os = require('os');
       const fs = require('fs');
-      const filePath = await bot.downloadFile(photo.file_id, os.tmpdir());
+      let filePath, lastErr;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          filePath = await bot.downloadFile(photo.file_id, os.tmpdir());
+          break;
+        } catch (e) {
+          lastErr = e;
+          console.warn(`[TG] photo download attempt ${attempt}/3 failed: ${e.message}`);
+          if (attempt < 3) await new Promise(r => setTimeout(r, attempt * 500));
+        }
+      }
+      if (!filePath) throw lastErr || new Error('download failed');
       const buffer = fs.readFileSync(filePath);
       try { fs.unlinkSync(filePath); } catch (_) {}
       if (!buffer.length) throw new Error('Empty file');
