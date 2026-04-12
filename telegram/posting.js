@@ -138,24 +138,16 @@ function isAdminAccount(c) {
 
 // ─── Progress rendering ─────────────────────────────────────────────
 
-function renderProgress({ stage_label, progress_pct, eta_ms, stuckInQueue, elapsed_ms, total_ms }) {
-  // If the extension hasn't reported stage progress yet, synthesise a bar
-  // from local elapsed / total so the user sees the bar filling up instead
-  // of a frozen 0% next to a counting-down timer (which looks broken).
-  let pct = Math.max(0, Math.min(100, progress_pct || 0));
-  if (pct === 0 && total_ms && elapsed_ms != null) {
-    pct = Math.max(0, Math.min(99, Math.round((elapsed_ms / total_ms) * 100)));
-  }
-  const filled = Math.round(pct / 5);
-  const bar = '█'.repeat(filled) + '░'.repeat(20 - filled);
+function renderProgress({ stage_label, eta_ms, stuckInQueue, elapsed_ms }) {
+  const elapsed = fmtDur(elapsed_ms || 0);
   const eta = fmtDur(eta_ms || 0);
   const subtitle = stuckInQueue
     ? '_⏳ Waiting for Chrome to pick this up\\. Open a Vinted tab if your browser is asleep\\._'
-    : '_💡 Send more photos now to queue another listing — they post one after another\\._';
+    : '_💡 Send more photos now to queue another listing\\._';
   return (
-    `📤 *Posting to Vinted* — ${escMd2(stage_label || 'Running in your browser')}\n\n` +
-    `\\[${bar}\\] ${pct}%\n` +
-    `⏱ \\~${escMd2(eta)} remaining\n\n` +
+    `📤 *Posting to Vinted*\n\n` +
+    `${escMd2(stage_label || 'Running in your browser')}\n` +
+    `⏱ ${escMd2(elapsed)} elapsed · \\~${escMd2(eta)} remaining\n\n` +
     subtitle
   );
 }
@@ -370,11 +362,9 @@ async function createListing(chatId) {
 
   // Initial status message with cancel button
   const initialText = renderProgress({
-    stage_label: 'Running in your browser',
-    progress_pct: 0,
+    stage_label: 'Queued — waiting for Chrome',
     eta_ms,
     elapsed_ms: 0,
-    total_ms: eta_ms,
   });
   let statusMsg;
   try {
@@ -508,11 +498,9 @@ function startCommandTicker(chatId, cmdId, msgId, acct) {
 
       const text = renderProgress({
         stage_label: cmd.stage_label || (stuckInQueue ? 'Waiting for Chrome' : 'Running in your browser'),
-        progress_pct: cmd.progress_pct || 0,
         eta_ms: remain,
         stuckInQueue,
         elapsed_ms: elapsed,
-        total_ms: totalEta,
       });
       if (text === lastText) return; // nothing changed — skip the edit
       lastText = text;
