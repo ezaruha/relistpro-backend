@@ -2331,7 +2331,9 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       delete c._dupEdit;
       c.listing = {
         title: analysis.title || 'Untitled item',
-        description: analysis.description || '',
+        description: (analysis.description && analysis.description.trim().length >= 5)
+          ? analysis.description
+          : buildFallbackDescription(analysis),
         price: analysis.suggested_price || 10,
         brand: analysis.brand || '',
         brand_id: null,
@@ -2799,7 +2801,9 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
     if (missingFields.length) {
       text += `\n⚠️ *Missing:* ${missingFields.join(', ')} — tap to set`;
     } else {
+      const etaMin = Math.max(1, Math.round(estimatePostEta(c.photos.length) / 60000));
       text += `\n🟢 *All fields complete\\!* Tap POST TO VINTED to list your item, or edit any field below\\.`;
+      text += `\n⏱ _Posting runs in your real browser \\(\\~${etaMin} min\\) — slower than a direct API, but the only way to avoid account bans\\._`;
     }
 
     const errFields = new Set(L._errorFields || []);
@@ -4496,6 +4500,13 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       custom_parcel: L.custom_parcel || null,
     };
 
+    // Vinted rejects drafts whose description is <5 chars (code 99).
+    // Title is guaranteed ≥5 chars (processPhotos defaults to "Untitled item").
+    if (!draftSpec.description || draftSpec.description.trim().length < 5) {
+      console.log('[TG] createListing: description too short, falling back to title');
+      draftSpec.description = draftSpec.title;
+    }
+
     const photoCount = c.photos.length;
     const eta_ms = estimatePostEta(photoCount);
     const idempotencyKey = `tg:${chatId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
@@ -4571,6 +4582,23 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
     saveChatState(chatId);
 
     startCommandTicker(chatId, cmdId, statusMsg.message_id, acct);
+  }
+
+  // Synthesize a sensible description when the AI returns nothing usable.
+  // Stitches title + brand + condition into one short sentence so the review
+  // card has something to show and Vinted's ≥5-char validation passes.
+  function buildFallbackDescription(analysis) {
+    const title = (analysis && analysis.title) ? String(analysis.title).trim() : '';
+    const brand = (analysis && analysis.brand) ? String(analysis.brand).trim() : '';
+    const cond = (analysis && analysis.condition) ? String(analysis.condition).trim().toLowerCase() : '';
+    const parts = [];
+    if (brand && title) parts.push(`${brand} ${title}`);
+    else if (title) parts.push(title);
+    else if (brand) parts.push(brand);
+    else parts.push('Item');
+    if (cond) parts.push(`in ${cond} condition`);
+    const out = parts.join(' ') + '.';
+    return out.length >= 5 ? out : 'Pre-owned item in good condition.';
   }
 
   // Per-stage midpoints in ms, mirroring content.js executePostCommand.
