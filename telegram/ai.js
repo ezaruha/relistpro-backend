@@ -150,7 +150,8 @@ EXAMPLE 2 — Men's unbranded grey hoodie, 2 photos (front, inside label showing
     }
     const data = await resp.json();
     const raw = data.content?.[0]?.text || '';
-    return usePrefill ? '{' + raw : raw;
+    if (usePrefill && !raw.startsWith('{')) return '{' + raw;
+    return raw;
   }
 
   let text;
