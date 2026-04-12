@@ -1,14 +1,43 @@
 const { Pool } = require('pg');
 
+// Accept either a full connection string (DATABASE_URL / POSTGRES_URL /
+// DATABASE_PUBLIC_URL) or individual PG* vars (PGHOST, PGUSER, PGPASSWORD,
+// PGDATABASE, PGPORT) — Railway exposes both shapes depending on how the
+// Postgres plugin is linked.
 let pool = null;
-if (process.env.DATABASE_URL) {
+const connectionString =
+  process.env.DATABASE_URL ||
+  process.env.POSTGRES_URL ||
+  process.env.DATABASE_PUBLIC_URL ||
+  null;
+
+const hasPgVars = process.env.PGHOST && process.env.PGUSER && process.env.PGPASSWORD && process.env.PGDATABASE;
+
+if (connectionString) {
   pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
+    connectionString,
     ssl: { rejectUnauthorized: false },
     max: 10,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 5000
   });
+  console.log('[DB] Using connection string from env');
+} else if (hasPgVars) {
+  pool = new Pool({
+    host: process.env.PGHOST,
+    port: parseInt(process.env.PGPORT || '5432', 10),
+    user: process.env.PGUSER,
+    password: process.env.PGPASSWORD,
+    database: process.env.PGDATABASE,
+    ssl: { rejectUnauthorized: false },
+    max: 10,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 5000
+  });
+  console.log('[DB] Using PGHOST/PGUSER/PGPASSWORD/PGDATABASE from env');
+}
+
+if (pool) {
   pool.on('error', e => console.error('[DB] Pool error:', e.message));
 }
 
