@@ -2903,18 +2903,42 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       const cmdId = data.slice('cmd:cancel:'.length);
       const acct = activeAccount(c);
       if (!acct) return;
+      let affected = 0;
       try {
-        await db.query(
+        const r = await db.query(
           `UPDATE rp_commands
               SET status = 'cancelled', updated_at = NOW(), completed_at = NOW()
             WHERE id = $1 AND user_id = $2
-              AND status IN ('queued','claimed','in_progress')`,
+              AND status IN ('queued','claimed','in_progress')
+            RETURNING id`,
           [cmdId, acct.userId]
         );
+        affected = r.rowCount || 0;
       } catch (e) {
         console.log('[TG] cmd:cancel error:', e.message);
       }
-      // Ticker will pick up the cancelled row on its next tick and collapse the bar.
+      // Toast-style tap feedback so the user knows the tap registered
+      bot.answerCallbackQuery(query.id, { text: affected ? 'Cancelled' : 'Already finished', show_alert: false }).catch(() => {});
+      // Find the reply-to message (so the cancel confirmation lands next to
+      // the original photos) before the ticker teardown wipes the entry.
+      const tracking = (c._activeCommands && c._activeCommands[cmdId]) || {};
+      const replyToMsgId = tracking.replyToMsgId;
+      if (affected) {
+        bot.sendMessage(chatId,
+          '❌ *Cancelled\\.* Your post has been stopped\\.\n\n' +
+          '📸 Send new photos whenever you\'re ready to try again, or /menu for other options\\.',
+          {
+            parse_mode: 'MarkdownV2',
+            reply_to_message_id: replyToMsgId || undefined,
+            allow_sending_without_reply: true
+          }
+        ).catch(() => {});
+      } else {
+        bot.sendMessage(chatId,
+          'That post is already done — nothing to cancel. 📸 Send new photos to start the next one.'
+        ).catch(() => {});
+      }
+      // Ticker will also pick up the cancelled row on its next tick and collapse the bar.
       return;
     }
 
@@ -4684,10 +4708,10 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       return `✅ *Posted in ${escMd2(dur)}*\n\n${escMd2(title)}`;
     }
     if (cmd.status === 'cancelled') {
-      return `❌ *Cancelled after ${escMd2(dur)}* — partial data cleaned up\\.`;
+      return `❌ *Cancelled after ${escMd2(dur)}*\n\n📸 _Send new photos when you're ready to try again\\._`;
     }
     const err = cmd.result?.error || 'unknown error';
-    return `❌ *Post failed after ${escMd2(dur)}*\n\n${escMd2(err)}`;
+    return `❌ *Post failed after ${escMd2(dur)}*\n\n${escMd2(err)}\n\n🔁 _Tap Retry below, or send new photos to start fresh\\._`;
   }
 
   // Poll the command row and edit the status message every ~3.5 s.
