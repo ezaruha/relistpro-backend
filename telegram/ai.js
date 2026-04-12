@@ -1,5 +1,20 @@
 const { ANALYSIS_MODEL } = require('./constants');
 
+let _sharp = null;
+try { _sharp = require('sharp'); } catch (_) {}
+
+async function resizeForAI(base64) {
+  if (!_sharp) return base64;
+  try {
+    const buf = Buffer.from(base64, 'base64');
+    const out = await _sharp(buf)
+      .resize({ width: 768, height: 768, fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 80 })
+      .toBuffer();
+    return out.toString('base64');
+  } catch (_) { return base64; }
+}
+
 function extractJson(text) {
   if (!text) throw new Error('empty response');
   const fenced = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
@@ -13,9 +28,14 @@ async function analyzeWithAI(photos, caption) {
 
   const captionCtx = caption ? `\n\nThe seller provided this info: "${caption}"  — use it to fill in details like brand, size, price, etc. Trust the seller's info over visual guesses.` : '';
 
-  const imageBlocks = photos.slice(0, 20).map(p => ({
+  const selected = photos.slice(0, 5);
+  const resized = await Promise.all(selected.map(p => {
+    const raw = typeof p === 'string' ? p : p.base64 || p;
+    return resizeForAI(raw);
+  }));
+  const imageBlocks = resized.map(data => ({
     type: 'image',
-    source: { type: 'base64', media_type: 'image/jpeg', data: typeof p === 'string' ? p : p.base64 || p }
+    source: { type: 'base64', media_type: 'image/jpeg', data }
   }));
 
   const systemPrompt = `Expert Vinted UK reseller. Analyze every detail from photos to create perfect listings.
@@ -116,27 +136,26 @@ EXAMPLE 2 — Men's unbranded grey hoodie, 2 photos (front, inside label showing
       },
       body: JSON.stringify({
         model: ANALYSIS_MODEL,
-        max_tokens: 2500,
+        max_tokens: 1000,
         temperature,
         system: systemPrompt,
-        messages: [{ role: 'user', content: userContent }]
+        messages: [
+          { role: 'user', content: userContent },
+          { role: 'assistant', content: '{' }
+        ]
       })
     });
     const data = await resp.json();
-    return data.content?.[0]?.text || '';
+    const raw = data.content?.[0]?.text || '';
+    return '{' + raw;
   }
 
-  let text = await callApi(0.2);
+  const text = await callApi(0.2);
   try {
     return extractJson(text);
   } catch (e) {
-    console.warn('[TG] analyzeWithAI: first parse failed (' + e.message + '), retrying at temp=0');
-    text = await callApi(0);
-    try {
-      return extractJson(text);
-    } catch (e2) {
-      throw new Error('AI returned no valid JSON: ' + e2.message);
-    }
+    console.warn('[TG] analyzeWithAI: parse failed:', e.message);
+    throw new Error('AI returned no valid JSON: ' + e.message);
   }
 }
 
@@ -211,7 +230,7 @@ async function aiPickCategory(itemDescription, shortlist, getCategories) {
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: ANALYSIS_MODEL,
+        model: 'claude-haiku-4-5-20251001',
         max_tokens: 200,
         temperature: 0,
         system: `You are a Vinted category matcher. Given an item description, pick the 3 best matching categories from the list below. Prefer the most specific leaf category that matches the actual item type. Match the correct section (Women/Men/Kids) based on the description. Return ONLY a JSON array of category IDs (numbers), best first.\n\nCategories:\n${catList}`,
