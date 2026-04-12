@@ -719,7 +719,6 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
   // and writes them back into local chrome.cookies.
   async function performVintedRefresh(session, userId) {
     if (DISABLE_BACKEND_VINTED) {
-      console.log(`[TG] performVintedRefresh skipped (DISABLE_BACKEND_VINTED) for user ${userId}`);
       return session;
     }
     const domain = session.domain || 'www.vinted.co.uk';
@@ -803,10 +802,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     // certainly a handler running before ensureLoaded finished
     // restoring. Legitimate "clear accounts" paths (/logout all,
     // last-account logout) call saveChatAccounts directly instead.
-    if (!c.accounts?.length) {
-      console.log(`[TG] saveChatState skip: chat=${chatId} accounts=0 (race guard)`);
-      return;
-    }
+    if (!c.accounts?.length) return;
     await tableReady; // ensure table exists before writing
     try {
       const accts = JSON.stringify(c.accounts || []);
@@ -815,7 +811,6 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       const photoRefs = c.photos?.length
         ? JSON.stringify(c.photos.map(p => ({ fileId: p.fileId, _mid: p._mid })))
         : null;
-      console.log(`[TG] Saving state: chat=${chatId} accounts=${c.accounts?.length || 0} idx=${c.activeIdx} step=${c.step} photos=${c.photos?.length || 0}`);
       await db.query(
         `INSERT INTO rp_telegram_chats (chat_id, accounts, active_idx, listing, photos, wizard_idx, step)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -832,7 +827,6 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
           c.step || 'idle'
         ]
       );
-      console.log(`[TG] State saved OK for chat ${chatId}`);
     } catch (e) {
       console.error('[TG] Save state error:', e.message);
       // Fallback: at least save accounts so login persists
@@ -919,10 +913,8 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
             wizardIdx: row.wizard_idx ?? 0,
             step: row.step || 'idle'
           };
-          console.log(`[TG] Loaded state: chat=${chatId} accounts=${result.accounts.length} idx=${result.activeIdx} step=${result.step}`);
           return result;
         }
-        console.log(`[TG] No saved state for chat ${chatId}`);
         return null;
       } catch (e) {
         console.error(`[TG] Load state error (attempt ${attempt + 1}):`, e.message);
@@ -1040,7 +1032,6 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         if (vintedName && vintedName !== acct.vintedName) {
           acct.vintedName = vintedName;
           changed = true;
-          console.log(`[TG] Auto-hydrated vintedName=${vintedName} for chat ${chatId} via extension presence`);
         }
       } catch (_) { /* non-fatal — fall back to "_not detected_" */ }
     }
@@ -1156,11 +1147,8 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       c.accounts = [keep];
       c.activeIdx = 0;
       if (saved.accounts.length > 1) {
-        console.log(`[TG] Collapsed ${saved.accounts.length} RP accounts → 1 for chat ${chatId} (kept ${keep.username})`);
         // Persist the collapse so next load is clean.
         saveChatState(chatId).catch(() => {});
-      } else {
-        console.log(`[TG] Restored account for chat ${chatId}`);
       }
     }
 
@@ -1190,7 +1178,6 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
           if (recovered.length) {
             c.accounts = recovered;
             c.activeIdx = 0;
-            console.log(`[TG] Recovered ${recovered.length} account(s) for chat ${chatId} via rp_users fallback`);
             saveChatState(chatId).catch(() => {});
           }
         }
@@ -1214,7 +1201,6 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         // Re-download photos from Telegram using saved fileIds
         const photoRefs = saved.photos || [];
         if (photoRefs.length && photoRefs[0].fileId) {
-          console.log(`[TG] Re-downloading ${photoRefs.length} photo(s) from Telegram...`);
           c.photos = [];
           const os = require('os');
           const fs = require('fs');
@@ -1230,11 +1216,9 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
               console.error(`[TG] Re-download failed for ${ref.fileId}: ${e.message}`);
             }
           }
-          console.log(`[TG] Restored ${c.photos.length}/${photoRefs.length} photo(s) for chat ${chatId}`);
         } else {
           c.photos = [];
         }
-        console.log(`[TG] Restored listing for chat ${chatId} (step=${c.step})`);
       }
     }
   }
@@ -1690,12 +1674,10 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     await ensureLoaded(chatId);
     const c = getChat(chatId);
     ensureMulti(c);
-    console.log(`[TG] Photo received: chat=${chatId} accounts=${c.accounts?.length} idx=${c.activeIdx} step=${c.step}`);
     // If no account in memory, force a fresh DB load (in case save was delayed)
     if (!activeAccount(c) && db && db.hasDb()) {
       loadedFromDb.delete(chatId);
       await ensureLoaded(chatId);
-      console.log(`[TG] Force reload: accounts=${c.accounts?.length} idx=${c.activeIdx}`);
     }
     if (!activeAccount(c)) return bot.sendMessage(chatId,
       'Not connected yet.\n\n' +
@@ -1771,7 +1753,6 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     const slot = { _mid: msg.message_id, fileId: photo.file_id, base64: null };
     c.photos.push(slot);
     try {
-      console.log(`[TG] Downloading photo file_id=${photo.file_id} mid=${msg.message_id}`);
       // Use bot.downloadFile which uses the library's built-in HTTP client
       // (fetch() fails on Railway for Telegram file URLs). EFATAL errors on
       // Railway are usually transient network blips — retry 3x with backoff.
@@ -1793,7 +1774,6 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       try { fs.unlinkSync(filePath); } catch (_) {}
       if (!buffer.length) throw new Error('Empty file');
       slot.base64 = buffer.toString('base64');
-      console.log(`[TG] Photo downloaded: ${buffer.length} bytes mid=${msg.message_id}`);
     } catch (e) {
       console.error('[TG] Photo download error:', e.message);
       const idx = c.photos.indexOf(slot);
@@ -2467,7 +2447,6 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
         aiConfidence: analysis.confidence || { brand: 'medium', size: 'medium', color: 'medium' },
       };
 
-      console.log(`[TG] AI analysis: brand=${analysis.brand}, size=${analysis.size_hint}, color=${analysis.color}/${analysis.color2}, material=${analysis.material}, parcel=${analysis.parcel_size}, gender=${analysis.gender}`);
 
       saveChatState(chatId);
     } catch (e) {
@@ -3059,7 +3038,6 @@ EXAMPLE 2 — Men's unbranded grey hoodie, 2 photos (front, inside label showing
     bot.answerCallbackQuery(query.id);
     await ensureLoaded(chatId);
     const c = getChat(chatId);
-    console.log(`[TG] callback: "${data}" chat=${chatId} accounts=${c.accounts?.length || 0} idx=${c.activeIdx} step=${c.step}`);
 
     // ── Command channel: cancel an in-flight post ──
     if (data.startsWith('cmd:cancel:')) {
@@ -3794,21 +3772,18 @@ EXAMPLE 2 — Men's unbranded grey hoodie, 2 photos (front, inside label showing
     await ensureLoaded(chatId);
     const c = getChat(chatId);
 
-    console.log(`[TG] message: "${msg.text.slice(0,30)}" step=${c.step}`);
 
     // Skip slash commands — they're handled by onText handlers
     if (msg.text.startsWith('/')) return;
 
     // ── Login flow ──
     if (c.step === 'login_username') {
-      console.log(`[TG] Got username: ${msg.text.trim()}`);
       c.loginUsername = msg.text.trim();
       c.step = 'login_password';
       return bot.sendMessage(chatId, 'Got it. Now what\'s your password?');
     }
 
     if (c.step === 'login_password') {
-      console.log(`[TG] Got password for ${c.loginUsername}`);
       const password = msg.text.trim();
       const username = c.loginUsername;
       delete c.loginUsername;
@@ -4708,7 +4683,6 @@ EXAMPLE 2 — Men's unbranded grey hoodie, 2 photos (front, inside label showing
     }
     // Diagnostic — if Vinted rejects a draft with <5 chars, Railway logs make
     // it obvious whether the backend side of the field is correct.
-    console.log(`[TG] enqueue draft: title="${draftSpec.title}" (${draftSpec.title?.length || 0}), description length=${draftSpec.description?.length || 0}`);
 
     const photoCount = c.photos.length;
     const eta_ms = estimatePostEta(photoCount);
@@ -5119,7 +5093,6 @@ EXAMPLE 2 — Men's unbranded grey hoodie, 2 photos (front, inside label showing
       console.log('[TG] ensureFreshSession non-auth error:', e.message);
     }
 
-    console.log(`[TG] Posting for ${acct.username}, domain=${session.domain}, csrf=${session.csrf?.slice(0,12)}..., cookies=${session.cookies?.length} chars`);
 
     try {
       // ── Step 0: Mandatory photo re-editing when user tapped "edit duplicates" ──
@@ -5304,7 +5277,6 @@ EXAMPLE 2 — Men's unbranded grey hoodie, 2 photos (front, inside label showing
       }
       completionDraft.id = draftId; // String, matching DOTB
 
-      console.log(`[TG] Completion payload: id=${completionDraft.id}, catalog_id=${completionDraft.catalog_id}, color_ids=${JSON.stringify(completionDraft.color_ids)}, photos=${completionDraft.assigned_photos?.length}, temp_uuid=${completionDraft.temp_uuid?.slice(0,8)}...`);
 
       const completeResp = await vintedFetch(session, `/api/v2/item_upload/drafts/${draftId}/completion`, {
         method: 'POST',
