@@ -91,10 +91,10 @@ async function showMainMenu(chatId) {
   if (vintedAccounts.length > 1) {
     rows.push([{ text: '\u{1F504} Switch Vinted account', callback_data: 'menu:switch' }]);
   }
-  rows.push([{ text: '\u{1F6CD}\uFE0F Manage Vinted accounts', callback_data: 'menu:vmanage' }]);
-  rows.push([{ text: '\u{1F501} Switch RelistPro account', callback_data: 'menu:switchrp' }]);
-  rows.push([{ text: '\u{1F44B} Log out RelistPro', callback_data: 'menu:logout' }]);
-  rows.push([{ text: '\u{1F9F9} Clean up chat', callback_data: 'menu:clean' }]);
+  rows.push([
+    { text: '\u{1F511} Login another', callback_data: 'menu:switchrp' },
+    { text: '\u{1F44B} Log out', callback_data: 'menu:logout' },
+  ]);
 
   return bot.sendMessage(chatId,
     `\u{1F44B} *Welcome back*\n\n` +
@@ -131,15 +131,24 @@ async function _doLogin(chatId, username, password) {
       return bot.sendMessage(chatId, 'No Vinted session found.\n\nOpen Vinted in your Chrome browser, click the RelistPro extension and sync first. Then come back and /login again.');
     }
 
-    // Vinted display name comes from rp_sessions.vinted_name, written by
-    // the extension during sync from the user's own IP.
-    const vintedName = session.vintedName || null;
+    let vintedName = session.vintedName || null;
+    if (!vintedName && session.memberId && vintedFetch) {
+      try {
+        const resp = await vintedFetch(session, `/api/v2/users/${session.memberId}`);
+        if (resp.ok) {
+          const data = await resp.json();
+          vintedName = data?.user?.login || data?.user?.real_name || null;
+          if (vintedName) {
+            await store.setSession(user.id, { ...session, vintedName });
+          }
+        }
+      } catch (_) {}
+    }
 
     c.accounts = [{ userId: user.id, token: user.token, username: user.username, vintedName, vintedDomain: session.domain, memberId: session.memberId }];
     c.activeIdx = 0;
     c.step = 'idle';
     await saveChatState(chatId);
-    // Store telegram chat_id on the user record for dashboard linking.
     try {
       await db.query('UPDATE rp_users SET telegram_chat_id=NULL WHERE telegram_chat_id=$1 AND id<>$2', [String(chatId), user.id]);
       await db.query('UPDATE rp_users SET telegram_chat_id=$1,updated_at=NOW() WHERE id=$2', [String(chatId), user.id]);
