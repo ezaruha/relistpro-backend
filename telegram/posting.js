@@ -72,7 +72,7 @@ async function fetchVintedAccounts(chatId) {
       storedAt: row.stored_at,
       vintedName: row.vinted_name || null,
       cookiesFresh: row.stored_at
-        ? (Date.now() - new Date(row.stored_at).getTime() < 30 * 60 * 1000) : false,
+        ? (Date.now() - new Date(row.stored_at).getTime() < 4 * 60 * 60 * 1000) : false,
     }));
     const data = { accounts, plan, cap };
     _vintedAcctCache.set(chatId, { at: Date.now(), data });

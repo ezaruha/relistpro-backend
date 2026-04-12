@@ -2254,7 +2254,7 @@ app.get('/api/telegram/extension-status', auth, async (req, res) => {
       memberId: row.member_id,
       domain: row.domain,
       cookiesFresh: row.stored_at
-        ? (Date.now() - Date.parse(row.stored_at) < 30 * 60 * 1000)
+        ? (Date.now() - Date.parse(row.stored_at) < 4 * 60 * 60 * 1000)
         : false
     }));
     res.json({
