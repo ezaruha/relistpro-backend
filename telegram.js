@@ -4551,7 +4551,13 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
     }
 
     // Initial status message with cancel button
-    const initialText = renderProgress({ stage_label: 'Queued', progress_pct: 0, eta_ms });
+    const initialText = renderProgress({
+      stage_label: 'Running in your browser',
+      progress_pct: 0,
+      eta_ms,
+      elapsed_ms: 0,
+      total_ms: eta_ms
+    });
     let statusMsg;
     try {
       statusMsg = await bot.sendMessage(chatId, initialText, {
@@ -4560,7 +4566,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
       });
     } catch (e) {
       // MarkdownV2 can blow up on stray chars — fall back to plain
-      statusMsg = await bot.sendMessage(chatId, `📤 Queued — posting via your browser…`, {
+      statusMsg = await bot.sendMessage(chatId, `📤 Posting via your browser…`, {
         reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: `cmd:cancel:${cmdId}` }]] }
       });
     }
@@ -4568,6 +4574,14 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
     // Track the in-flight command on the chat so the user can pipeline another
     c._activeCommands = c._activeCommands || {};
     c._activeCommands[cmdId] = { msgId: statusMsg.message_id, startedAt: Date.now() };
+
+    // One-time pipelining tip so the user knows they don't have to wait —
+    // the bar above scrolls off quickly but this message lingers below.
+    bot.sendMessage(chatId,
+      `💡 *While this posts, you can send photos for the next item\\.* ` +
+      `They'll queue up and post one after another automatically\\.`,
+      { parse_mode: 'MarkdownV2' }
+    ).catch(() => {});
 
     // Reset wizard state — photos now owned by the command. Pipelining allowed.
     c.step = 'idle';
@@ -4629,16 +4643,22 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
     return `${m}:${String(r).padStart(2, '0')}`;
   }
 
-  function renderProgress({ stage_label, progress_pct, eta_ms, stuckInQueue }) {
-    const pct = Math.max(0, Math.min(100, progress_pct || 0));
+  function renderProgress({ stage_label, progress_pct, eta_ms, stuckInQueue, elapsed_ms, total_ms }) {
+    // If the extension hasn't reported stage progress yet, synthesise a bar
+    // from local elapsed / total so the user sees the bar filling up instead
+    // of a frozen 0% next to a counting-down timer (which looks broken).
+    let pct = Math.max(0, Math.min(100, progress_pct || 0));
+    if (pct === 0 && total_ms && elapsed_ms != null) {
+      pct = Math.max(0, Math.min(99, Math.round((elapsed_ms / total_ms) * 100)));
+    }
     const filled = Math.round(pct / 5);
     const bar = '█'.repeat(filled) + '░'.repeat(20 - filled);
     const eta = fmtDur(eta_ms || 0);
     const subtitle = stuckInQueue
       ? '_⏳ Waiting for Chrome to pick this up\\. Open a Vinted tab if your browser is asleep\\._'
-      : '_Running in your real browser with human pacing — this is the safest way to post\\. Each listing takes 3–6 min; feel free to start the next one while this runs\\._';
+      : '_💡 Send more photos now to queue another listing — they post one after another\\._';
     return (
-      `📤 *Posting to Vinted* — ${escMd2(stage_label || 'Working')}\n\n` +
+      `📤 *Posting to Vinted* — ${escMd2(stage_label || 'Running in your browser')}\n\n` +
       `\\[${bar}\\] ${pct}%\n` +
       `⏱ ~${escMd2(eta)} remaining\n\n` +
       subtitle
@@ -4719,10 +4739,12 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
         const remain = Math.max(0, totalEta - elapsed);
 
         const text = renderProgress({
-          stage_label: cmd.stage_label || (stuckInQueue ? 'Waiting for Chrome' : 'Queued'),
+          stage_label: cmd.stage_label || (stuckInQueue ? 'Waiting for Chrome' : 'Running in your browser'),
           progress_pct: cmd.progress_pct || 0,
           eta_ms: remain,
-          stuckInQueue
+          stuckInQueue,
+          elapsed_ms: elapsed,
+          total_ms: totalEta
         });
         if (text === lastText) return; // nothing changed — skip the edit
         lastText = text;
