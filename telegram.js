@@ -1724,7 +1724,13 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       c.step = 'collecting_photos';
       c.photos = [];
       c.caption = null;
+      c._firstPhotoMsgId = null;
     }
+
+    // Capture the first photo's message_id so we can reply to it on completion
+    // ("this item got posted with the title: …"). A media group's first
+    // message is the one the Telegram client scrolls the reply arrow onto.
+    if (!c._firstPhotoMsgId) c._firstPhotoMsgId = msg.message_id;
 
     if (c.step !== 'collecting_photos' && c.step !== 'collecting_photos_for_review' && c.step !== 'collecting_proof_photos') {
       return bot.sendMessage(chatId, 'Finish or /cancel your current listing first.');
@@ -2803,6 +2809,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
     } else {
       const etaMin = Math.max(1, Math.round(estimatePostEta(c.photos.length) / 60000));
       text += `\n🟢 *All fields complete\\!* Tap POST TO VINTED to list your item, or edit any field below\\.`;
+      text += `\n\n⚠️ _Double\\-check *Category* and *Colour* — the AI can get these wrong\\. Tap to change if needed\\._`;
       text += `\n⏱ _Posting runs in your real browser \\(\\~${etaMin} min\\) — slower than a direct API, but the only way to avoid account bans\\._`;
     }
 
@@ -4573,7 +4580,11 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
 
     // Track the in-flight command on the chat so the user can pipeline another
     c._activeCommands = c._activeCommands || {};
-    c._activeCommands[cmdId] = { msgId: statusMsg.message_id, startedAt: Date.now() };
+    c._activeCommands[cmdId] = {
+      msgId: statusMsg.message_id,
+      startedAt: Date.now(),
+      replyToMsgId: c._firstPhotoMsgId || null
+    };
 
     // One-time pipelining tip so the user knows they don't have to wait —
     // the bar above scrolls off quickly but this message lingers below.
@@ -4589,6 +4600,7 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
     c.listing = null;
     c.summaryMsgId = null;
     c.catalogCache = null;
+    c._firstPhotoMsgId = null;
     delete c._lastDraftId;
     delete c._retried;
     delete c._dupChecked;
@@ -4697,6 +4709,8 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
         if (['completed', 'failed', 'cancelled'].includes(cmd.status)) {
           clearInterval(intervalId);
           const c = getChat(chatId);
+          const tracking = (c._activeCommands && c._activeCommands[cmdId]) || {};
+          const replyToMsgId = tracking.replyToMsgId;
           if (c._activeCommands) delete c._activeCommands[cmdId];
           const elapsed = Date.now() - startedAt;
           const finalText = renderFinal(cmd, elapsed);
@@ -4710,9 +4724,30 @@ CONFIDENCE: For each of brand, size, color — return "high" if you're sure from
             chat_id: chatId, message_id: msgId, parse_mode: 'MarkdownV2', reply_markup: kb
           }).catch(() => {});
           saveChatState(chatId);
-          // Completion follow-ups
+          // Completion follow-ups — reply to the user's original photo message
+          // so the confirmation lives next to the photos they sent.
           if (cmd.status === 'completed') {
-            bot.sendMessage(chatId, '📸 Send more photos to list another item, or use /help to see all commands.').catch(() => {});
+            const title = cmd.result?.title || 'your item';
+            const url = cmd.result?.listing_url;
+            const body = `✅ *Posted\\!*\n\n${escMd2(title)}`;
+            const opts = {
+              parse_mode: 'MarkdownV2',
+              reply_to_message_id: replyToMsgId || undefined,
+              allow_sending_without_reply: true,
+            };
+            if (url) opts.reply_markup = { inline_keyboard: [[{ text: '🔗 View on Vinted', url }]] };
+            bot.sendMessage(chatId, body, opts).catch(e => {
+              // If the reply target vanished, retry without the reply binding
+              if (/reply/i.test(e.message)) {
+                delete opts.reply_to_message_id;
+                bot.sendMessage(chatId, body, opts).catch(() => {});
+              }
+            });
+          } else if (cmd.status === 'failed') {
+            bot.sendMessage(chatId,
+              `❌ *Post failed*\n\n${escMd2(cmd.result?.error || 'unknown error')}`,
+              { parse_mode: 'MarkdownV2', reply_to_message_id: replyToMsgId || undefined, allow_sending_without_reply: true }
+            ).catch(() => {});
           }
           return;
         }
