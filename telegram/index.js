@@ -169,6 +169,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
       getUnbrandedId: brands.getUnbrandedId,
       showSizePicker: sizes.showSizePicker,
       selectSize: sizes.selectSize,
+      autoResolveSize: sizes.autoResolveSize,
       selectPackageSize: wizard.selectPackageSize,
       createListing: posting.createListing,
       vintedFetch,

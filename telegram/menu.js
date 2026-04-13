@@ -1,7 +1,8 @@
 const { CONDITIONS, COLORS, PACKAGE_SIZES } = require('./constants');
-const { esc, clearErrorField, normalizeText } = require('./helpers');
+const { esc, clearErrorField, normalizeText, matchColor } = require('./helpers');
 const { getChat, activeAccount, ensureMulti, ensureLoaded, saveChatState, saveChatAccounts } = require('./state');
-const { aiEdit, aiSyncCompanion } = require('./ai');
+const { aiEdit, aiSyncCompanion, aiListingChat } = require('./ai');
+const { searchCategoriesByKeyword } = require('./categories');
 
 // ── Context (set once via init) ──
 let bot, db, store, app;
@@ -10,7 +11,7 @@ let bot, db, store, app;
 let doLogin, fetchVintedAccounts, invalidateVintedAcctCache, refreshVintedSession;
 let showSummary, enterEditStep;
 let wizardNext, askWizardStep, proceedToReview, processPhotos;
-let searchCategories, selectCategory;
+let searchCategories, selectCategory, autoResolveSize;
 let showSizePicker, selectSize, showPackageSizePicker, selectPackageSize;
 let searchBrands, isHighRiskBrand, triggerAuthGate, resumeAfterAuthGate,
     getUnbrandedId, getProofChecklist, stripBrandFromText, lookupVintedBrand;
@@ -22,7 +23,7 @@ function setDeps(deps) {
     doLogin, fetchVintedAccounts, invalidateVintedAcctCache, refreshVintedSession,
     showSummary, enterEditStep,
     wizardNext, askWizardStep, proceedToReview, processPhotos,
-    searchCategories, selectCategory,
+    searchCategories, selectCategory, autoResolveSize,
     showSizePicker, selectSize, showPackageSizePicker, selectPackageSize,
     searchBrands, isHighRiskBrand, triggerAuthGate, resumeAfterAuthGate,
     getUnbrandedId, getProofChecklist, stripBrandFromText, lookupVintedBrand,
@@ -472,10 +473,29 @@ function init(ctx) {
           custom_parcel: draft.custom_parcel || null,
         };
         c.step = 'review';
-        c.photos = []; // photos have to be re-sent
+        // Restore photos from the command's stored data
+        try {
+          const photoRows = await db.query(
+            `SELECT idx, data, mime FROM rp_command_photos WHERE command_id=$1 ORDER BY idx`,
+            [cmdId]
+          );
+          if (photoRows.rows.length) {
+            c.photos = photoRows.rows.map(r => ({
+              base64: Buffer.isBuffer(r.data) ? r.data.toString('base64') : r.data,
+              mime: r.mime || 'image/jpeg'
+            }));
+          } else {
+            c.photos = [];
+          }
+        } catch (_) { c.photos = []; }
         saveChatState(chatId);
-        await bot.sendMessage(chatId,
-          '\u{1F501} Reloaded the listing details. Re-send your photos, then tap \u{1F680} POST TO VINTED to try again.');
+        if (c.photos.length) {
+          await bot.sendMessage(chatId,
+            '\u{1F501} Listing reloaded with ' + c.photos.length + ' photos. Tap \u{1F680} POST TO VINTED to try again.');
+        } else {
+          await bot.sendMessage(chatId,
+            '\u{1F501} Listing reloaded but photos expired. Re-send your photos, then tap \u{1F680} POST TO VINTED.');
+        }
         return showSummary(chatId);
       } catch (e) {
         console.log('[TG] cmd:retry error:', e.message);
@@ -1416,6 +1436,99 @@ function init(ctx) {
       return bot.sendMessage(chatId, `\u{1F4F8} Send me photos of an item to list on ${acctName}!\n\nYou can also add a caption with details like "Nike hoodie size M \u00A325".`);
     }
 
+    if (c.step === 'review' && c.listing) {
+      const L = c.listing;
+      const chatListing = {
+        title: L.title, description: L.description, price: L.price,
+        brand: L.brand, material: L.material,
+        _sizeName: L.size_name || null, _categoryName: L.category_name || null,
+        _conditionName: L.condition || null, _color1Name: L.color || null,
+        _color2Name: L.color2 || null,
+      };
+      try {
+        const thinkMsg = await bot.sendMessage(chatId, '🤔');
+        const result = await aiListingChat(chatListing, msg.text);
+        bot.deleteMessage(chatId, thinkMsg.message_id).catch(() => {});
+
+        if (!result || result.type === 'answer') {
+          return bot.sendMessage(chatId,
+            (result?.text || 'I can only help with this listing.') +
+            '\n\n💡 _Type anything about this listing, or use the buttons to edit/post._',
+            { parse_mode: 'Markdown' });
+        }
+
+        if (result.type === 'change' && result.field && result.value != null) {
+          const f = result.field;
+          const v = String(result.value).trim();
+          let applied = false;
+          let failReason = null;
+
+          if (f === 'title') {
+            L.title = v.slice(0, 60); applied = true;
+          } else if (f === 'description') {
+            if (v.length >= 5) { L.description = v; applied = true; }
+            else failReason = 'Description must be at least 5 characters.';
+          } else if (f === 'price') {
+            const p = parseFloat(v);
+            if (p > 0) { L.price = p; applied = true; }
+            else failReason = 'Price must be a positive number.';
+          } else if (f === 'brand') {
+            const acct = activeAccount(c);
+            const session = acct ? await store.getSession(acct.userId).catch(() => null) : null;
+            if (session) {
+              const b = await lookupVintedBrand(session, v);
+              if (b && b.score >= 60) { L.brand_id = b.id; L.brand = b.title; applied = true; }
+              else failReason = `"${v}" not found on Vinted. Try a different brand name.`;
+            } else failReason = 'No Vinted session — can\'t look up brands right now.';
+          } else if (f === 'size') {
+            const acct = activeAccount(c);
+            const session = acct ? await store.getSession(acct.userId).catch(() => null) : null;
+            if (session && L.catalog_id) {
+              const sizeResult = await autoResolveSize(session, { catalog_id: L.catalog_id, size_hint: v });
+              if (sizeResult) { L.size_id = sizeResult.id; L.size_name = sizeResult.title; applied = true; }
+              else failReason = `"${v}" isn't a valid size for this category on Vinted.`;
+            } else failReason = L.catalog_id ? 'No Vinted session.' : 'Set a category first so I can look up sizes.';
+          } else if (f === 'category') {
+            const cats = searchCategoriesByKeyword(v);
+            if (cats.length) { L.catalog_id = cats[0].id; L.category_name = cats[0].path || cats[0].title; applied = true; }
+            else failReason = `"${v}" didn't match any Vinted category.`;
+          } else if (f === 'condition') {
+            const cond = CONDITIONS.find(x => x.label.toLowerCase() === v.toLowerCase());
+            if (cond) { L.status_id = cond.id; L.condition = cond.label; applied = true; }
+            else failReason = `"${v}" isn't a valid condition. Use: ${CONDITIONS.map(x => x.label).join(', ')}`;
+          } else if (f === 'color' || f === 'color2') {
+            const cm = matchColor(v);
+            if (cm) {
+              if (f === 'color') { L.color1_id = cm.id; L.color = cm.label; }
+              else { L.color2_id = cm.id; L.color2 = cm.label; }
+              applied = true;
+            } else failReason = `"${v}" isn't a recognised Vinted colour.`;
+          } else if (f === 'parcel') {
+            const pkg = PACKAGE_SIZES.find(p => p.title.toLowerCase() === v.toLowerCase());
+            if (pkg) { L.package_size_id = pkg.id; L.package_size_name = pkg.title; applied = true; }
+            else failReason = `"${v}" isn't valid. Use: ${PACKAGE_SIZES.map(p => p.title).join(', ')}`;
+          }
+
+          if (applied) {
+            saveChatState(chatId);
+            await bot.sendMessage(chatId, `✅ Updated *${esc(f)}*${result.text ? ' — ' + result.text : ''}`, { parse_mode: 'MarkdownV2' });
+            return showSummary(chatId);
+          } else {
+            return bot.sendMessage(chatId,
+              `⚠️ ${failReason || 'Could not apply that change.'}\n\n💡 _Type anything about this listing, or use the buttons to edit/post._`,
+              { parse_mode: 'Markdown' });
+          }
+        }
+
+        return bot.sendMessage(chatId,
+          (result.text || 'I can only help with this listing.') +
+          '\n\n💡 _Type anything about this listing, or use the buttons to edit/post._',
+          { parse_mode: 'Markdown' });
+      } catch (e) {
+        console.error('[TG] AI listing chat error:', e.message);
+        return bot.sendMessage(chatId, 'You have a listing ready for review. Use the buttons above to edit or post it, or /cancel to start over.');
+      }
+    }
     if (c.step === 'review') {
       return bot.sendMessage(chatId, 'You have a listing ready for review. Use the buttons above to edit or post it, or /cancel to start over.');
     }

@@ -140,14 +140,19 @@ function isAdminAccount(c) {
 
 function renderProgress({ stage_label, eta_ms, stuckInQueue, elapsed_ms }) {
   const elapsed = fmtDur(elapsed_ms || 0);
-  const eta = fmtDur(eta_ms || 0);
+  const overrun = !stuckInQueue && (eta_ms || 0) <= 0 && (elapsed_ms || 0) > 30000;
+  const timerLine = overrun
+    ? `⏱ ${escMd2(elapsed)} elapsed · finishing up`
+    : `⏱ ${escMd2(elapsed)} elapsed · \\~${escMd2(fmtDur(eta_ms || 0))} remaining`;
   const subtitle = stuckInQueue
     ? '_⏳ Waiting for Chrome to pick this up\\. Open a Vinted tab if your browser is asleep\\._'
-    : '_💡 Send more photos now to queue another listing\\._';
+    : overrun
+      ? '_🕐 Posts take 2\\-4 min to look natural to Vinted\\._'
+      : '_💡 Send more photos now to queue another listing\\._';
   return (
     `📤 *Posting to Vinted*\n\n` +
     `${escMd2(stage_label || 'Running in your browser')}\n` +
-    `⏱ ${escMd2(elapsed)} elapsed · \\~${escMd2(eta)} remaining\n\n` +
+    `${timerLine}\n\n` +
     subtitle
   );
 }

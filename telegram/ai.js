@@ -262,10 +262,61 @@ async function aiPickCategory(itemDescription, shortlist, getCategories) {
   }
 }
 
+async function aiListingChat(listing, question) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return { type: 'answer', text: 'AI not configured on server.' };
+  const ctx = [
+    listing.title && `Title: ${listing.title}`,
+    listing.description && `Description: ${listing.description}`,
+    listing.price && `Price: £${listing.price}`,
+    listing.brand && `Brand: ${listing.brand}`,
+    listing._sizeName && `Size: ${listing._sizeName}`,
+    listing._categoryName && `Category: ${listing._categoryName}`,
+    listing._conditionName && `Condition: ${listing._conditionName}`,
+    listing._color1Name && `Colour: ${listing._color1Name}`,
+    listing._color2Name && `Second colour: ${listing._color2Name}`,
+    listing.material && `Material: ${listing.material}`,
+  ].filter(Boolean).join('\n');
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 300,
+        temperature: 0.3,
+        system: `You are a Vinted listing assistant. You can ONLY help with this specific listing — nothing else.
+
+If the user asks a question about the listing, answer it.
+If the user asks to change a field, return a change instruction.
+If the user asks something unrelated to the listing, politely say you can only help with this listing.
+
+Current listing:
+${ctx}
+
+Respond with ONLY valid JSON (no markdown, no backticks):
+- Question: {"type":"answer","text":"your short answer"}
+- Change request: {"type":"change","field":"title|description|price|brand|size|category|condition|color|color2|parcel","value":"the new value","text":"short confirmation"}
+
+Fields: title, description, price (number), brand (brand name), size (e.g. "M", "UK 10"), category (e.g. "Women > Tops > T-shirts"), condition (New with tags|New without tags|Very good|Good|Satisfactory), color/color2 (colour name), parcel (Small|Medium|Large).`,
+        messages: [{ role: 'user', content: question }]
+      })
+    });
+    if (!resp.ok) return { type: 'answer', text: 'AI temporarily unavailable.' };
+    const data = await resp.json();
+    const raw = data.content?.[0]?.text?.trim() || '';
+    return extractJson(raw);
+  } catch (e) {
+    console.error('[TG] aiListingChat error:', e.message);
+    return { type: 'answer', text: 'Sorry, I couldn\'t process that. Try again or use the buttons.' };
+  }
+}
+
 module.exports = {
   analyzeWithAI,
   extractJson,
   aiEdit,
   aiSyncCompanion,
   aiPickCategory,
+  aiListingChat,
 };
