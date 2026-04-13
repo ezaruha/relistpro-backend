@@ -136,26 +136,25 @@ async function showSummary(chatId) {
   const acct = activeAccount(c);
   const vintedLabel = acct.vintedName ? `${acct.vintedName} @ ${acct.vintedDomain}` : acct.username;
 
-  let text = `✅ *LISTING READY*\n📤 Posting to: *${esc(vintedLabel)}*\n\n` +
-    `*Title:* ${esc(L.title)}\n\n` +
-    `*Description:*\n${esc(L.description)}\n\n` +
-    `*Price:* £${esc(String(L.price))}\n` +
-    `*Brand:* ${esc(brandDisplay)}\n` +
-    `*Condition:* ${esc(condDisplay)}\n` +
-    `*Category:* ${esc(catDisplay)}\n` +
-    `*Size:* ${esc(sizeDisplay)}\n` +
+  const titleShort = (L.title || '').length > 40 ? (L.title || '').slice(0, 37) + '...' : (L.title || '');
+  let text = `*Your listing is ready:*\n\n` +
+    `📸 ${c.photos.length} photos\n` +
+    `👕 ${esc(titleShort)}${sizeDisplay !== 'Not set' ? ' — ' + esc(sizeDisplay) : ''}\n` +
+    `💰 £${esc(String(L.price))} · ${esc(condDisplay)}\n` +
+    `📦 ${esc(pkgDisplay)}\n\n` +
+    `*Title:* ${esc(L.title)}\n` +
+    `*Description:* ${esc((L.description || '').length > 120 ? (L.description || '').slice(0, 117) + '...' : (L.description || ''))}\n` +
+    `*Brand:* ${esc(brandDisplay)} · *Category:* ${esc(catDisplay)}\n` +
     `*Colour:* ${esc(colorDisplay)}\n` +
-    `*Parcel size:* ${esc(pkgDisplay)}\n` +
-    `*Photos:* ${c.photos.length}\n`;
+    `📤 _${esc(vintedLabel)}_\n`;
 
   if (missingFields.length) {
-    text += `\n⚠️ *Missing:* ${missingFields.join(', ')} — tap to set`;
+    text += `\n⚠️ *Missing:* ${missingFields.join(', ')} — tap Edit fields to set`;
   } else {
-    const etaMin = Math.max(1, Math.round(estimatePostEta(c.photos.length) / 60000));
-    text += `\n🟢 *All fields complete\\!* Tap POST TO VINTED to list your item, or edit any field below\\.`;
-    text += `\n\n⚠️ _Double\\-check *Category* and *Colour* — the AI can get these wrong\\. Tap to change if needed\\._`;
-    text += `\n⏱ _Posting runs in your real browser \\(\\~${etaMin} min\\) — slower than a direct API, but the only way to avoid account bans\\._`;
+    text += `\n🟢 Ready to post\\!`;
   }
+
+  text += `\n\n💬 _Want to change something? Just type it\\._\n_"change price to 40" · "shorter title" · "remove brand"_`;
 
   const errFields = new Set(L._errorFields || []);
   if (errFields.size) {
@@ -185,20 +184,20 @@ async function showSummary(chatId) {
   let keyboard;
   if (justEditedPrompt) {
     keyboard = [];
-    if (ready) keyboard.push([{ text: '🚀 POST TO VINTED NOW', callback_data: 'post' }]);
+    if (ready) keyboard.push([{ text: '🚀 POST', callback_data: 'post' }]);
     keyboard.push([{ text: '✏️ Edit more', callback_data: 'edit:picker' }]);
   } else if (editMode) {
     keyboard = [
-      [{ text: warn('title', '✏️ Title'), callback_data: 'edit:title' }, { text: warn('description', '✏️ Description'), callback_data: 'edit:desc' }, { text: warn('price', '💰 Price'), callback_data: 'edit:price' }],
+      [{ text: warn('title', '✏️ Title'), callback_data: 'edit:title' }, { text: warn('description', '✏️ Desc'), callback_data: 'edit:desc' }, { text: warn('price', '💰 Price'), callback_data: 'edit:price' }],
       [{ text: warn('category', '📂 Category'), callback_data: 'pick:cat' }, { text: warn('size', '📏 Size'), callback_data: 'pick:size' }, { text: warn('brand', '🏷️ Brand'), callback_data: 'edit:brand' }],
-      [{ text: warn('color', '🎨 Colour'), callback_data: 'pick:color' }, { text: warn('condition', '📦 Condition'), callback_data: 'pick:cond' }, { text: warn('parcel', '📮 Parcel size'), callback_data: 'pick:pkg' }],
+      [{ text: warn('color', '🎨 Colour'), callback_data: 'pick:color' }, { text: warn('condition', '📦 Condition'), callback_data: 'pick:cond' }, { text: warn('parcel', '📮 Parcel'), callback_data: 'pick:pkg' }],
       [{ text: '📷 Photos', callback_data: 'edit:photos' }, { text: '⬅️ Done editing', callback_data: 'edit:done' }],
     ];
-    if (ready) keyboard.unshift([{ text: '🚀 POST TO VINTED', callback_data: 'post' }]);
+    if (ready) keyboard.unshift([{ text: '🚀 POST', callback_data: 'post' }]);
   } else {
     keyboard = [];
-    if (ready) keyboard.push([{ text: '🚀 POST TO VINTED', callback_data: 'post' }]);
-    keyboard.push([{ text: '✏️ Edit something', callback_data: 'edit:picker' }]);
+    if (ready) keyboard.push([{ text: '🚀 POST', callback_data: 'post' }, { text: '✏️ Edit fields', callback_data: 'edit:picker' }]);
+    else keyboard.push([{ text: '✏️ Edit fields', callback_data: 'edit:picker' }]);
   }
   keyboard.push([{ text: '❌ Cancel', callback_data: 'cancel' }]);
 

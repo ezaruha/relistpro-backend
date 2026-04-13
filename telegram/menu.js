@@ -1,6 +1,6 @@
 const { CONDITIONS, COLORS, PACKAGE_SIZES } = require('./constants');
-const { esc, clearErrorField, normalizeText, matchColor } = require('./helpers');
-const { getChat, activeAccount, ensureMulti, ensureLoaded, saveChatState, saveChatAccounts } = require('./state');
+const { esc, clearErrorField, normalizeText, matchColor, parseScheduleTime, escMd2 } = require('./helpers');
+const { getChat, activeAccount, ensureMulti, ensureLoaded, saveChatState, saveChatAccounts, saveListingSnapshot, loadSnapshotForCommand } = require('./state');
 const { aiEdit, aiSyncCompanion, aiListingChat } = require('./ai');
 const { searchCategoriesByKeyword } = require('./categories');
 
@@ -155,18 +155,44 @@ async function _doLogin(chatId, username, password) {
       await db.query('UPDATE rp_users SET telegram_chat_id=$1,updated_at=NOW() WHERE id=$2', [String(chatId), user.id]);
     } catch(e) { /* non-critical */ }
 
-    const vintedDisplay = vintedName || '_not detected yet \u2014 sync RelistPro from Chrome_';
-    bot.sendMessage(chatId,
-      `\u2705 *Logged in*\n\n` +
-      `\u{1F464} RelistPro: *${esc(username)}*\n` +
-      `\u{1F6CD}\uFE0F Vinted: *${esc(vintedDisplay)}* \\(${esc(session.domain)}\\)\n\n` +
-      `\u{1F4F8} Send me photos of an item to list it\\!`,
-      { parse_mode: 'MarkdownV2' });
+    const vintedDisplay = vintedName || '_not detected yet — sync RelistPro from Chrome_';
+    await bot.sendMessage(chatId,
+      `✅ Logged in!\n\n👤 RelistPro: ${username}\n🛍️ Vinted: ${vintedDisplay} (${session.domain})`);
+
+    // Start onboarding for first-time users
+    if (!c.onboarding_done) {
+      c._onboardingStep = 1;
+      return _sendOnboardingStep(chatId, c);
+    }
   } catch (e) {
     console.error('[TG] Login error:', e.message);
     c.step = 'idle';
     bot.sendMessage(chatId, 'Login failed: ' + e.message);
   }
+}
+
+// ── Onboarding ──
+const ONBOARDING_STEPS = [
+  '📸 To list an item, just send photos.\nYour first 5 photos matter most — AI reads them to detect brand, size, condition and set a price.\n\nTip: Include a label close-up and any flaws.',
+  '🤖 AI creates your listing instantly.\nYou\'ll see a summary — tap POST to publish, or type to change anything.\n\nExamples: "change price to 30", "shorter title", "is the price fair?"',
+  '⏰ You can post now or schedule for later.\nAfter tapping POST, pick a time — or type "7pm", "tomorrow morning", etc.\n\nIf a post fails, I\'ll retry it automatically. You have 5 min to cancel.',
+  '🛡 Your account is protected.\nPosts are spaced out and disguised so Vinted can\'t detect automation. If anything looks off, I\'ll pause and let you know.\n\nNeed help anytime? Just type "how do I..." and I\'ll answer.\nYou can also use /howtouse for a quick refresher.\n\nYou\'re all set! Send photos to create your first listing.',
+];
+
+async function _sendOnboardingStep(chatId, c) {
+  const step = c._onboardingStep || 1;
+  if (step > ONBOARDING_STEPS.length) {
+    c.onboarding_done = true;
+    c._onboardingStep = null;
+    c.step = 'idle';
+    saveChatState(chatId);
+    return;
+  }
+  c.step = 'onboarding';
+  const isLast = step === ONBOARDING_STEPS.length;
+  const text = ONBOARDING_STEPS[step - 1];
+  const kb = isLast ? undefined : { reply_markup: { inline_keyboard: [[{ text: '✅ Got it', callback_data: 'onboard:next' }]] } };
+  return bot.sendMessage(chatId, text, kb);
 }
 
 // ──────────────────────────────────────────
@@ -207,15 +233,33 @@ function init(ctx) {
       text += `\u2705 Connected as *${esc(connected.username)}*\n\n`;
     }
 
-    text += `/login \u2014 connect a RelistPro account\n` +
-      `/menu \u2014 switch Vinted account, manage, or clean up\n` +
-      `/status \u2014 check connection \\& Vinted session\n` +
-      `/ready \u2014 continue after fixing a failed step\n` +
-      `/cancel \u2014 abort current listing\n` +
-      `/logout \u2014 disconnect RelistPro from this chat\n\n` +
-      `*To list an item:* just send photos\\!`;
+    text += `/login — connect a RelistPro account\n` +
+      `/switch — switch Vinted accounts\n` +
+      `/status — check connection\n` +
+      `/cancel — cancel current listing\n` +
+      `/retry — resume a failed listing\n` +
+      `/howtouse — quick guide\n` +
+      `/menu — main menu\n\n` +
+      `📸 *To list:* just send photos\n` +
+      `✏️ *In review:* type "change price to 30" or "shorter title"\n` +
+      `⏰ *Schedule:* tap POST → pick a time, or type "7pm"\n` +
+      `🛡 *Safety:* posts are spaced out automatically\n\n` +
+      `💬 You can ask me anything — "how do I schedule?" or "what does this do?"`;
 
-    bot.sendMessage(msg.chat.id, text, { parse_mode: 'MarkdownV2' });
+    bot.sendMessage(msg.chat.id, text, { parse_mode: 'Markdown' });
+  });
+
+  // ── /howtouse ──
+  bot.onText(/\/howtouse(?:@\S+)?/, async (msg) => {
+    return bot.sendMessage(msg.chat.id,
+      '📸 Send photos → AI creates your listing → tap POST\n\n' +
+      'Edit: type "change price to 30" or "shorter title"\n' +
+      'Ask: "is the price fair?" or "how do I schedule?"\n' +
+      'Schedule: after POST, pick a time or type "7pm"\n' +
+      'Cancel: /cancel · Retry: /retry\n\n' +
+      'If a post fails, I\'ll auto-retry in 5 min.\n' +
+      'Need more help? Just ask me anything!'
+    );
   });
 
   // ── /login ──
@@ -453,11 +497,27 @@ function init(ctx) {
       const acct = activeAccount(c);
       if (!acct) return;
       try {
+        // Try snapshot first (has full listing + photos)
+        const snapshot = await loadSnapshotForCommand(cmdId);
+        if (snapshot) {
+          Object.assign(c, { listing: snapshot.listing });
+          c.photos = snapshot.photos.length ? snapshot.photos : [];
+          c.step = 'review';
+          saveChatState(chatId);
+          if (c.photos.length) {
+            await bot.sendMessage(chatId, `🔁 Listing restored with ${c.photos.length} photos. Review and tap POST.`);
+          } else {
+            await bot.sendMessage(chatId, '🔁 Listing restored but photos expired. Re-send your photos.');
+          }
+          return showSummary(chatId);
+        }
+
+        // Fallback: restore from command payload
         const r = await db.query(
           `SELECT payload FROM rp_commands WHERE id = $1 AND user_id = $2`,
           [cmdId, acct.userId]
         );
-        if (!r.rows.length) return bot.sendMessage(chatId, 'That command is gone from the queue \u2014 send new photos to start fresh.');
+        if (!r.rows.length) return bot.sendMessage(chatId, 'That command is gone — send new photos to start fresh.');
         const payload = r.rows[0].payload || {};
         const draft = payload.draft || {};
         c.listing = {
@@ -473,7 +533,6 @@ function init(ctx) {
           custom_parcel: draft.custom_parcel || null,
         };
         c.step = 'review';
-        // Restore photos from the command's stored data
         try {
           const photoRows = await db.query(
             `SELECT idx, data, mime FROM rp_command_photos WHERE command_id=$1 ORDER BY idx`,
@@ -490,11 +549,9 @@ function init(ctx) {
         } catch (_) { c.photos = []; }
         saveChatState(chatId);
         if (c.photos.length) {
-          await bot.sendMessage(chatId,
-            '\u{1F501} Listing reloaded with ' + c.photos.length + ' photos. Tap \u{1F680} POST TO VINTED to try again.');
+          await bot.sendMessage(chatId, `🔁 Listing reloaded with ${c.photos.length} photos. Review and tap POST.`);
         } else {
-          await bot.sendMessage(chatId,
-            '\u{1F501} Listing reloaded but photos expired. Re-send your photos, then tap \u{1F680} POST TO VINTED.');
+          await bot.sendMessage(chatId, '🔁 Listing reloaded but photos expired. Re-send your photos.');
         }
         return showSummary(chatId);
       } catch (e) {
@@ -1116,7 +1173,7 @@ function init(ctx) {
       return showSummary(chatId);
     }
 
-    // ── POST ──
+    // ── POST → schedule picker ──
     if (data === 'post') {
       if (isAdminAccount(c) && !c._dupChecked) {
         c.step = 'confirm_dup';
@@ -1130,7 +1187,137 @@ function init(ctx) {
           ]}}
         );
       }
+      // Save snapshot before showing schedule options
+      saveListingSnapshot(chatId, c).catch(() => {});
+      c.step = 'sched_input';
+      saveChatState(chatId);
+      return bot.sendMessage(chatId,
+        'When should this go live?\n\nOr type a time — "7pm", "in 2 hours", "tomorrow morning"',
+        { reply_markup: { inline_keyboard: [
+          [{ text: '🚀 Post now', callback_data: 'sched:now' }, { text: '⏰ In 1 hour', callback_data: 'sched:1h' }],
+          [{ text: '📅 Later today', callback_data: 'sched:today' }, { text: '🌅 Tomorrow', callback_data: 'sched:tomorrow' }],
+          [{ text: '📆 Pick a day', callback_data: 'sched:pick' }],
+        ]}}
+      );
+    }
+
+    // ── Schedule callbacks ──
+    if (data === 'sched:now') {
+      c.step = 'review';
       return createListing(chatId);
+    }
+    if (data === 'sched:1h') {
+      c.step = 'review';
+      return createListing(chatId, new Date(Date.now() + 60 * 60 * 1000));
+    }
+    if (data === 'sched:today' || data === 'sched:tomorrow') {
+      const tz = c.tz_offset || 0;
+      const now = new Date();
+      const localNow = new Date(now.getTime() - tz * 60000);
+      const baseDate = data === 'sched:tomorrow'
+        ? new Date(localNow.getFullYear(), localNow.getMonth(), localNow.getDate() + 1)
+        : new Date(localNow.getFullYear(), localNow.getMonth(), localNow.getDate());
+      const dateStr = `${baseDate.getFullYear()}-${String(baseDate.getMonth()+1).padStart(2,'0')}-${String(baseDate.getDate()).padStart(2,'0')}`;
+      const dayLabel = data === 'sched:tomorrow'
+        ? baseDate.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })
+        : 'today';
+      const currentLocalHour = localNow.getHours();
+      const startHour = data === 'sched:today' ? currentLocalHour + 1 : 6;
+      const rows = [];
+      let row = [];
+      for (let h = startHour; h < 24; h++) {
+        const label = h < 12 ? `${h}am` : h === 12 ? '12pm' : `${h-12}pm`;
+        row.push({ text: label, callback_data: `sched:hour:${dateStr}:${h}` });
+        if (row.length === 6) { rows.push(row); row = []; }
+      }
+      if (row.length) rows.push(row);
+      if (!rows.length) return bot.sendMessage(chatId, 'No hours left today. Try tomorrow or pick a day.');
+      return bot.sendMessage(chatId, `Pick a time for ${dayLabel}:`, { reply_markup: { inline_keyboard: rows } });
+    }
+    if (data === 'sched:pick') {
+      const tz = c.tz_offset || 0;
+      const now = new Date();
+      const localNow = new Date(now.getTime() - tz * 60000);
+      const rows = [];
+      for (let d = 0; d < 7; d++) {
+        const day = new Date(localNow.getFullYear(), localNow.getMonth(), localNow.getDate() + d);
+        const dateStr = `${day.getFullYear()}-${String(day.getMonth()+1).padStart(2,'0')}-${String(day.getDate()).padStart(2,'0')}`;
+        const label = d === 0 ? 'Today' : d === 1 ? 'Tomorrow' : day.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+        rows.push([{ text: label, callback_data: `sched:day:${dateStr}` }]);
+      }
+      return bot.sendMessage(chatId, 'Pick a day:', { reply_markup: { inline_keyboard: rows } });
+    }
+    if (data.startsWith('sched:day:')) {
+      const dateStr = data.slice('sched:day:'.length);
+      const tz = c.tz_offset || 0;
+      const now = new Date();
+      const localNow = new Date(now.getTime() - tz * 60000);
+      const [y, m, d] = dateStr.split('-').map(Number);
+      const isToday = y === localNow.getFullYear() && m === localNow.getMonth()+1 && d === localNow.getDate();
+      const startHour = isToday ? localNow.getHours() + 1 : 6;
+      const rows = [];
+      let row = [];
+      for (let h = startHour; h < 24; h++) {
+        const label = h < 12 ? `${h}am` : h === 12 ? '12pm' : `${h-12}pm`;
+        row.push({ text: label, callback_data: `sched:hour:${dateStr}:${h}` });
+        if (row.length === 6) { rows.push(row); row = []; }
+      }
+      if (row.length) rows.push(row);
+      if (!rows.length) return bot.sendMessage(chatId, 'No hours left on that day.');
+      return bot.sendMessage(chatId, `Pick a time:`, { reply_markup: { inline_keyboard: rows } });
+    }
+    if (data.startsWith('sched:hour:')) {
+      const parts = data.slice('sched:hour:'.length).split(':');
+      const dateStr = parts[0];
+      const hour = parseInt(parts[1]);
+      const tz = c.tz_offset || 0;
+      const now = new Date();
+      const localNow = new Date(now.getTime() - tz * 60000);
+      const [y, m, d] = dateStr.split('-').map(Number);
+      const isCurrentHour = y === localNow.getFullYear() && m === localNow.getMonth()+1 && d === localNow.getDate() && hour === localNow.getHours();
+      const startMin = isCurrentHour ? Math.ceil((localNow.getMinutes() + 5) / 5) * 5 : 0;
+      const rows = [];
+      let row = [];
+      for (let min = startMin; min < 60; min += 5) {
+        const ampm = hour < 12 ? 'am' : 'pm';
+        const h12 = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
+        const label = `${h12}:${String(min).padStart(2, '0')}${ampm}`;
+        row.push({ text: label, callback_data: `sched:confirm:${dateStr}:${hour}:${min}` });
+        if (row.length === 4) { rows.push(row); row = []; }
+      }
+      if (row.length) rows.push(row);
+      if (!rows.length) return bot.sendMessage(chatId, 'No time slots left in this hour.');
+      return bot.sendMessage(chatId, 'Pick the minute:', { reply_markup: { inline_keyboard: rows } });
+    }
+    if (data.startsWith('sched:confirm:')) {
+      const parts = data.slice('sched:confirm:'.length).split(':');
+      const [dateStr, hourStr, minStr] = parts;
+      const [y, mo, d] = dateStr.split('-').map(Number);
+      const h = parseInt(hourStr), m = parseInt(minStr);
+      const tz = c.tz_offset || 0;
+      const localDate = new Date(y, mo - 1, d, h, m, 0, 0);
+      const utcDate = new Date(localDate.getTime() + tz * 60000);
+      if (utcDate.getTime() - Date.now() < 5 * 60 * 1000) {
+        return bot.sendMessage(chatId, 'That time is too soon. Pick a time at least 5 minutes from now.');
+      }
+      c.step = 'review';
+      return createListing(chatId, utcDate);
+    }
+
+    // ── Onboarding ──
+    if (data === 'onboard:next') {
+      c._onboardingStep = (c._onboardingStep || 1) + 1;
+      return _sendOnboardingStep(chatId, c);
+    }
+
+    // ── Cancel auto-retry ──
+    if (data.startsWith('cancelretry:')) {
+      const cmdId = data.slice('cancelretry:'.length);
+      if (c._pendingRetry?.cmdId === cmdId) {
+        clearTimeout(c._pendingRetry.timer);
+        delete c._pendingRetry;
+      }
+      return bot.sendMessage(chatId, 'OK, cancelled. Use /retry anytime to try again manually.');
     }
 
     // ── Duplicate prompt response (admin-only) ──
@@ -1139,14 +1326,33 @@ function init(ctx) {
       c._dupEdit = true;
       c.step = 'review';
       saveChatState(chatId);
-      return createListing(chatId);
+      // Save snapshot, then go to schedule
+      saveListingSnapshot(chatId, c).catch(() => {});
+      c.step = 'sched_input';
+      return bot.sendMessage(chatId,
+        'When should this go live?\n\nOr type a time — "7pm", "in 2 hours", "tomorrow morning"',
+        { reply_markup: { inline_keyboard: [
+          [{ text: '🚀 Post now', callback_data: 'sched:now' }, { text: '⏰ In 1 hour', callback_data: 'sched:1h' }],
+          [{ text: '📅 Later today', callback_data: 'sched:today' }, { text: '🌅 Tomorrow', callback_data: 'sched:tomorrow' }],
+          [{ text: '📆 Pick a day', callback_data: 'sched:pick' }],
+        ]}}
+      );
     }
     if (data === 'dup:no') {
       c._dupChecked = true;
       c._dupEdit = false;
       c.step = 'review';
       saveChatState(chatId);
-      return createListing(chatId);
+      saveListingSnapshot(chatId, c).catch(() => {});
+      c.step = 'sched_input';
+      return bot.sendMessage(chatId,
+        'When should this go live?\n\nOr type a time — "7pm", "in 2 hours", "tomorrow morning"',
+        { reply_markup: { inline_keyboard: [
+          [{ text: '🚀 Post now', callback_data: 'sched:now' }, { text: '⏰ In 1 hour', callback_data: 'sched:1h' }],
+          [{ text: '📅 Later today', callback_data: 'sched:today' }, { text: '🌅 Tomorrow', callback_data: 'sched:tomorrow' }],
+          [{ text: '📆 Pick a day', callback_data: 'sched:pick' }],
+        ]}}
+      );
     }
     } catch (e) {
       console.error('[TG] Callback error:', e.message, e.stack);
@@ -1172,6 +1378,40 @@ function init(ctx) {
       c.loginUsername = msg.text.trim();
       c.step = 'login_password';
       return bot.sendMessage(chatId, 'Got it. Now what\'s your password?');
+    }
+
+    // ── Onboarding — skip on any text, accept "got it" / "ok" / "next" ──
+    if (c.step === 'onboarding') {
+      c._onboardingStep = (c._onboardingStep || 1) + 1;
+      return _sendOnboardingStep(chatId, c);
+    }
+
+    // ── Schedule text input — parse time expressions ──
+    if (c.step === 'sched_input' && c.listing) {
+      const tz = c.tz_offset || 0;
+      const parsed = parseScheduleTime(msg.text, tz);
+      if (parsed) {
+        c.step = 'review';
+        return createListing(chatId, parsed);
+      }
+      // Try AI chat as fallback
+      try {
+        const L = c.listing;
+        const chatListing = {
+          title: L.title, description: L.description, price: L.price,
+          brand: L.brand, _sizeName: L.size_name || null,
+        };
+        const result = await aiListingChat(chatListing, msg.text);
+        if (result?.type === 'schedule' && result.time) {
+          const aiParsed = parseScheduleTime(result.time, tz);
+          if (aiParsed) {
+            c.step = 'review';
+            return createListing(chatId, aiParsed);
+          }
+        }
+      } catch (_) {}
+      return bot.sendMessage(chatId,
+        'I didn\'t catch that. Try something like "7pm", "in 2 hours", or tap a button above.');
     }
 
     if (c.step === 'login_password') {
@@ -1454,14 +1694,33 @@ function init(ctx) {
         const result = await aiListingChat(chatListing, msg.text);
         bot.deleteMessage(chatId, thinkMsg.message_id).catch(() => {});
 
+        // Schedule request from AI
+        if (result?.type === 'schedule' && result.time) {
+          const tz = c.tz_offset || 0;
+          const parsed = parseScheduleTime(result.time, tz);
+          if (parsed) {
+            saveListingSnapshot(chatId, c).catch(() => {});
+            c.step = 'review';
+            return createListing(chatId, parsed);
+          }
+          return bot.sendMessage(chatId, `I couldn't parse "${result.time}". Try "7pm", "in 2 hours", or tap POST and use the picker.`);
+        }
+
+        // Help response
+        if (result?.type === 'help') {
+          return bot.sendMessage(chatId,
+            (result.text || 'Type /howtouse for a quick guide.') +
+            '\n\n💬 Type to edit or ask anything · /howtouse for help');
+        }
+
         if (!result || result.type === 'answer') {
           const kb = { inline_keyboard: [
-            [{ text: '🚀 POST TO VINTED', callback_data: 'post' }],
+            [{ text: '🚀 POST', callback_data: 'post' }],
             [{ text: '📋 View listing', callback_data: 'review' }, { text: '❌ Cancel', callback_data: 'cancel' }],
           ]};
           return bot.sendMessage(chatId,
             (result?.text || 'I can only help with this listing.') +
-            '\n\n💡 _Type anything about this listing, or use the buttons to edit/post._',
+            '\n\n💬 Type to edit or ask anything · /howtouse for help',
             { parse_mode: 'Markdown', reply_to_message_id: c._firstPhotoMsgId || undefined,
               allow_sending_without_reply: true, reply_markup: kb });
         }

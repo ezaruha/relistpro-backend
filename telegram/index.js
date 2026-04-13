@@ -84,6 +84,7 @@ module.exports = function initTelegram({ store, vintedFetch, verifyPassword, app
     { command: 'cancel', description: 'Abort current listing' },
     { command: 'retry',  description: 'Resume a failed listing (last 5)' },
     { command: 'logout', description: 'Disconnect current account' },
+    { command: 'howtouse', description: 'Quick guide — how to list, edit, schedule' },
     { command: 'help',   description: 'Show all commands' },
   ]).then(() => console.log('[TG] Commands menu registered'));
 

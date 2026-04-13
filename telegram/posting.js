@@ -6,7 +6,7 @@
  */
 
 const { escMd2, fmtDur, estimatePostEta, titleWithSize, normalizeText } = require('./helpers');
-const { getChat, activeAccount, ensureMulti, saveChatState, saveFailedListing } = require('./state');
+const { getChat, activeAccount, ensureMulti, saveChatState, saveFailedListing, linkSnapshotToCommand } = require('./state');
 const { ADMIN_VINTED_USERNAMES } = require('./constants');
 const { processPhotoForReupload, hasSharp } = require('./photo-edit');
 
@@ -172,7 +172,7 @@ function renderFinal(cmd, elapsedMs) {
 
 // ─── Main posting handler ───────────────────────────────────────────
 
-async function createListing(chatId) {
+async function createListing(chatId, scheduledAt) {
   const c = getChat(chatId);
   ensureMulti(c);
   const L = c.listing;
@@ -217,6 +217,21 @@ async function createListing(chatId) {
       { parse_mode: 'Markdown' }
     );
   }
+
+  // Daily limit check (25 posts/day)
+  try {
+    const today = await db.query(
+      `SELECT COUNT(*) FROM rp_commands
+       WHERE user_id=$1 AND type='post_new' AND status IN ('queued','claimed','in_progress','completed')
+       AND created_at > NOW() - INTERVAL '24 hours'`,
+      [acct.userId]
+    );
+    if (parseInt(today.rows[0].count) >= 25) {
+      c.step = 'review';
+      return bot.sendMessage(chatId,
+        '⚠️ Daily limit reached (25 posts). Try again tomorrow to keep your account safe.');
+    }
+  } catch (_) {}
 
   // Sort photos by Telegram message_id and drop failed downloads
   c.photos = c.photos.filter(p => p && p.base64).sort((a, b) => (a._mid || 0) - (b._mid || 0));
@@ -344,14 +359,17 @@ async function createListing(chatId) {
     // Enqueue the command row
     const ins = await db.query(
       `INSERT INTO rp_commands
-         (user_id, target_member_id, type, status, eta_ms, payload, source, idempotency_key)
-       VALUES ($1, $2, 'post_new', 'queued', $3, $4, 'telegram', $5)
+         (user_id, target_member_id, type, status, eta_ms, payload, source, idempotency_key, scheduled_at)
+       VALUES ($1, $2, 'post_new', 'queued', $3, $4, 'telegram', $5, $6)
        RETURNING id`,
       [acct.userId, targetMemberId, eta_ms,
        JSON.stringify({ draft: draftSpec, photo_count: photoCount }),
-       idempotencyKey]
+       idempotencyKey, scheduledAt || null]
     );
     cmdId = ins.rows[0].id;
+
+    // Link the listing snapshot (saved at review time) to this command
+    linkSnapshotToCommand(chatId, cmdId).catch(() => {});
 
     // Stage photos as bytea rows
     for (let i = 0; i < c.photos.length; i++) {
@@ -367,23 +385,32 @@ async function createListing(chatId) {
     return bot.sendMessage(chatId, `❌ Couldn't queue post: ${e.message}`);
   }
 
-  // Initial status message with cancel button
-  const initialText = renderProgress({
-    stage_label: 'Queued — waiting for Chrome',
-    eta_ms,
-    elapsed_ms: 0,
-  });
+  // Initial status message
   let statusMsg;
-  try {
-    statusMsg = await bot.sendMessage(chatId, initialText, {
-      parse_mode: 'MarkdownV2',
-      reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: `cmd:cancel:${cmdId}` }]] },
+  if (scheduledAt) {
+    const schedMs = new Date(scheduledAt).getTime();
+    const diffMin = Math.max(0, Math.round((schedMs - Date.now()) / 60000));
+    const timeStr = new Date(scheduledAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: true });
+    const schedText = `📅 Scheduled for ${timeStr}\n\nYour listing will post automatically when Chrome is open.\n\n💡 Send more photos to start another listing.`;
+    statusMsg = await bot.sendMessage(chatId, schedText, {
+      reply_markup: { inline_keyboard: [[{ text: '❌ Cancel scheduled post', callback_data: `cmd:cancel:${cmdId}` }]] },
     });
-  } catch (e) {
-    // MarkdownV2 can blow up on stray chars — fall back to plain
-    statusMsg = await bot.sendMessage(chatId, '📤 Posting via your browser…', {
-      reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: `cmd:cancel:${cmdId}` }]] },
+  } else {
+    const initialText = renderProgress({
+      stage_label: 'Queued — waiting for Chrome',
+      eta_ms,
+      elapsed_ms: 0,
     });
+    try {
+      statusMsg = await bot.sendMessage(chatId, initialText, {
+        parse_mode: 'MarkdownV2',
+        reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: `cmd:cancel:${cmdId}` }]] },
+      });
+    } catch (e) {
+      statusMsg = await bot.sendMessage(chatId, '📤 Posting via your browser…', {
+        reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: `cmd:cancel:${cmdId}` }]] },
+      });
+    }
   }
 
   // Track the in-flight command on the chat so the user can pipeline another
@@ -392,13 +419,11 @@ async function createListing(chatId) {
     msgId: statusMsg.message_id,
     startedAt: Date.now(),
     replyToMsgId: c._firstPhotoMsgId || null,
+    scheduledAt: scheduledAt || null,
   };
 
-  // One-time pipelining tip so the user knows they don't have to wait
   bot.sendMessage(chatId,
-    `💡 *While this posts, you can send photos for the next item\\.* ` +
-    `They'll queue up and post one after another automatically\\.`,
-    { parse_mode: 'MarkdownV2' }
+    '✅ Queued! Send photos for your next item anytime.'
   ).catch(() => {});
 
   // Reset wizard state — photos now owned by the command. Pipelining allowed.
@@ -476,12 +501,10 @@ function startCommandTicker(chatId, cmdId, msgId, acct) {
         }).catch(() => {});
         saveChatState(chatId);
 
-        // Completion follow-ups — reply to the user's original photo message
-        // so the confirmation lives next to the photos they sent.
         if (cmd.status === 'completed') {
           const title = cmd.result?.title || 'your item';
           const url = cmd.result?.listing_url;
-          const body = `✅ *Posted\\!*\n\n${escMd2(title)}`;
+          const body = `✅ *Posted\\!* Send more photos for your next item\\.\n\n${escMd2(title)}`;
           const opts = {
             parse_mode: 'MarkdownV2',
             reply_to_message_id: replyToMsgId || undefined,
@@ -489,19 +512,111 @@ function startCommandTicker(chatId, cmdId, msgId, acct) {
           };
           if (url) opts.reply_markup = { inline_keyboard: [[{ text: '🔗 View on Vinted', url }]] };
           bot.sendMessage(chatId, body, opts).catch(e => {
-            // If the reply target vanished, retry without the reply binding
             if (/reply/i.test(e.message)) {
               delete opts.reply_to_message_id;
               bot.sendMessage(chatId, body, opts).catch(() => {});
             }
           });
         } else if (cmd.status === 'failed') {
-          bot.sendMessage(chatId,
-            `❌ *Post failed*\n\n${escMd2(cmd.result?.error || 'unknown error')}`,
-            { parse_mode: 'MarkdownV2', reply_to_message_id: replyToMsgId || undefined, allow_sending_without_reply: true }
-          ).catch(() => {});
+          const errText = cmd.result?.error || 'unknown error';
+          const errLower = errText.toLowerCase();
+          const isBan = ['cooldown', 'banned', 'captcha', 'blocked'].some(k => errLower.includes(k));
+          const isRetryable = ['timeout', 'network', 'navigation', 'extension', 'chrome', 'crash']
+            .some(k => errLower.includes(k));
+
+          if (isRetryable && !isBan) {
+            // Auto-retry: notify user, retry in 5 min unless cancelled
+            const retryMsg = await bot.sendMessage(chatId,
+              `❌ Post failed: ${errText}\n\nI'll retry this automatically in 5 minutes when the queue is free. Tap cancel if you don't want that.`,
+              {
+                reply_to_message_id: replyToMsgId || undefined,
+                allow_sending_without_reply: true,
+                reply_markup: { inline_keyboard: [[{ text: '❌ Cancel retry', callback_data: `cancelretry:${cmdId}` }]] },
+              }
+            ).catch(() => null);
+
+            // Set up 5-min auto-retry timer
+            c._pendingRetry = {
+              cmdId,
+              acctUserId: acct.userId,
+              retryMsgId: retryMsg?.message_id,
+              timer: setTimeout(async () => {
+                if (c._pendingRetry?.cmdId !== cmdId) return;
+                delete c._pendingRetry;
+                try {
+                  // Check no active commands for this user
+                  const active = await db.query(
+                    `SELECT id FROM rp_commands WHERE user_id=$1 AND status IN ('queued','claimed','in_progress') AND id != $2`,
+                    [acct.userId, cmdId]
+                  );
+                  // Find optimal timing
+                  let retryScheduledAt = null;
+                  const lastDone = await db.query(
+                    `SELECT completed_at FROM rp_commands WHERE user_id=$1 AND status='completed' ORDER BY completed_at DESC LIMIT 1`,
+                    [acct.userId]
+                  );
+                  if (lastDone.rows[0]?.completed_at) {
+                    const sinceLastMs = Date.now() - new Date(lastDone.rows[0].completed_at).getTime();
+                    if (sinceLastMs < 10 * 60 * 1000) {
+                      retryScheduledAt = new Date(new Date(lastDone.rows[0].completed_at).getTime() + 10 * 60 * 1000);
+                    }
+                  }
+
+                  await db.query(
+                    `UPDATE rp_commands SET status='queued', result='{}', scheduled_at=$2, updated_at=NOW(), completed_at=NULL
+                     WHERE id=$1`,
+                    [cmdId, retryScheduledAt]
+                  );
+
+                  const msg = active.rows.length
+                    ? '🔁 Retrying after your current post finishes.'
+                    : '🔁 Retrying your post now.';
+                  bot.sendMessage(chatId, msg).catch(() => {});
+                  // Re-start ticker
+                  const statusMsg2 = await bot.sendMessage(chatId,
+                    renderProgress({ stage_label: 'Queued — retrying', eta_ms: estimatePostEta(4), elapsed_ms: 0 }),
+                    { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: `cmd:cancel:${cmdId}` }]] } }
+                  ).catch(() => null);
+                  if (statusMsg2) {
+                    startCommandTicker(chatId, cmdId, statusMsg2.message_id, acct);
+                  }
+                } catch (e) {
+                  console.error('[TG] auto-retry error:', e.message);
+                  bot.sendMessage(chatId, 'Auto-retry failed. Use /retry to try again manually.').catch(() => {});
+                }
+              }, 5 * 60 * 1000),
+            };
+          } else {
+            // Non-retryable failure
+            const msg = isBan
+              ? `❌ Post failed: ${errText}\n\nThis isn't a temporary issue — auto-retry is paused. Use /retry once the cooldown ends.`
+              : `❌ Post failed: ${errText}\n\nUse /retry to try again, or send new photos to start fresh.`;
+            bot.sendMessage(chatId, msg, {
+              reply_to_message_id: replyToMsgId || undefined,
+              allow_sending_without_reply: true,
+            }).catch(() => {});
+          }
         }
         return;
+      }
+
+      // Handle scheduled countdown display
+      const tracking = (getChat(chatId)._activeCommands || {})[cmdId];
+      if (tracking?.scheduledAt && cmd.status === 'queued') {
+        const schedMs = new Date(tracking.scheduledAt).getTime();
+        if (schedMs > Date.now()) {
+          const diffMin = Math.max(1, Math.round((schedMs - Date.now()) / 60000));
+          const timeStr = new Date(tracking.scheduledAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: true });
+          const schedText = `📅 Scheduled to post at ${timeStr}\n⏱ Posting in ~${diffMin} min\n\n💡 Send more photos to queue another listing.`;
+          if (schedText !== lastText) {
+            lastText = schedText;
+            await bot.editMessageText(schedText, {
+              chat_id: chatId, message_id: msgId,
+              reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: `cmd:cancel:${cmdId}` }]] },
+            }).catch(() => {});
+          }
+          return;
+        }
       }
 
       // Stuck in queue >45 s? Swap subtitle to the "open Chrome" hint.

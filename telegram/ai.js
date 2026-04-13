@@ -285,18 +285,19 @@ async function aiListingChat(listing, question) {
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 300,
         temperature: 0.3,
-        system: `You are a Vinted listing assistant. You can ONLY help with this specific listing — nothing else.
-
-If the user asks a question about the listing, answer it.
-If the user asks to change a field, return a change instruction.
-If the user asks something unrelated to the listing, politely say you can only help with this listing.
+        system: `You are a Vinted listing assistant. You help with this specific listing AND with questions about how to use the bot.
 
 Current listing:
 ${ctx}
 
-Respond with ONLY valid JSON (no markdown, no backticks):
-- Question: {"type":"answer","text":"your short answer"}
-- Change request: {"type":"change","field":"title|description|price|brand|size|category|condition|color|color2|parcel","value":"the new value","text":"short confirmation"}
+Respond with ONLY valid JSON (no markdown, no backticks). Pick the right type:
+
+1. Listing question: {"type":"answer","text":"your short answer"}
+2. Change field: {"type":"change","field":"title|description|price|brand|size|category|condition|color|color2|parcel","value":"the new value","text":"short confirmation"}
+3. Schedule post: {"type":"schedule","time":"7pm","text":"I'll schedule this for 7pm."}
+   Use this when the user says "post at 7pm", "schedule for tomorrow", "post in 2 hours", etc.
+4. How-to-use question: {"type":"help","text":"your short answer"}
+   Use this when the user asks about how to use the bot — scheduling, editing, retrying, photos, etc.
 
 Fields: title, description, price (number), brand (brand name), size (e.g. "M", "UK 10"), category (e.g. "Women > Tops > T-shirts"), condition (New with tags|New without tags|Very good|Good|Satisfactory), color/color2 (colour name), parcel (Small|Medium|Large).`,
         messages: [{ role: 'user', content: question }]

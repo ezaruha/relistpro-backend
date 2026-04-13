@@ -40,7 +40,7 @@ async function processPhotos(chatId) {
   const acctInfo = acctName ? ` for ${acctName}` : '';
 
   await bot.sendMessage(chatId,
-    `📸 Got ${c.photos.length} photo(s)${acctInfo}. Analyzing with AI — detecting brand, condition, estimating price...\n\nThis takes a few seconds.`
+    `📸 Got ${c.photos.length} photo(s)${acctInfo}. Analyzing with AI…\n\nDetecting brand, size, condition & setting a price — takes a few seconds.`
   );
 
   try {

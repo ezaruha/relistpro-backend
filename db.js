@@ -283,8 +283,28 @@ async function initSchema() {
 
       DO $$ BEGIN
         ALTER TABLE rp_users ADD COLUMN IF NOT EXISTS last_extension_poll_at TIMESTAMPTZ;
+        ALTER TABLE rp_commands ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMPTZ;
       EXCEPTION WHEN OTHERS THEN NULL;
       END $$;
+
+      -- Listing snapshots for retry persistence (last 5 per user)
+      CREATE TABLE IF NOT EXISTS rp_listing_snapshots (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        chat_id TEXT NOT NULL,
+        user_id UUID REFERENCES rp_users(id) ON DELETE CASCADE,
+        command_id UUID REFERENCES rp_commands(id) ON DELETE SET NULL,
+        listing JSONB NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_rp_listing_snap_chat ON rp_listing_snapshots(chat_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS rp_listing_snapshot_photos (
+        snapshot_id UUID NOT NULL REFERENCES rp_listing_snapshots(id) ON DELETE CASCADE,
+        idx INTEGER NOT NULL,
+        data BYTEA NOT NULL,
+        mime TEXT DEFAULT 'image/jpeg',
+        PRIMARY KEY (snapshot_id, idx)
+      );
     `);
 
     // Prune stale commands (>48h). Fire-and-forget; cascades to staged photos.

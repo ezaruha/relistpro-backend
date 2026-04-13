@@ -136,6 +136,79 @@ function withTimeout(promise, ms, label) {
   ]);
 }
 
+function parseScheduleTime(expr, tzOffsetMinutes) {
+  if (!expr) return null;
+  const s = String(expr).trim().toLowerCase();
+  const tz = typeof tzOffsetMinutes === 'number' ? tzOffsetMinutes : 0;
+  const now = new Date();
+  const localNow = new Date(now.getTime() - tz * 60000);
+
+  function toUtc(localDate) {
+    return new Date(localDate.getTime() + tz * 60000);
+  }
+  function localToday() {
+    return new Date(localNow.getFullYear(), localNow.getMonth(), localNow.getDate());
+  }
+
+  // "in X hours", "in X minutes", "in Xh", "in Xm"
+  const relMatch = s.match(/^in\s+(\d+)\s*(hours?|hrs?|h|minutes?|mins?|m)$/);
+  if (relMatch) {
+    const n = parseInt(relMatch[1]);
+    const unit = relMatch[2][0] === 'h' ? 60 : 1;
+    const target = new Date(now.getTime() + n * unit * 60000);
+    if (target.getTime() - now.getTime() < 5 * 60000) return null;
+    return target;
+  }
+
+  // "tomorrow morning/afternoon/evening"
+  const tomorrowWord = s.match(/^tomorrow\s*(morning|afternoon|evening)?$/);
+  if (tomorrowWord) {
+    const base = new Date(localToday().getTime() + 86400000);
+    const period = tomorrowWord[1];
+    let hour = 9;
+    if (period === 'afternoon') hour = 14;
+    else if (period === 'evening') hour = 19;
+    base.setHours(hour, 0, 0, 0);
+    return toUtc(base);
+  }
+
+  // "tomorrow 7pm", "tomorrow 9:30am"
+  const tomorrowTime = s.match(/^tomorrow\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/);
+  if (tomorrowTime) {
+    const base = new Date(localToday().getTime() + 86400000);
+    let h = parseInt(tomorrowTime[1]);
+    const m = tomorrowTime[2] ? parseInt(tomorrowTime[2]) : 0;
+    const ampm = tomorrowTime[3];
+    if (ampm === 'pm' && h < 12) h += 12;
+    if (ampm === 'am' && h === 12) h = 0;
+    base.setHours(h, m, 0, 0);
+    return toUtc(base);
+  }
+
+  // "7pm", "7:30pm", "19:00", "7:30 pm"
+  const timeMatch = s.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/);
+  if (timeMatch) {
+    let h = parseInt(timeMatch[1]);
+    const m = timeMatch[2] ? parseInt(timeMatch[2]) : 0;
+    const ampm = timeMatch[3];
+    if (ampm === 'pm' && h < 12) h += 12;
+    if (ampm === 'am' && h === 12) h = 0;
+    if (!ampm && h <= 12 && h >= 1) {
+      // No am/pm: if h < current local hour, likely means PM or tomorrow
+    }
+    const base = new Date(localToday());
+    base.setHours(h, m, 0, 0);
+    let utc = toUtc(base);
+    // If in the past, push to tomorrow
+    if (utc.getTime() - now.getTime() < 5 * 60000) {
+      utc = new Date(utc.getTime() + 86400000);
+    }
+    return utc;
+  }
+
+  return null;
+}
+
 module.exports = {
   esc,
   escMd2,
@@ -148,4 +221,5 @@ module.exports = {
   fmtDur,
   browserHeaders,
   withTimeout,
+  parseScheduleTime,
 };

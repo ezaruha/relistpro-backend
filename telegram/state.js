@@ -48,11 +48,13 @@ async function saveChatState(chatId) {
       ? JSON.stringify(c.photos.map(p => ({ fileId: p.fileId, _mid: p._mid })))
       : null;
     await _db.query(
-      `INSERT INTO rp_telegram_chats (chat_id, accounts, active_idx, listing, photos, wizard_idx, step)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO rp_telegram_chats (chat_id, accounts, active_idx, listing, photos, wizard_idx, step, tz_offset, onboarding_done)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (chat_id) DO UPDATE SET
          accounts=$2, active_idx=$3, listing=$4, photos=$5,
-         wizard_idx=$6, step=$7, updated_at=NOW()`,
+         wizard_idx=$6, step=$7, tz_offset=COALESCE($8, rp_telegram_chats.tz_offset),
+         onboarding_done=COALESCE($9, rp_telegram_chats.onboarding_done),
+         updated_at=NOW()`,
       [
         String(chatId),
         accts,
@@ -60,7 +62,9 @@ async function saveChatState(chatId) {
         c.listing ? JSON.stringify(c.listing) : null,
         photoRefs,
         c.wizardIdx ?? 0,
-        c.step || 'idle'
+        c.step || 'idle',
+        c.tz_offset ?? null,
+        c.onboarding_done ?? null
       ]
     );
   } catch (e) {
@@ -121,7 +125,7 @@ async function loadChatState(chatId) {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const r = await _db.query(
-        'SELECT accounts, active_idx, listing, photos, wizard_idx, step FROM rp_telegram_chats WHERE chat_id=$1',
+        'SELECT accounts, active_idx, listing, photos, wizard_idx, step, tz_offset, onboarding_done FROM rp_telegram_chats WHERE chat_id=$1',
         [String(chatId)]
       );
       if (r.rows[0]) {
@@ -137,7 +141,9 @@ async function loadChatState(chatId) {
           listing: parseJsonb(row.listing, null),
           photos: parseJsonb(row.photos, null),
           wizardIdx: row.wizard_idx ?? 0,
-          step: row.step || 'idle'
+          step: row.step || 'idle',
+          tz_offset: row.tz_offset ?? null,
+          onboarding_done: !!row.onboarding_done
         };
       }
       return null;
@@ -206,6 +212,9 @@ async function ensureLoaded(chatId) {
   if (c.accounts?.length) {
     try { await hydrateVintedNames(c, chatId); } catch (_) {}
   }
+
+  if (saved?.tz_offset != null && c.tz_offset == null) c.tz_offset = saved.tz_offset;
+  if (saved?.onboarding_done && !c.onboarding_done) c.onboarding_done = true;
 
   if (needListing) {
     loadedFromDb.add(chatId);
@@ -277,6 +286,8 @@ async function initTelegramTable() {
     await _db.query(`ALTER TABLE rp_telegram_chats ADD COLUMN IF NOT EXISTS photos JSONB`);
     await _db.query(`ALTER TABLE rp_telegram_chats ADD COLUMN IF NOT EXISTS wizard_idx INTEGER DEFAULT 0`);
     await _db.query(`ALTER TABLE rp_telegram_chats ADD COLUMN IF NOT EXISTS step TEXT DEFAULT 'idle'`);
+    await _db.query(`ALTER TABLE rp_telegram_chats ADD COLUMN IF NOT EXISTS tz_offset INTEGER`);
+    await _db.query(`ALTER TABLE rp_telegram_chats ADD COLUMN IF NOT EXISTS onboarding_done BOOLEAN DEFAULT FALSE`);
 
     await _db.query(`
       CREATE TABLE IF NOT EXISTS rp_telegram_failed_listings (
@@ -295,6 +306,89 @@ async function initTelegramTable() {
   } catch (e) { console.error('[TG] Table init error:', e.message); }
 }
 
+async function saveListingSnapshot(chatId, c) {
+  if (!_db || !_db.hasDb()) return null;
+  await _tableReady;
+  try {
+    const acct = activeAccount(c);
+    const listing = {
+      title: c.title, description: c.description, price: c.price,
+      brand_id: c.brand_id, brand_title: c.brand_title,
+      catalog_id: c.catalog_id, category_path: c.category_path,
+      size_id: c.size_id, size_title: c.size_title,
+      status_id: c.status_id, color1_id: c.color1_id, color2_id: c.color2_id,
+      package_size_id: c.package_size_id,
+      photo_count: (c.photos || []).length
+    };
+    const res = await _db.query(
+      `INSERT INTO rp_listing_snapshots (chat_id, user_id, listing)
+       VALUES ($1, $2, $3) RETURNING id`,
+      [String(chatId), acct?.userId || null, JSON.stringify(listing)]
+    );
+    const snapId = res.rows[0]?.id;
+    if (snapId && c.photos?.length) {
+      for (let i = 0; i < c.photos.length; i++) {
+        const buf = Buffer.isBuffer(c.photos[i].base64)
+          ? c.photos[i].base64
+          : Buffer.from(c.photos[i].base64, 'base64');
+        await _db.query(
+          `INSERT INTO rp_listing_snapshot_photos (snapshot_id, idx, data, mime)
+           VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+          [snapId, i, buf, c.photos[i].mime || 'image/jpeg']
+        );
+      }
+    }
+    // Keep only last 5 snapshots per chat
+    await _db.query(
+      `DELETE FROM rp_listing_snapshots WHERE chat_id=$1 AND id NOT IN (
+        SELECT id FROM rp_listing_snapshots WHERE chat_id=$1 ORDER BY created_at DESC LIMIT 5
+      )`, [String(chatId)]
+    ).catch(() => {});
+    return snapId;
+  } catch (e) {
+    console.error('[TG] saveListingSnapshot error:', e.message);
+    return null;
+  }
+}
+
+async function linkSnapshotToCommand(chatId, commandId) {
+  if (!_db || !_db.hasDb()) return;
+  await _tableReady;
+  try {
+    await _db.query(
+      `UPDATE rp_listing_snapshots SET command_id=$1
+       WHERE chat_id=$2 AND command_id IS NULL
+       ORDER BY created_at DESC LIMIT 1`,
+      [commandId, String(chatId)]
+    );
+  } catch (e) { console.error('[TG] linkSnapshot error:', e.message); }
+}
+
+async function loadSnapshotForCommand(commandId) {
+  if (!_db || !_db.hasDb()) return null;
+  await _tableReady;
+  try {
+    const snap = await _db.query(
+      `SELECT id, listing FROM rp_listing_snapshots WHERE command_id=$1`, [commandId]
+    );
+    if (!snap.rows.length) return null;
+    const row = snap.rows[0];
+    const listing = typeof row.listing === 'string' ? JSON.parse(row.listing) : row.listing;
+    const photoRows = await _db.query(
+      `SELECT idx, data, mime FROM rp_listing_snapshot_photos WHERE snapshot_id=$1 ORDER BY idx`,
+      [row.id]
+    );
+    const photos = photoRows.rows.map(r => ({
+      base64: Buffer.isBuffer(r.data) ? r.data.toString('base64') : r.data,
+      mime: r.mime || 'image/jpeg'
+    }));
+    return { listing, photos };
+  } catch (e) {
+    console.error('[TG] loadSnapshot error:', e.message);
+    return null;
+  }
+}
+
 module.exports = {
   init,
   getChat,
@@ -306,4 +400,7 @@ module.exports = {
   loadChatState,
   ensureLoaded,
   loadedFromDb,
+  saveListingSnapshot,
+  linkSnapshotToCommand,
+  loadSnapshotForCommand,
 };

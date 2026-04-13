@@ -66,6 +66,20 @@ function init({ bot, store }) {
       c.photos = [];
     }
 
+    // If a post is actively running (posting step), start a new listing queue
+    if (c.step === 'posting' || c.step === 'sched_input') {
+      c._nextListing = c._nextListing || { photos: [], caption: null };
+      c._nextListing.photos.push(msg);
+      if (msg.caption) c._nextListing.caption = msg.caption;
+      if (!c._nextListingNotified) {
+        c._nextListingNotified = true;
+        bot.sendMessage(chatId,
+          `📸 Got photos for a new listing. Your previous post is still running — this one will queue after it.`
+        ).catch(() => {});
+      }
+      return;
+    }
+
     // If mid-wizard or review (with photos already), ask user what to do
     if (c.step.startsWith('wiz_') || c.step === 'review' || c.step === 'analyzing') {
       const kb = [
@@ -84,6 +98,13 @@ function init({ bot, store }) {
       c.photos = [];
       c.caption = null;
       c._firstPhotoMsgId = null;
+      if (!c._firstPhotoTipSent) {
+        c._firstPhotoTipSent = true;
+        bot.sendMessage(chatId,
+          '📸 Send all your photos — the first 5 matter most! AI reads them to detect brand, size, condition and set a price.\n\n' +
+          'Tip: Include a label close-up and any flaws.'
+        ).catch(() => {});
+      }
     }
 
     // Capture the first photo's message_id so we can reply to it on completion

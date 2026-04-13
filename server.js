@@ -2096,10 +2096,33 @@ app.get('/api/commands/pending', auth, async (req, res) => {
       [req.user.id]
     ).catch(() => {});
 
+    // Save tz_offset from extension for Telegram scheduling
+    const tzOffset = parseInt(req.query.tz_offset);
+    if (!isNaN(tzOffset)) {
+      db.query(
+        `UPDATE rp_telegram_chats SET tz_offset=$1
+         WHERE chat_id IN (SELECT telegram_chat_id FROM rp_users WHERE id=$2)`,
+        [tzOffset, req.user.id]
+      ).catch(() => {});
+    }
+
+    // Enforce minimum gap between posts (5 min)
+    const lastDone = await db.query(
+      `SELECT completed_at FROM rp_commands
+       WHERE user_id=$1 AND status='completed' AND type='post'
+       ORDER BY completed_at DESC LIMIT 1`,
+      [req.user.id]
+    );
+    if (lastDone.rows[0]?.completed_at) {
+      const gap = Date.now() - new Date(lastDone.rows[0].completed_at).getTime();
+      if (gap < 5 * 60 * 1000) return res.status(204).end();
+    }
+
     const r = await db.query(
       `SELECT id, type, target_member_id, payload, eta_ms, created_at
          FROM rp_commands
         WHERE user_id=$1 AND status='queued'
+          AND (scheduled_at IS NULL OR scheduled_at <= NOW())
         ORDER BY created_at ASC
         LIMIT 1`,
       [req.user.id]
@@ -2191,6 +2214,20 @@ app.post('/api/commands/:id/cancel', auth, async (req, res) => {
       [req.params.id, req.user.id]
     );
     res.json({ ok:true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/commands/:id/cooldown — extension reports cooldown state.
+app.post('/api/commands/:id/cooldown', auth, async (req, res) => {
+  if (!db.hasDb()) return res.status(503).json({ error:'DB required' });
+  const { until, reason } = req.body || {};
+  try {
+    await db.query(
+      `UPDATE rp_commands SET result = result || $3, updated_at=NOW()
+       WHERE id=$1 AND user_id=$2`,
+      [req.params.id, req.user.id, JSON.stringify({ cooldown_until: until, cooldown_reason: reason })]
+    );
+    res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
