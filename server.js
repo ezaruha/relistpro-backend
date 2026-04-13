@@ -299,7 +299,17 @@ app.post('/api/auth/register', async (req, res) => {
     const hash = await hashPassword(password);
     const token = generateToken();
     await store.createUser(username, hash, token, email);
-    if (email) { mailer.sendWelcome(email, username).catch(e => console.error('[RP] Welcome email error:', e.message)); }
+    if (email && db.hasDb()) {
+      const code = String(Math.floor(100000 + Math.random() * 900000));
+      const expires = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+      const user = await store.getUser(username);
+      if (user) {
+        await db.query('UPDATE rp_users SET email_verify_code=$1, email_verify_expires=$2, email_verified=FALSE WHERE id=$3', [code, expires, user.id]);
+        mailer.sendVerificationCode(email, code).catch(e => console.error('[RP] Verification email error:', e.message));
+      }
+    } else if (email) {
+      mailer.sendWelcome(email, username).catch(e => console.error('[RP] Welcome email error:', e.message));
+    }
     res.json({ ok:true, token });
   } catch(e) { res.status(500).json({ error:e.message }); }
 });
@@ -362,6 +372,7 @@ app.get('/api/user/profile', auth, async (req, res) => {
     signedIn:true,
     username: req.user.username,
     email: req.user.email||null,
+    emailVerified: !!req.user.email_verified,
     plan,
     planInfo,
     planExpires: req.user.plan_expires_at||null,
@@ -446,6 +457,44 @@ app.post('/api/auth/reset-password', async (req, res) => {
     const hash = await hashPassword(newPassword);
     await db.query('UPDATE rp_users SET password_hash=$1,reset_code=NULL,reset_expires=NULL,updated_at=NOW() WHERE id=$2', [hash, user.id]);
     mailer.sendPasswordChanged(email.trim()).catch(e => console.error('[RP] Password-changed email error:', e.message));
+    res.json({ ok:true });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
+// ═══ EMAIL VERIFICATION ═══
+app.post('/api/auth/verify-email', auth, async (req, res) => {
+  const { code } = req.body || {};
+  if (!code) return res.status(400).json({ error:'code required' });
+  if (!db.hasDb()) return res.status(400).json({ error:'Database not configured' });
+  try {
+    const r = await db.query('SELECT email_verify_code, email_verify_expires, email, username FROM rp_users WHERE id=$1', [req.user.id]);
+    if (!r.rows[0]) return res.status(404).json({ error:'User not found' });
+    const user = r.rows[0];
+    if (!user.email_verify_code || user.email_verify_code !== String(code).trim()) return res.status(400).json({ error:'Invalid code' });
+    if (new Date(user.email_verify_expires) < new Date()) return res.status(400).json({ error:'Code expired. Use resend to get a new one.' });
+    await db.query('UPDATE rp_users SET email_verified=TRUE, email_verify_code=NULL, email_verify_expires=NULL, updated_at=NOW() WHERE id=$1', [req.user.id]);
+    if (user.email) { mailer.sendWelcome(user.email, user.username).catch(e => console.error('[RP] Welcome email error:', e.message)); }
+    res.json({ ok:true, email_verified:true });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
+app.post('/api/auth/resend-verification', auth, async (req, res) => {
+  if (!db.hasDb()) return res.status(400).json({ error:'Database not configured' });
+  try {
+    const r = await db.query('SELECT email, email_verify_expires, email_verified FROM rp_users WHERE id=$1', [req.user.id]);
+    if (!r.rows[0]) return res.status(404).json({ error:'User not found' });
+    const user = r.rows[0];
+    if (!user.email) return res.status(400).json({ error:'No email on account' });
+    if (user.email_verified) return res.json({ ok:true, already_verified:true });
+    // Rate limit: 60s between sends
+    if (user.email_verify_expires) {
+      const sentAt = new Date(user.email_verify_expires).getTime() - 15 * 60 * 1000;
+      if (Date.now() - sentAt < 60 * 1000) return res.status(429).json({ error:'Please wait before requesting another code' });
+    }
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const expires = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+    await db.query('UPDATE rp_users SET email_verify_code=$1, email_verify_expires=$2, updated_at=NOW() WHERE id=$3', [code, expires, req.user.id]);
+    mailer.sendVerificationCode(user.email, code).catch(e => console.error('[RP] Verification email error:', e.message));
     res.json({ ok:true });
   } catch(e) { res.status(500).json({ error:e.message }); }
 });
@@ -1092,7 +1141,7 @@ function browserHeaders(domain, referPath = '/') {
     'Referer': `https://${domain}${referPath}`,
     'Origin': `https://${domain}`,
     'Accept-Language': 'en-GB,en;q=0.9',
-    'sec-ch-ua': '"Google Chrome";v="120", "Chromium";v="120", "Not=A?Brand";v="24"',
+    'sec-ch-ua': '"Google Chrome";v="136", "Chromium";v="136", "Not=A?Brand";v="24"',
     'sec-ch-ua-mobile': '?0',
     'sec-ch-ua-platform': '"Windows"',
     'sec-fetch-dest': 'empty',
@@ -1111,7 +1160,7 @@ async function vintedFetch(session, urlPath, options = {}) {
       'X-CSRF-Token': session.csrf,
       'Content-Type': 'application/json',
       'Accept': 'application/json, text/plain, */*',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
       ...browserHeaders(domain, options.referPath || '/'),
       ...(options.headers || {})
     },
@@ -1204,7 +1253,7 @@ async function reuploadPhotos(session, photos) {
     try {
       const photoUrl = photo.full_size_url || photo.url || photo.high_resolution?.url;
       if (!photoUrl) { console.log(`[RP] Photo ${photo.id}: no URL, skipping`); continue; }
-      const imgResp = await fetch(photoUrl, { headers:{ 'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } });
+      const imgResp = await fetch(photoUrl, { headers:{ 'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36' } });
       if (!imgResp.ok) { console.log(`[RP] Photo ${photo.id}: fetch failed (${imgResp.status}), skipping`); continue; }
       const imgBuffer = await imgResp.arrayBuffer();
       const uuid = crypto.randomBytes(16).toString('hex');
@@ -1217,7 +1266,7 @@ async function reuploadPhotos(session, photos) {
         headers:{
           'Cookie': session.cookies,
           'X-CSRF-Token': session.csrf,
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
           ...browserHeaders(domain, '/items/new')
         },
         body:form
@@ -1225,7 +1274,7 @@ async function reuploadPhotos(session, photos) {
       if (uploadResp.ok) {
         const data = await uploadResp.json();
         const newId = data.photo?.id || data.id;
-        if (newId) { results.push({ id:newId, orientation:photo.orientation||0 }); await new Promise(r => setTimeout(r,300)); continue; }
+        if (newId) { results.push({ id:newId, orientation:photo.orientation||0 }); await new Promise(r => setTimeout(r, 1500 + Math.random() * 1500)); continue; }
       }
     } catch(e) { console.log(`[RP] Photo ${photo.id}: error ${e.message}, skipping`); }
   }
@@ -1346,7 +1395,7 @@ app.post('/api/vinted/items/:itemId/repost', auth, async (req, res) => {
           console.log(`[RP] Recovered item ${itemId} from backup — title: ${item.title}`);
         }
       }
-      if (!item) return res.status(404).json({ error:'Item not found on Vinted and no backup available' });
+      if (!item) { await releaseRepostLock(req.user.id, itemId); return res.status(404).json({ error:'Item not found on Vinted and no backup available' }); }
     }
     let freshPhotos;
     if (browserPhotos && browserPhotos.length > 0) {
@@ -1367,18 +1416,19 @@ app.post('/api/vinted/items/:itemId/repost', auth, async (req, res) => {
     });
     if (!createResp.ok) {
       const err = await createResp.json().catch(() => ({}));
+      await releaseRepostLock(req.user.id, itemId);
       return res.status(createResp.status).json({ error:'Draft creation failed', details:err });
     }
     const newDraft = (await createResp.json()).draft;
     const newId = String(newDraft?.id || '');
-    if (!newId) return res.status(500).json({ error:'No draft id returned' });
+    if (!newId) { await releaseRepostLock(req.user.id, itemId); return res.status(500).json({ error:'No draft id returned' }); }
     // Draft exists — delete old item NOW (backup already saved above)
     await deleteVintedItem(session, itemId, 'RP');
     // Refresh & complete the new draft
-    await new Promise(r => setTimeout(r, 800 + Math.random() * 400));
+    await new Promise(r => setTimeout(r, 2000 + Math.random() * 3000));
     const refreshResp = await vintedFetch(session, `/api/v2/item_upload/items/${newId}`);
     const refreshedItem = refreshResp.ok ? (await refreshResp.json()).item : null;
-    await new Promise(r => setTimeout(r, 1000 + Math.random() * 500));
+    await new Promise(r => setTimeout(r, 3000 + Math.random() * 5000));
     const completionDraft = refreshedItem ? buildDraftPayload(refreshedItem) : { ...draft, id:parseInt(newId) };
     completionDraft.id = parseInt(newId);
     completionDraft.assigned_photos = freshPhotos;
@@ -1471,10 +1521,10 @@ app.post('/api/repost-queue', auth, async (req, res) => {
         // Draft exists — delete old item NOW (backup already saved above)
         await deleteVintedItem(session, itemId, 'RP-queue');
         // Refresh & complete the new draft
-        await new Promise(r => setTimeout(r, 800 + Math.random() * 400));
+        await new Promise(r => setTimeout(r, 2000 + Math.random() * 3000));
         const refreshResp = await vintedFetch(session, `/api/v2/item_upload/items/${newId}`);
         const refreshedItem = refreshResp.ok ? (await refreshResp.json()).item : null;
-        await new Promise(r => setTimeout(r, 1000 + Math.random() * 500));
+        await new Promise(r => setTimeout(r, 3000 + Math.random() * 5000));
         const completionDraft = refreshedItem ? buildDraftPayload(refreshedItem) : { ...draft, id:parseInt(newId) };
         completionDraft.id = parseInt(newId);
         completionDraft.assigned_photos = freshPhotos;
@@ -1495,8 +1545,12 @@ app.post('/api/repost-queue', auth, async (req, res) => {
           await logAction(userId, 'repost', { itemId, itemTitle:item.title, status:'failed', details:{ source:'backend-queue', error:`Publish failed (${completeResp.status})` } });
         }
         await releaseRepostLock(userId, itemId);
-        // Stagger between items
-        if (i < itemIds.length - 1) await new Promise(r => setTimeout(r, 60000 + Math.random() * 60000));
+        // Stagger between items — first item starts immediately, then 3-6 min gaps
+        // Every 5 items, take a longer 5-10 min break to look human
+        if (i < itemIds.length - 1) {
+          var stagger = (i > 0 && (i + 1) % 5 === 0) ? 300000 + Math.random() * 300000 : 180000 + Math.random() * 180000;
+          await new Promise(r => setTimeout(r, stagger));
+        }
       } catch (e) {
         await releaseRepostLock(userId, itemId);
         console.error(`[RP-queue] Error for ${itemId}:`, e.message);
@@ -1614,7 +1668,7 @@ app.post('/api/vinted/photos/upload', auth, async (req, res) => {
       headers: {
         'Cookie': session.cookies,
         'X-CSRF-Token': session.csrf,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
         ...browserHeaders(domain, '/items/new')
       },
       body: form
@@ -1824,10 +1878,10 @@ async function checkAllSchedules() {
           // Draft exists — delete old item NOW (backup already saved above)
           await deleteVintedItem(session, itemId, 'RP-cron');
           // Refresh & complete the new draft
-          await new Promise(r => setTimeout(r, 800 + Math.random() * 400));
+          await new Promise(r => setTimeout(r, 2000 + Math.random() * 3000));
           const refreshResp = await vintedFetch(session, `/api/v2/item_upload/items/${newId}`);
           const refreshedItem = refreshResp.ok ? (await refreshResp.json()).item : null;
-          await new Promise(r => setTimeout(r, 1000 + Math.random() * 500));
+          await new Promise(r => setTimeout(r, 3000 + Math.random() * 5000));
           const completionDraft = refreshedItem ? buildDraftPayload(refreshedItem) : { ...draft, id: parseInt(newId) };
           completionDraft.id = parseInt(newId);
           completionDraft.assigned_photos = freshPhotos;
@@ -1849,7 +1903,7 @@ async function checkAllSchedules() {
                 const newItems = items.map(id => id === itemId ? newId : id);
                 await db.query('UPDATE rp_schedules SET item_ids=$1 WHERE id=$2 AND user_id=$3', [newItems, row.id, userId]);
                 items[j] = newId; // Update in-memory too for remaining iterations
-              } catch (_) {}
+              } catch (e) { console.error('[RP-cron] Failed to update schedule item:', e.message); }
             }
             const newItem = Object.assign({}, item, { id: newId });
             await saveItemBackup(userId, newItem, (user && user.plan) || 'free');
@@ -1859,9 +1913,10 @@ async function checkAllSchedules() {
           }
 
           await releaseRepostLock(userId, itemId);
-          // Stagger between items
+          // Stagger between items — 3-6 min gaps, longer break every 5 items
           if (j < items.length - 1) {
-            await new Promise(r => setTimeout(r, 60000 + Math.random() * 60000));
+            var stagger = (j > 0 && (j + 1) % 5 === 0) ? 300000 + Math.random() * 300000 : 180000 + Math.random() * 180000;
+            await new Promise(r => setTimeout(r, stagger));
           }
         } catch (e) {
           await releaseRepostLock(userId, itemId);
@@ -1908,6 +1963,20 @@ async function logAction(userId, type, data) {
             }
           }
         }
+      } catch(e) { /* non-critical */ }
+    }
+    // Failure notification emails
+    if ((data.status || 'success') === 'failed') {
+      try {
+        const user = await store.getUserById(userId);
+        const errMsg = (data.details && data.details.error) || 'Unknown error';
+        const src = (data.details && data.details.source) || type;
+        if (user && user.email) {
+          mailer.sendFailureNotification(user.email, data.itemTitle, errMsg, src)
+            .catch(e => console.error('[RP] Failure email error:', e.message));
+        }
+        mailer.sendAdminFeedback(userId, user?.username || 'unknown', data.itemTitle, errMsg, src)
+          .catch(e => console.error('[RP] Admin feedback error:', e.message));
       } catch(e) { /* non-critical */ }
     }
   } catch (e) { console.error('[RP-cron] logAction error:', e.message); }
@@ -2109,7 +2178,7 @@ app.get('/api/commands/pending', auth, async (req, res) => {
     // Enforce minimum gap between posts (5 min)
     const lastDone = await db.query(
       `SELECT completed_at FROM rp_commands
-       WHERE user_id=$1 AND status='completed' AND type='post'
+       WHERE user_id=$1 AND status='completed' AND type='post_new'
        ORDER BY completed_at DESC LIMIT 1`,
       [req.user.id]
     );
@@ -2199,6 +2268,19 @@ app.post('/api/commands/:id/complete', auth, async (req, res) => {
     );
     // Drop staged photos — the row itself is kept for the ticker + audit.
     try { await db.query('DELETE FROM rp_command_photos WHERE command_id=$1', [req.params.id]); } catch(_) {}
+    // Failure notification emails for post commands
+    if (status === 'failed') {
+      try {
+        const user = await store.getUserById(req.user.id);
+        const errMsg = (result && result.error) || 'Unknown error';
+        if (user && user.email) {
+          mailer.sendFailureNotification(user.email, result?.title || 'listing', errMsg, 'telegram-post')
+            .catch(e => console.error('[RP] Post failure email error:', e.message));
+        }
+        mailer.sendAdminFeedback(req.user.id, user?.username || req.user.username, result?.title, errMsg, 'telegram-post')
+          .catch(e => console.error('[RP] Admin feedback error:', e.message));
+      } catch(e) { /* non-critical */ }
+    }
     res.json({ ok:true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

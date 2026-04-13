@@ -284,6 +284,10 @@ async function initSchema() {
       DO $$ BEGIN
         ALTER TABLE rp_users ADD COLUMN IF NOT EXISTS last_extension_poll_at TIMESTAMPTZ;
         ALTER TABLE rp_commands ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMPTZ;
+        -- Email verification
+        ALTER TABLE rp_users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT FALSE;
+        ALTER TABLE rp_users ADD COLUMN IF NOT EXISTS email_verify_code TEXT;
+        ALTER TABLE rp_users ADD COLUMN IF NOT EXISTS email_verify_expires TIMESTAMPTZ;
       EXCEPTION WHEN OTHERS THEN NULL;
       END $$;
 

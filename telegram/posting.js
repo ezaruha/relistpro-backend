@@ -475,12 +475,37 @@ function startCommandTicker(chatId, cmdId, msgId, acct) {
       }
 
       const r = await db.query(
-        `SELECT id, status, stage, stage_label, progress_pct, eta_ms, result, created_at
+        `SELECT id, status, stage, stage_label, progress_pct, eta_ms, result, created_at, updated_at
            FROM rp_commands WHERE id = $1 AND user_id = $2`,
         [cmdId, acct.userId]
       );
       if (!r.rows.length) { clearInterval(intervalId); return; }
       const cmd = r.rows[0];
+
+      // Stale detection: if extension hasn't updated in 5 min, it's gone
+      const updatedAt = cmd.updated_at ? new Date(cmd.updated_at).getTime() : 0;
+      const staleSec = updatedAt ? (Date.now() - updatedAt) / 1000 : 0;
+      if (['in_progress', 'claimed'].includes(cmd.status) && staleSec > 300) {
+        clearInterval(intervalId);
+        const staleErr = { error: 'Extension stopped responding. Your item may be saved as a draft on Vinted — check your drafts and try /retry.' };
+        await db.query(
+          `UPDATE rp_commands SET status='failed', result=$3, completed_at=NOW(), updated_at=NOW()
+           WHERE id=$1 AND user_id=$2 AND status NOT IN ('completed','failed','cancelled')`,
+          [cmdId, acct.userId, staleErr]
+        ).catch(() => {});
+        const staleText = renderFinal({ status: 'failed', result: staleErr }, Date.now() - startedAt);
+        await bot.editMessageText(staleText, {
+          chat_id: chatId, message_id: msgId, parse_mode: 'MarkdownV2',
+          reply_markup: { inline_keyboard: [[{ text: '🔁 Retry', callback_data: `cmd:retry:${cmdId}` }]] },
+        }).catch(() => {});
+        bot.sendMessage(chatId,
+          '⚠️ Extension stopped responding after 5 minutes. Check your Vinted drafts — your item may have been saved but not published.\n\nUse /retry to try again.'
+        ).catch(() => {});
+        const c = getChat(chatId);
+        if (c._activeCommands) delete c._activeCommands[cmdId];
+        saveChatState(chatId);
+        return;
+      }
 
       if (['completed', 'failed', 'cancelled'].includes(cmd.status)) {
         clearInterval(intervalId);
@@ -504,13 +529,16 @@ function startCommandTicker(chatId, cmdId, msgId, acct) {
         if (cmd.status === 'completed') {
           const title = cmd.result?.title || 'your item';
           const url = cmd.result?.listing_url;
-          const body = `✅ *Posted\\!* Send more photos for your next item\\.\n\n${escMd2(title)}`;
+          const body = `✅ *Posted\\!*\n\n${escMd2(title)}\n\n📸 _Send photos for your next item, or use the options below\\._`;
+          const compKb = { inline_keyboard: [] };
+          if (url) compKb.inline_keyboard.push([{ text: '🔗 View on Vinted', url }]);
+          compKb.inline_keyboard.push([{ text: '📸 List another item', callback_data: 'menu:continue' }]);
           const opts = {
             parse_mode: 'MarkdownV2',
             reply_to_message_id: replyToMsgId || undefined,
             allow_sending_without_reply: true,
+            reply_markup: compKb,
           };
-          if (url) opts.reply_markup = { inline_keyboard: [[{ text: '🔗 View on Vinted', url }]] };
           bot.sendMessage(chatId, body, opts).catch(e => {
             if (/reply/i.test(e.message)) {
               delete opts.reply_to_message_id;
@@ -662,7 +690,7 @@ function startCommandTicker(chatId, cmdId, msgId, acct) {
         chat_id: chatId, message_id: msgId, parse_mode: 'MarkdownV2',
         reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: `cmd:cancel:${cmdId}` }]] },
       }).catch(e => {
-        if (/429/.test(e.message)) { /* Telegram rate limit, next tick will catch up */ }
+        if (/429/.test(e.message)) { setTimeout(() => {}, 10000); }
         else if (/message is not modified/i.test(e.message)) { /* ignore */ }
         else console.log('[TG] ticker edit error:', e.message);
       });

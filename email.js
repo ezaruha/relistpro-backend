@@ -95,6 +95,38 @@ async function sendQuotaWarning(to, used, limit, planName) {
   ));
 }
 
+async function sendVerificationCode(to, code) {
+  return send(to, 'Verify your email — RelistPro', wrap('Email Verification',
+    `<h2 style="color:#1d1d1f;margin:0 0 12px">Verify your email</h2>
+    <p style="color:#424245;line-height:1.6;font-size:15px">Enter this code in the app to verify your email address:</p>
+    <div style="text-align:center;margin:24px 0">
+      <span style="display:inline-block;font-size:32px;font-weight:700;letter-spacing:8px;color:#1d1d1f;background:#f5f5f7;padding:16px 32px;border-radius:12px">${code}</span>
+    </div>
+    <p style="color:#86868b;font-size:13px;text-align:center">This code expires in 15 minutes. If you didn't create this account, ignore this email.</p>`
+  ));
+}
+
+async function sendFailureNotification(to, itemTitle, errorMsg, source) {
+  return send(to, 'Action Failed — ' + (itemTitle || 'item'), wrap('Action Failed',
+    `<h2 style="color:#e53e3e;margin:0 0 12px">Something went wrong</h2>
+    <p style="color:#424245;line-height:1.6;font-size:15px"><strong>Item:</strong> ${esc(itemTitle || 'Unknown')}</p>
+    <p style="color:#424245;line-height:1.6;font-size:15px"><strong>Error:</strong> ${esc(errorMsg)}</p>
+    <p style="color:#424245;line-height:1.6;font-size:15px"><strong>Source:</strong> ${esc(source)}</p>
+    <p style="color:#424245;font-size:14px">Open RelistPro to retry, or reply to this email if you need help.</p>`
+  ));
+}
+
+async function sendAdminFeedback(userId, username, itemTitle, errorMsg, source) {
+  return send('ezaruha@icloud.com', '[RelistPro Feedback] Failure: ' + source, wrap('Failure Report',
+    `<h2 style="color:#e53e3e;margin:0 0 12px">User Failure Report</h2>
+    <p style="color:#424245;line-height:1.6;font-size:15px"><strong>User:</strong> ${esc(username)} (${esc(userId)})</p>
+    <p style="color:#424245;line-height:1.6;font-size:15px"><strong>Item:</strong> ${esc(itemTitle || 'Unknown')}</p>
+    <p style="color:#424245;line-height:1.6;font-size:15px"><strong>Error:</strong> ${esc(errorMsg)}</p>
+    <p style="color:#424245;line-height:1.6;font-size:15px"><strong>Source:</strong> ${esc(source)}</p>
+    <p style="color:#424245;line-height:1.6;font-size:15px"><strong>Time:</strong> ${new Date().toISOString()}</p>`
+  ));
+}
+
 function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
-module.exports = { sendWelcome, sendPasswordResetCode, sendPasswordChanged, sendPlanUpgraded, sendSubscriptionCancelled, sendQuotaWarning };
+module.exports = { sendWelcome, sendPasswordResetCode, sendPasswordChanged, sendPlanUpgraded, sendSubscriptionCancelled, sendQuotaWarning, sendVerificationCode, sendFailureNotification, sendAdminFeedback };

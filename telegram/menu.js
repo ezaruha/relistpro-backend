@@ -747,9 +747,12 @@ function init(ctx) {
 
     // ── Resume / New listing ──
     if (data === 'resume') {
+      if (c.pendingPhoto) { delete c.pendingPhoto; }
+      if (c.step === 'review' && c.listing) { return showSummary(chatId); }
       return askWizardStep(chatId);
     }
     if (data === 'newlisting') {
+      const pending = c.pendingPhoto;
       c.step = 'collecting_photos';
       c.photos = [];
       c.listing = null;
@@ -757,8 +760,11 @@ function init(ctx) {
       c.wizardIdx = 0;
       c.catalogCache = null;
       c.caption = null;
+      c._firstPhotoMsgId = null;
+      delete c.pendingPhoto;
       saveChatState(chatId);
-      bot.editMessageText('Previous listing discarded. Send photos for your new item.', { chat_id: chatId, message_id: query.message.message_id });
+      bot.editMessageText('Previous listing discarded. Starting fresh with your new photo(s).', { chat_id: chatId, message_id: query.message.message_id }).catch(() => {});
+      if (pending) { bot.emit('photo', pending); }
       return;
     }
 
@@ -1175,7 +1181,7 @@ function init(ctx) {
 
     // ── POST → schedule picker ──
     if (data === 'post') {
-      if (isAdminAccount(c) && !c._dupChecked) {
+      if (!c._dupChecked) {
         c.step = 'confirm_dup';
         saveChatState(chatId);
         return bot.sendMessage(chatId,
