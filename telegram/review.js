@@ -127,10 +127,11 @@ async function showSummary(chatId) {
   const brandDisplay = L.brand || 'Not set';
   const pkgDisplay = L.package_size_name || (L.package_size_id ? `ID: ${L.package_size_id}` : 'Not set');
 
-  const ready = L.catalog_id && L.price > 0 && L.status_id;
   const missingFields = [];
   if (!L.catalog_id) missingFields.push('Category');
   if (!L.package_size_id) missingFields.push('Parcel size');
+  if (!L.color1_id) missingFields.push('Colour');
+  const ready = L.catalog_id && L.price > 0 && L.status_id && L.package_size_id && L.color1_id;
 
   ensureMulti(c);
   const acct = activeAccount(c);

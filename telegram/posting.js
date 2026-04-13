@@ -186,6 +186,17 @@ async function createListing(chatId, scheduledAt) {
     c.step = 'review';
     return showSummary(chatId);
   }
+  // Vinted keeps items as drafts if required fields are missing
+  const missingForPublish = [];
+  if (!L.package_size_id) missingForPublish.push('Parcel size');
+  if (!L.color1_id) missingForPublish.push('Colour');
+  if (missingForPublish.length) {
+    c.step = 'review';
+    bot.sendMessage(chatId,
+      `⚠️ Can't publish yet — Vinted requires: ${missingForPublish.join(', ')}.\n\nWithout these, your item will stay as a draft. Tap Edit to set them.`
+    ).catch(() => {});
+    return showSummary(chatId);
+  }
   if (!acct) {
     c.step = 'idle';
     return bot.sendMessage(chatId, 'Not connected. Use /login first, then send photos.');
