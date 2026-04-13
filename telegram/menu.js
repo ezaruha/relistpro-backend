@@ -706,6 +706,10 @@ function init(ctx) {
     }
 
     // ── Cancel ──
+    if (data === 'review') {
+      return showSummary(chatId);
+    }
+
     if (data === 'cancel') {
       c.step = 'idle';
       c.photos = [];
@@ -1451,10 +1455,15 @@ function init(ctx) {
         bot.deleteMessage(chatId, thinkMsg.message_id).catch(() => {});
 
         if (!result || result.type === 'answer') {
+          const kb = { inline_keyboard: [
+            [{ text: '🚀 POST TO VINTED', callback_data: 'post' }],
+            [{ text: '📋 View listing', callback_data: 'review' }, { text: '❌ Cancel', callback_data: 'cancel' }],
+          ]};
           return bot.sendMessage(chatId,
             (result?.text || 'I can only help with this listing.') +
             '\n\n💡 _Type anything about this listing, or use the buttons to edit/post._',
-            { parse_mode: 'Markdown' });
+            { parse_mode: 'Markdown', reply_to_message_id: c._firstPhotoMsgId || undefined,
+              allow_sending_without_reply: true, reply_markup: kb });
         }
 
         if (result.type === 'change' && result.field && result.value != null) {
@@ -1511,8 +1520,18 @@ function init(ctx) {
 
           if (applied) {
             saveChatState(chatId);
-            await bot.sendMessage(chatId, `✅ Updated *${esc(f)}*${result.text ? ' — ' + result.text : ''}`, { parse_mode: 'MarkdownV2' });
-            return showSummary(chatId);
+            const confirmText = `✅ Updated *${esc(f)}*${result.text ? ' \\— ' + esc(result.text) : ''}\n\n` +
+              `💡 _Type to keep editing, or tap a button below\\._`;
+            const kb = { inline_keyboard: [
+              [{ text: '🚀 POST TO VINTED', callback_data: 'post' }],
+              [{ text: '📋 View listing', callback_data: 'review' }, { text: '❌ Cancel', callback_data: 'cancel' }],
+            ]};
+            return bot.sendMessage(chatId, confirmText, {
+              parse_mode: 'MarkdownV2',
+              reply_to_message_id: c._firstPhotoMsgId || undefined,
+              allow_sending_without_reply: true,
+              reply_markup: kb,
+            });
           } else {
             return bot.sendMessage(chatId,
               `⚠️ ${failReason || 'Could not apply that change.'}\n\n💡 _Type anything about this listing, or use the buttons to edit/post._`,
